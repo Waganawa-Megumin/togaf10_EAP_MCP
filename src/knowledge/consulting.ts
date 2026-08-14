@@ -1,0 +1,403 @@
+/**
+ * コンサルティングルール / Situation-to-guidance rules.
+ *
+ * 状況の自由記述に含まれるキーワードから、着目すべきフェーズ・技法・成果物と
+ * 推奨アクション・確認質問を導く。独自の実務知見に基づくルール。
+ */
+
+import type { ConsultRule } from './types.js';
+
+export const CONSULT_RULES: ConsultRule[] = [
+  {
+    id: 'legacy-modernization',
+    name: { ja: 'レガシーシステムの刷新', en: 'Legacy Modernization' },
+    keywords: [
+      'レガシー', '刷新', '基幹系', '基幹システム', '老朽', 'メインフレーム', 'リプレース', '再構築', '塩漬け', '2025年の崖', 'cobol',
+      'legacy', 'modernization', 'modernisation', 'mainframe', 'replatform', 'rewrite', 'end of life', 'eol',
+    ],
+    diagnosis: {
+      ja: 'レガシー刷新は技術課題に見えて、実際は「現行仕様が誰にも分からない」「業務が現行システムの形に固定されている」という業務・情報の問題であることがほとんど。技術選定から入ると必ず失敗するため、ビジネスアーキテクチャとデータの正本整理から入る。',
+      en: 'Legacy renewal looks technical but is almost always a business and information problem: nobody knows the current specification, and the operating model has been shaped by the old system. Starting from technology selection reliably fails; start from business architecture and settling the systems of record.',
+    },
+    phaseIds: ['a', 'b', 'c', 'e', 'f'],
+    techniqueIds: ['gap-analysis', 'business-scenarios', 'business-transformation-readiness', 'migration-planning-techniques', 'risk-management'],
+    deliverableIds: ['architecture-vision', 'business-capability-map', 'data-entity-catalog', 'application-portfolio-catalog', 'architecture-roadmap', 'transition-architecture'],
+    actions: [
+      { ja: '現行システムの「機能」ではなく、支えている「ビジネス能力」を先に洗い出す。機能単位で移植すると、不要機能まで運んでしまう。', en: 'Inventory the business capabilities the old system supports before its functions. Porting function by function carries the dead weight across too.' },
+      { ja: '主要データエンティティの正本を確定させる。刷新の実質的な難易度はここで決まる。', en: 'Settle the system of record for the key data entities. This is what actually determines how hard the renewal will be.' },
+      { ja: '一括移行(ビッグバン)と段階移行を比較し、二重運用期間のコストを明示的に見積もる。', en: 'Compare big-bang against phased migration, and explicitly price the dual-running period.' },
+      { ja: '現行仕様の調査に期限を切る。「完全に理解してから」は永遠に来ない。', en: 'Time-box the archaeology on the current specification. "Once we fully understand it" never arrives.' },
+      { ja: '中間状態ごとに「ここで止めても事業は回るか」を確認し、止まれる計画にする。', en: 'For each intermediate state, verify the business can run if you stop there — make the plan stoppable.' },
+    ],
+    questions: [
+      { ja: 'この刷新で、業務のやり方自体を変えるのか、それとも同じ業務を新しい基盤で動かすだけなのか。どちらですか?', en: 'Is this renewal changing how the business operates, or running the same operations on a new platform?' },
+      { ja: '現行システムの仕様を説明できる人は、あと何年在籍しますか?', en: 'How many more years will the people who can explain the current system be with you?' },
+      { ja: '移行期間中に二重運用が発生した場合、その追加コストと業務負荷は誰が引き受けますか?', en: 'If dual running is needed during the migration, who absorbs the extra cost and operational load?' },
+      { ja: '現行システムのどの機能を「捨てる」判断は、誰が下せますか?', en: 'Who has the authority to decide which existing functions get dropped?' },
+    ],
+  },
+  {
+    id: 'ea-practice-launch',
+    name: { ja: 'EA / DX の立ち上げ', en: 'Launching an EA or DX Practice' },
+    keywords: [
+      'dx', '立ち上げ', '導入したい', 'ea を始め', 'ea をはじめ', 'これから', '新設', '組織を作', '体制を作', '何から',
+      'start', 'launch', 'set up', 'establish', 'kick off', 'kickoff', 'greenfield', 'first time', 'digital transformation',
+    ],
+    diagnosis: {
+      ja: '立ち上げ期の失敗要因はほぼ 2 つ — 「成果物を作りすぎる」ことと「決定権のない体制で始める」こと。予備フェーズで範囲・原則・意思決定権限を絞り込み、最初のサイクルは小さな対象で 1 周回して実績を作るのが定石。',
+      en: 'Launches fail for two reasons almost every time: producing too many deliverables, and starting without decision rights. Narrow scope, principles, and decision authority in the Preliminary Phase, then run one full cycle on something small to build a track record.',
+    },
+    phaseIds: ['preliminary', 'a', 'h'],
+    techniqueIds: ['architecture-principles-technique', 'architecture-governance', 'stakeholder-management', 'architecture-maturity'],
+    deliverableIds: ['organizational-model', 'architecture-principles', 'tailored-framework', 'architecture-vision', 'architecture-repository'],
+    actions: [
+      { ja: '最初のサイクルの対象を、1 事業部・1 領域に絞る。全社を一度に描こうとしない。', en: 'Scope the first cycle to one unit or one domain. Do not try to draw the whole enterprise at once.' },
+      { ja: '原則は 8 個前後に絞り、各原則に「含意(何を諦めるか)」を必ず書く。', en: 'Hold principles to around eight, each with explicit implications — what you give up.' },
+      { ja: '新しい委員会を作る前に、既存の会議体に相乗りできないか探す。', en: 'Before creating a new board, look for an existing forum you can attach to.' },
+      { ja: '成果物テンプレートを絞り込み(テーラリング)、作らないものを明示的に決める。', en: 'Tailor the deliverable set down and state explicitly what you will not produce.' },
+      { ja: '3 か月以内に目に見える成果を 1 つ出す計画にする。半年成果が出ない EA は予算を失う。', en: 'Plan one visible result within three months. An EA function with nothing to show at six months loses its funding.' },
+    ],
+    questions: [
+      { ja: 'アーキテクチャ上の決定を覆せるのは誰ですか。その人はこの活動を支持していますか?', en: 'Who can overturn an architecture decision, and do they support this initiative?' },
+      { ja: 'EA 活動の成否は、1 年後に何をもって評価されますか?', en: 'A year from now, by what measure will this practice be judged?' },
+      { ja: '専任は何名確保できますか。兼務の場合、稼働率は何割ですか?', en: 'How many people are dedicated full time? If part time, what percentage of their capacity?' },
+      { ja: '過去に同種の取り組みはありましたか。あればなぜ続かなかったのですか?', en: 'Has a similar effort been tried before? If so, why did it not stick?' },
+    ],
+  },
+  {
+    id: 'cloud-migration',
+    name: { ja: 'クラウド移行', en: 'Cloud Migration' },
+    keywords: [
+      'クラウド', 'aws', 'azure', 'gcp', 'saas', 'iaas', 'paas', 'オンプレ', 'リフトアンドシフト', 'リフト&シフト', 'コンテナ', 'kubernetes',
+      'cloud', 'migration to cloud', 'lift and shift', 'rehost', 'on-premise', 'on-prem', 'hybrid cloud',
+    ],
+    diagnosis: {
+      ja: 'クラウド移行の本質的な論点は技術ではなく、① データ所在地・規制、② 運用モデルの変更、③ コスト構造の変化(資産から経費へ)の 3 点。フェーズ D 単独の話に見えるが、運用組織とコスト管理が変わる以上、B(組織・プロセス)にも必ず波及する。',
+      en: 'The real issues in a cloud migration are not technical: data residency and regulation, a changed operating model, and a changed cost structure (capex to opex). It looks like a Phase D topic, but because operations and cost management change, it always reaches back into Phase B.',
+    },
+    phaseIds: ['b', 'c', 'd', 'e', 'f'],
+    techniqueIds: ['gap-analysis', 'risk-management', 'interoperability-requirements', 'migration-planning-techniques'],
+    deliverableIds: ['architecture-definition-document', 'technology-standards-catalog', 'application-portfolio-catalog', 'architecture-roadmap', 'transition-architecture'],
+    actions: [
+      { ja: 'アプリケーションを「事業価値 × 技術的健全性」で評価し、移行方式(再ホスト/再構築/置換/廃止)を個別に決める。全部同じ方式で運ぶのは最も高くつく。', en: 'Rate applications on business value against technical health and choose a disposition per application — rehost, refactor, replace, retire. Applying one approach to everything is the most expensive option.' },
+      { ja: 'データ所在地・データ持ち出し(egress)コスト・ロックインの 3 点を明示的に評価し、文書に残す。', en: 'Explicitly evaluate and document three things: data residency, egress cost, and lock-in.' },
+      { ja: '運用モデルの変更(監視、インシデント対応、コスト管理の責任分界)をフェーズ B で扱う。', en: 'Handle the operating-model change — monitoring, incident response, cost accountability — back in Phase B.' },
+      { ja: '移行後の運用コストを月次で見積もり、現行の運用コストと並べて経営層に提示する。', en: 'Model the post-migration run cost monthly and present it next to today\'s run cost.' },
+      { ja: 'ハイブリッド期間の連携方式と、その廃棄計画を移行アーキテクチャに書く。', en: 'Write the hybrid-period integration approach — and its disposal plan — into the transition architecture.' },
+    ],
+    questions: [
+      { ja: '規制上、国外に置けないデータはありますか。その判断は誰が確認済みですか?', en: 'Is there data that cannot legally leave the country, and who has confirmed that judgement?' },
+      { ja: '移行後の運用は誰が担いますか。現在の運用チームのスキルとの差はどれくらいですか?', en: 'Who operates the platform after migration, and how far is that from your current team\'s skills?' },
+      { ja: 'クラウド費用は誰の予算で、超過したときに誰が止める権限を持ちますか?', en: 'Whose budget pays the cloud bill, and who has the authority to stop spend when it overruns?' },
+      { ja: '移行の目的はコスト削減ですか、俊敏性ですか。両立しない場合、どちらを取りますか?', en: 'Is the goal cost reduction or agility? When they conflict, which wins?' },
+    ],
+  },
+  {
+    id: 'stakeholder-conflict',
+    name: { ja: 'ステークホルダーの対立・合意形成', en: 'Stakeholder Conflict and Alignment' },
+    keywords: [
+      '対立', '揉め', 'もめ', '合意', '調整', '反対', '説得', 'political', 'politics', '部門間', '縦割り', 'サイロ', '意見が割れ', '決まらない',
+      'conflict', 'disagree', 'alignment', 'resistance', 'buy-in', 'consensus', 'stakeholder',
+    ],
+    diagnosis: {
+      ja: '「意見の対立」は多くの場合、判断基準が共有されていないことの症状。アーキテクチャ原則と評価軸を先に合意すれば、個別案件の議論は自動的に収束する。逆に、対立を個別案件の場で解決しようとすると、同じ議論が毎回再燃する。',
+      en: 'Disagreement is usually a symptom of unshared decision criteria. Agree the principles and the evaluation axes first and individual debates converge by themselves. Try to settle it case by case and the same argument reignites every time.',
+    },
+    phaseIds: ['a', 'b', 'preliminary', 'requirements-management'],
+    techniqueIds: ['stakeholder-management', 'business-scenarios', 'architecture-principles-technique', 'architecture-governance'],
+    deliverableIds: ['stakeholder-map', 'communications-plan', 'architecture-principles', 'architecture-vision'],
+    actions: [
+      { ja: '対立している当事者それぞれの「関心事」を、本人の言葉で書き出す。多くの場合、対立点は表明されている主張とは別の場所にある。', en: 'Write down each party\'s concerns in their own words. The real point of conflict is usually somewhere other than the stated position.' },
+      { ja: '判断基準(原則、評価軸、優先順位)を先に合意する。個別案件の是非を先に議論しない。', en: 'Agree the decision criteria — principles, evaluation axes, precedence — before debating the merits of any specific case.' },
+      { ja: 'ビジネスシナリオを共同で書く。具体的な業務の流れに落とすと、抽象論での対立は解ける。', en: 'Write a business scenario together. Grounding it in a concrete operational flow dissolves abstract disagreement.' },
+      { ja: '決着しない論点は、エスカレーション先と期限を決めて上位者に上げる。塩漬けが最悪の選択。', en: 'For anything that will not settle, escalate with a named owner and a deadline. Letting it sit is the worst option.' },
+      { ja: '影響力 × 関心度で関与方針を分け、全員に同じ資料を配るのをやめる。', en: 'Segment engagement by power and interest, and stop sending everyone the same document.' },
+    ],
+    questions: [
+      { ja: 'この判断が最終的に決まらなかった場合、誰が困りますか?', en: 'If this decision never gets made, who is hurt by that?' },
+      { ja: '各部門は、この変革によって何を失うと考えていますか?', en: 'What does each unit believe it stands to lose from this change?' },
+      { ja: '過去に似た論点はどう決着しましたか。その決定は今も有効ですか?', en: 'How was a similar question settled in the past, and does that decision still hold?' },
+      { ja: 'この論点をエスカレーションできる共通の上司は誰ですか?', en: 'Who is the common superior this can be escalated to?' },
+    ],
+  },
+  {
+    id: 'governance-decay',
+    name: { ja: 'ガバナンスの形骸化', en: 'Governance Not Working' },
+    keywords: [
+      '守られない', '形骸', '無視', '標準が', 'ガバナンス', '統制', '勝手に', '野良', 'シャドー', '逸脱', 'ルールが',
+      'governance', 'not followed', 'ignored', 'shadow it', 'compliance', 'standards', 'deviation', 'exception',
+    ],
+    diagnosis: {
+      ja: '標準が守られない原因は、ほぼ常に「守るコストが高い」「例外申請の窓口がない」「レビューが遅すぎる」のいずれか。取り締まりを強化しても改善しない。摩擦を下げる方向で設計し直す。',
+      en: 'Standards get ignored for one of three reasons almost always: compliance is expensive, there is no route to request an exception, or reviews come too late. Tightening enforcement does not help; redesign to reduce friction.',
+    },
+    phaseIds: ['preliminary', 'g', 'h'],
+    techniqueIds: ['architecture-governance', 'architecture-principles-technique', 'stakeholder-management', 'architecture-maturity'],
+    deliverableIds: ['architecture-contract', 'compliance-assessment', 'architecture-principles', 'technology-standards-catalog', 'organizational-model'],
+    actions: [
+      { ja: '逸脱の「理由」を集計する。理由が集中している標準は、標準の方が間違っている可能性が高い。', en: 'Aggregate the reasons behind deviations. Where reasons cluster on one standard, the standard is probably the problem.' },
+      { ja: '例外申請プロセスを作り、必ず期限を付けて承認する。禁止一辺倒にすると黙って逸脱される。', en: 'Create an exception process and always grant with an expiry date. Blanket prohibition just produces silent deviation.' },
+      { ja: 'レビューを設計段階に前倒しする。実装後のレビューは指摘しても直せない。', en: 'Move reviews earlier, into design. Findings after implementation cannot be acted on.' },
+      { ja: '適合性チェック項目を 1 ページに削る。100 項目のチェックリストは形式的に埋められるだけ。', en: 'Cut the conformance checklist to one page. A hundred items just get ticked mechanically.' },
+      { ja: '標準を「推奨/許容/非推奨/廃止予定」の 4 段階にし、二値判定をやめる。', en: 'Move standards to four states — preferred, acceptable, discouraged, retiring — and drop the binary verdict.' },
+    ],
+    questions: [
+      { ja: '標準を守った場合と守らなかった場合で、プロジェクトの納期はどれくらい変わりますか?', en: 'How much does following the standard change a project\'s delivery date, compared with ignoring it?' },
+      { ja: '例外を申請する窓口はありますか。申請から回答まで何日かかりますか?', en: 'Is there a route to request an exception, and how many days does an answer take?' },
+      { ja: '逸脱が発覚したとき、実際に是正された事例はありますか?', en: 'When a deviation has been found, has it ever actually been remediated?' },
+      { ja: 'アーキテクチャボードの決定は、実際に予算や調達の判断に反映されていますか?', en: 'Do the architecture board\'s decisions actually feed into budget and procurement decisions?' },
+    ],
+  },
+  {
+    id: 'requirements-churn',
+    name: { ja: '要件の頻繁な変更・スコープクリープ', en: 'Requirements Churn and Scope Creep' },
+    keywords: [
+      '要件が変', '要件変更', 'コロコロ', '仕様変更', 'スコープ', '膨らむ', '増え続け', '後出し', 'ちゃぶ台',
+      'scope creep', 'requirements change', 'churn', 'moving target', 'changing requirements',
+    ],
+    diagnosis: {
+      ja: '要件が動き続ける原因は、たいてい「元の要求の目的が合意されていない」ことにある。機能一覧として要件を管理している限り、追加は無限に続く。目的(ビジネスシナリオ)と成功条件に紐付けて初めて、追加要求の可否を判断できるようになる。',
+      en: 'Requirements keep moving mostly because the purpose behind the original ask was never agreed. Managed as a feature list, additions never stop. Only when each requirement is tied to a scenario and a success criterion can you judge whether a new ask belongs.',
+    },
+    phaseIds: ['requirements-management', 'a', 'b', 'h'],
+    techniqueIds: ['business-scenarios', 'stakeholder-management', 'gap-analysis', 'risk-management'],
+    deliverableIds: ['architecture-requirements-spec', 'requirements-impact-assessment', 'statement-of-architecture-work', 'architecture-vision'],
+    actions: [
+      { ja: '要件に一意の ID と出所(誰の、どの発言か)を付ける。出所不明の要件は削除の判断ができない。', en: 'Give every requirement an ID and a source — whose statement, which document. Requirements with no traceable origin can never be safely dropped.' },
+      { ja: '作業範囲記述書に「対象外」を明記し、追加要求は変更管理に回す経路を作る。', en: 'Write the out-of-scope list into the Statement of Architecture Work and route new asks through change control.' },
+      { ja: '追加要求ごとに影響評価(工数・スケジュール・コスト)を出し、判断をスポンサーに返す。', en: 'Produce an impact assessment — effort, schedule, cost — for each new ask and hand the decision back to the sponsor.' },
+      { ja: '却下した要件も記録に残す。同じ要求が形を変えて再提出される。', en: 'Keep rejected requirements on record; the same ask returns in different clothes.' },
+      { ja: '非機能要件に ID を振って別管理する。機能要件は忘れられないが、非機能要件は静かに消える。', en: 'Track non-functional requirements separately with IDs. Functional ones are never forgotten; non-functional ones vanish quietly.' },
+    ],
+    questions: [
+      { ja: '追加要求を承認できるのは誰ですか。その人はスケジュールとコストの責任も負っていますか?', en: 'Who can approve a new requirement, and does that person also own the schedule and cost?' },
+      { ja: '当初の成功条件は測定可能な形で文書化されていますか?', en: 'Were the original success criteria documented in measurable form?' },
+      { ja: 'この追加要求は、どのビジネス成果に紐付いていますか?', en: 'Which business outcome does this new requirement attach to?' },
+      { ja: '変更に伴う影響評価は、誰がいつまでに出す取り決めになっていますか?', en: 'Who produces the impact assessment for a change, and by when?' },
+    ],
+  },
+  {
+    id: 'ma-integration',
+    name: { ja: 'M&A・組織統合に伴うシステム統合', en: 'M&A and Post-Merger Integration' },
+    keywords: [
+      'm&a', '買収', '合併', '統合', '子会社', 'グループ会社', 'カーブアウト', '分社',
+      'merger', 'acquisition', 'post-merger', 'pmi', 'divestiture', 'carve-out', 'integration',
+    ],
+    diagnosis: {
+      ja: '統合の難所は技術ではなくデータ定義とコード体系。「顧客」「商品」「勘定科目」の定義が両社で違うことが、統合コストの大半を生む。統合の深さ(共存/部分統合/完全統合)を先に決めないと、際限なく費用が膨らむ。',
+      en: 'The hard part of integration is data definitions and code systems, not technology. Most of the cost comes from the two sides defining "customer", "product", and "account" differently. Without first deciding the depth of integration — coexist, partially integrate, fully integrate — cost expands without limit.',
+    },
+    phaseIds: ['a', 'b', 'c', 'e'],
+    techniqueIds: ['interoperability-requirements', 'gap-analysis', 'capability-based-planning', 'migration-planning-techniques'],
+    deliverableIds: ['data-entity-catalog', 'application-portfolio-catalog', 'business-capability-map', 'architecture-roadmap', 'transition-architecture'],
+    actions: [
+      { ja: '統合の深さを業務領域ごとに決める(共存のまま / データだけ統合 / 完全統合)。全領域を完全統合しようとしない。', en: 'Decide the depth of integration per business area — coexist, integrate data only, fully integrate. Do not push every area to full integration.' },
+      { ja: '争点になる 20〜30 個の主要データエンティティについて、両社の定義を突き合わせる。', en: 'Reconcile the two sides\' definitions for the twenty or thirty contested key data entities.' },
+      { ja: '重複するアプリケーションを事業価値 × 技術的健全性で評価し、残す方を決める。', en: 'Rate overlapping applications on business value against technical health and pick the survivor.' },
+      { ja: '統合前に必要な「見える化」(決算連結、共通レポート)を最優先の中間状態に置く。', en: 'Put the visibility outcomes — consolidated close, common reporting — into the earliest transition state.' },
+      { ja: '両社の技術標準・ライセンス契約・サポート期限を突き合わせ、失効リスクを洗い出す。', en: 'Compare both sides\' technology standards, licences, and support end dates, and surface the expiry risks.' },
+    ],
+    questions: [
+      { ja: '統合の目的はコストシナジーですか、事業シナジーですか。優先順位はどちらですか?', en: 'Is the integration after cost synergy or revenue synergy, and which takes priority?' },
+      { ja: '統合後に「どちらのやり方に寄せるか」を決める権限は誰にありますか?', en: 'Who has the authority to decide whose way of working prevails after integration?' },
+      { ja: '統合完了の期限は、契約上・開示上いつですか?', en: 'What is the integration deadline from a contractual and disclosure standpoint?' },
+      { ja: '両社で定義が異なる最重要のデータは何ですか(顧客、商品、組織コードなど)?', en: 'Which data matters most and is defined differently on each side — customer, product, org codes?' },
+    ],
+  },
+  {
+    id: 'data-silo',
+    name: { ja: 'データのサイロ化・マスタ整備', en: 'Data Silos and Master Data' },
+    keywords: [
+      'データ', 'マスタ', 'サイロ', '名寄せ', '重複', 'データ活用', 'dwh', 'データ基盤', 'bi', '分析', '数字が合わ', '二重入力',
+      'data silo', 'master data', 'mdm', 'data quality', 'single source of truth', 'data platform', 'analytics', 'data warehouse',
+    ],
+    diagnosis: {
+      ja: '「データが活用できない」の実態は、ほぼ常に「同じ概念の定義が部門ごとに違う」「正本が決まっていない」こと。データ基盤を先に作っても、定義が揃っていなければ集めたデータは使えない。フェーズ C のデータアーキテクチャが本丸。',
+      en: 'When data "cannot be used", the reality is almost always that the same concept is defined differently per unit and no system of record has been designated. Building a data platform first does not help: without agreed definitions, the collected data is unusable. Phase C data architecture is the real work.',
+    },
+    phaseIds: ['b', 'c', 'e'],
+    techniqueIds: ['gap-analysis', 'interoperability-requirements', 'stakeholder-management', 'architecture-governance'],
+    deliverableIds: ['data-entity-catalog', 'architecture-definition-document', 'architecture-requirements-spec', 'architecture-roadmap'],
+    actions: [
+      { ja: '主要エンティティごとに正本システムを 1 つに決める。「両方が正」を認めた瞬間に統合コストが青天井になる。', en: 'Designate exactly one system of record per key entity. Allowing "both are authoritative" makes integration cost unbounded.' },
+      { ja: '部門ごとの定義の食い違いを可視化する。突き合わせ表を作るだけで議論が前に進む。', en: 'Expose the definitional differences between units. Simply tabulating them moves the discussion forward.' },
+      { ja: 'データ管理責任者(スチュワード)を、エンティティごとに個人名で決める。', en: 'Name an individual data steward per entity.' },
+      { ja: '全データを対象にしない。争点になる 20〜30 エンティティに絞る。', en: 'Do not aim for all data. Narrow to the twenty or thirty contested entities.' },
+      { ja: 'CRUD マトリクスで「作成する主体が複数ある」データを炙り出す。', en: 'Use a CRUD matrix to find data that more than one system claims to create.' },
+    ],
+    questions: [
+      { ja: '「顧客」の定義は、営業部門と経理部門で同じですか?', en: 'Do sales and finance define "customer" the same way?' },
+      { ja: '数字が合わないと言われたとき、どのシステムの値が正だと判断していますか?', en: 'When the numbers disagree, which system\'s value is treated as correct?' },
+      { ja: 'データの品質に責任を持つ人は、業務部門にいますか、IT 部門にいますか?', en: 'Does accountability for data quality sit in the business or in IT?' },
+      { ja: 'データ基盤を作った後、誰がどの意思決定に使う想定ですか?', en: 'Once the data platform exists, who uses it for which decision?' },
+    ],
+  },
+  {
+    id: 'cost-reduction',
+    name: { ja: 'IT コスト削減・システム統廃合', en: 'IT Cost Reduction and Rationalization' },
+    keywords: [
+      'コスト削減', '費用削減', '統廃合', '削減', '予算が', 'コスト高', '保守費', 'ライセンス', '無駄', '重複投資',
+      'cost reduction', 'cost cutting', 'rationalization', 'rationalisation', 'consolidation', 'savings', 'licence', 'license',
+    ],
+    diagnosis: {
+      ja: 'コスト削減は「何を止めるか」を決める作業。アプリケーションポートフォリオを事業価値 × 技術的健全性で評価すれば、廃止候補は機械的に出てくる。難所は分析ではなく、廃止を決める意思決定と、利用部門との調整。',
+      en: 'Cost reduction is the work of deciding what to stop. Rate the application portfolio on business value against technical health and the retirement candidates fall out mechanically. The hard part is not the analysis but the decision to retire and the negotiation with the users.',
+    },
+    phaseIds: ['c', 'e', 'f', 'h'],
+    techniqueIds: ['gap-analysis', 'capability-based-planning', 'migration-planning-techniques', 'stakeholder-management'],
+    deliverableIds: ['application-portfolio-catalog', 'technology-standards-catalog', 'architecture-roadmap', 'implementation-migration-plan'],
+    actions: [
+      { ja: 'アプリケーション一覧に「事業価値 × 技術的健全性」の 2 軸評価を加える。一覧だけでは意思決定に使えない。', en: 'Add the two-axis rating — business value against technical health — to the application list. A bare list cannot drive decisions.' },
+      { ja: '同じビジネス能力を支える重複アプリケーションを能力マップ上で可視化する。', en: 'Use the capability map to expose applications that support the same capability.' },
+      { ja: '廃止のコスト(データ移行、契約解除、再教育)も見積もる。廃止は無料ではない。', en: 'Estimate the cost of retirement too — data migration, contract exit, retraining. Shutting things down is not free.' },
+      { ja: '削減額の刈り取り責任者を個人名で決める。責任者のいない削減目標は達成されない。', en: 'Name an individual accountable for harvesting each saving. Targets without an owner are not met.' },
+      { ja: 'ライセンス・保守契約のサポート期限を棚卸しし、期限切れによる強制コストを先に把握する。', en: 'Inventory licence and support end dates so that forced spend from expiry is known in advance.' },
+    ],
+    questions: [
+      { ja: '削減目標は金額ですか、比率ですか。いつまでに、どの費目でですか?', en: 'Is the target an amount or a percentage — by when, and against which cost lines?' },
+      { ja: 'システムを廃止した場合に困る利用部門は、誰が説得しますか?', en: 'Who persuades the business units that lose a system when it is retired?' },
+      { ja: '現在の IT 費用のうち、運用維持費と新規投資の比率はどれくらいですか?', en: 'What is the split between run cost and new investment in your current IT spend?' },
+      { ja: '削減した費用は、他の投資に回せますか、それとも予算ごと消えますか?', en: 'Can the money saved be redeployed to other investment, or does the budget simply disappear?' },
+    ],
+  },
+  {
+    id: 'security-compliance',
+    name: { ja: 'セキュリティ・規制対応', en: 'Security and Regulatory Compliance' },
+    keywords: [
+      'セキュリティ', '規制', 'コンプライアンス', '監査', '個人情報', 'gdpr', '内部統制', 'j-sox', 'ゼロトラスト', '認証', 'インシデント', '脆弱性',
+      'security', 'compliance', 'regulation', 'audit', 'privacy', 'zero trust', 'identity', 'incident', 'vulnerability',
+    ],
+    diagnosis: {
+      ja: 'セキュリティ要件は非機能要件として ID を振って管理しないと、設計の後半で「追加要件」として現れてコストを跳ね上げる。規制対応は期日が動かないため、ロードマップ上の固定制約として最初に置く。',
+      en: 'Unless security requirements are tracked as non-functional requirements with IDs, they surface late in design as "new requirements" and blow up the cost. Regulatory dates do not move, so place them on the roadmap first as fixed constraints.',
+    },
+    phaseIds: ['b', 'c', 'd', 'f', 'g'],
+    techniqueIds: ['risk-management', 'gap-analysis', 'architecture-governance', 'stakeholder-management'],
+    deliverableIds: ['architecture-requirements-spec', 'architecture-definition-document', 'technology-standards-catalog', 'compliance-assessment', 'architecture-contract'],
+    actions: [
+      { ja: 'セキュリティ要件を要件仕様に ID 付きで登録し、各アーキテクチャ構成要素へトレースを張る。', en: 'Register security requirements with IDs in the requirements specification and trace them to architecture components.' },
+      { ja: '規制の適用期日をロードマップの固定制約として最初に置く。動かせない日付から逆算する。', en: 'Place regulatory dates on the roadmap first as immovable constraints and plan backwards from them.' },
+      { ja: 'データの機密区分とデータ所在地の要件を、データエンティティカタログに列として追加する。', en: 'Add sensitivity classification and residency requirements as columns in the data entity catalog.' },
+      { ja: 'セキュリティ部門をフェーズ D の最初から入れる。最後にレビューさせると設計をやり直すことになる。', en: 'Bring the security team in at the start of Phase D. Reviewing at the end means redesigning.' },
+      { ja: '残存リスクの受容者を個人名で記録する。「組織として受容」は責任の所在を消す。', en: 'Record a named individual as the acceptor of each residual risk; "accepted by the organization" erases accountability.' },
+    ],
+    questions: [
+      { ja: '適用される規制と、その対応期日を一覧化していますか?', en: 'Do you have a list of the applicable regulations and their compliance dates?' },
+      { ja: 'セキュリティ要件を最終承認するのは誰ですか。その人は設計初期から関与していますか?', en: 'Who gives final approval on security requirements, and are they involved from the start of design?' },
+      { ja: '監査で指摘された場合、是正までに許される期間はどれくらいですか?', en: 'If an audit raises a finding, how long do you have to remediate?' },
+      { ja: 'インシデント発生時の責任分界は、クラウド事業者・委託先との間で文書化されていますか?', en: 'Is the division of responsibility during an incident documented with your cloud providers and suppliers?' },
+    ],
+  },
+  {
+    id: 'package-selection',
+    name: { ja: 'パッケージ / SaaS 選定', en: 'Package and SaaS Selection' },
+    keywords: [
+      'パッケージ', '製品選定', '選定', 'rfp', 'ベンダー', '調達', 'erp', 'sap', 'salesforce', 'アドオン', 'カスタマイズ', 'fit&gap', 'フィットギャップ',
+      'package', 'product selection', 'vendor', 'procurement', 'rfp', 'erp', 'off the shelf', 'fit gap', 'customization',
+    ],
+    diagnosis: {
+      ja: 'パッケージ選定の失敗は、ほぼ常に「要件を機能一覧で書いた」ことに起因する。機能比較表では差が出ず、結局は価格と営業力で決まる。ビジネス能力と非機能要件、そして「標準機能に業務を寄せられるか」の判断が本質。',
+      en: 'Package selections fail almost always because requirements were written as a feature list. Feature comparison matrices do not differentiate, so the decision defaults to price and sales pressure. What matters is business capability, non-functional requirements, and whether you can bend operations to the standard product.',
+    },
+    phaseIds: ['b', 'c', 'd', 'e'],
+    techniqueIds: ['gap-analysis', 'business-scenarios', 'interoperability-requirements', 'risk-management'],
+    deliverableIds: ['architecture-requirements-spec', 'business-capability-map', 'architecture-definition-document', 'architecture-contract'],
+    actions: [
+      { ja: '評価軸を先に確定し、重み付けまで合意してから製品を見る。製品を見てから軸を作ると、既に心が決まった製品に合う軸ができる。', en: 'Fix the evaluation axes and their weights before looking at products. Build the axes after seeing products and they will fit the one you already favour.' },
+      { ja: '「標準機能に業務を寄せる」方針を先に経営層と合意する。アドオンの可否は個別判断にしない。', en: 'Agree with executives up front that operations bend to the standard product. Do not leave each add-on to case-by-case judgement.' },
+      { ja: '非機能要件(性能、可用性、データ持ち出し、監査ログ)を要件仕様に明記して RFP に含める。', en: 'Write the non-functional requirements — performance, availability, data export, audit logs — into the specification and the RFP.' },
+      { ja: 'ビジネスシナリオでデモを評価する。機能チェックリストではなく、実際の業務の流れを流させる。', en: 'Evaluate demos against business scenarios: make them run your actual operational flow, not tick a feature checklist.' },
+      { ja: '出口戦略(データ持ち出し、契約解除、移行)を選定時点で確認する。', en: 'Confirm the exit — data export, contract termination, migration — at selection time.' },
+    ],
+    questions: [
+      { ja: '業務を製品の標準に合わせる方針で経営層の合意は取れていますか?', en: 'Have executives agreed that operations will conform to the product\'s standard way of working?' },
+      { ja: 'アドオン開発を承認できるのは誰ですか。その判断基準は文書化されていますか?', en: 'Who approves an add-on, and are the criteria written down?' },
+      { ja: '契約終了時に自社データを持ち出せる形式と期間は、契約に明記されていますか?', en: 'Does the contract state the format and window for exporting your data at termination?' },
+      { ja: 'この製品を実際に運用する部門は、選定に参加していますか?', en: 'Are the people who will actually operate this product part of the selection?' },
+    ],
+  },
+  {
+    id: 'project-rescue',
+    name: { ja: '炎上プロジェクトの立て直し', en: 'Troubled Project Recovery' },
+    keywords: [
+      '炎上', '火消し', '遅延', '遅れ', '立て直し', 'リカバリ', '破綻', '間に合わ', '止まっ', 'デスマ', '赤字',
+      'troubled', 'rescue', 'recovery', 'delayed', 'behind schedule', 'over budget', 'failing project', 'death march',
+    ],
+    diagnosis: {
+      ja: '炎上時に真っ先にやるべきは、範囲の再定義と「止められる中間状態」の再設計。人を増やす判断は最後。アーキテクチャの観点では、当初の目標像が現在の制約下で到達可能かを再評価し、到達できないなら目標像自体を下げる判断をスポンサーに返す。',
+      en: 'The first moves on a troubled project are redefining scope and re-cutting the plan into stoppable intermediate states. Adding people comes last. Architecturally, re-assess whether the original target is still reachable under current constraints, and if it is not, hand the sponsor the decision to lower the target.',
+    },
+    phaseIds: ['a', 'e', 'f', 'g', 'requirements-management'],
+    techniqueIds: ['risk-management', 'migration-planning-techniques', 'stakeholder-management', 'business-transformation-readiness'],
+    deliverableIds: ['statement-of-architecture-work', 'architecture-roadmap', 'transition-architecture', 'implementation-migration-plan', 'requirements-impact-assessment'],
+    actions: [
+      { ja: '当初の成功条件を確認し、現在の制約下で到達可能かを冷静に再評価する。', en: 'Restate the original success criteria and coldly re-assess whether they are reachable under today\'s constraints.' },
+      { ja: '「止められる中間状態」に計画を切り直す。今から 3 か月で何が本番に出せるかを起点にする。', en: 'Re-cut the plan into stoppable intermediate states, starting from what can reach production in the next three months.' },
+      { ja: '要件を優先度で切り、落とす要件をスポンサーに明示的に承認させる。', en: 'Cut requirements by priority and have the sponsor explicitly approve what gets dropped.' },
+      { ja: '増員の前に、意思決定の遅延がボトルネックになっていないかを確認する。多くの場合こちらが真因。', en: 'Before adding people, check whether decision latency is the bottleneck. It usually is.' },
+      { ja: '悪い数字をそのまま報告する経路を作る。粉飾された進捗報告が続く限り立て直せない。', en: 'Build a route for reporting the bad numbers unedited. Recovery is impossible while status reports stay cosmetic.' },
+    ],
+    questions: [
+      { ja: '今から 3 か月で本番稼働できる最小の範囲は何ですか?', en: 'What is the smallest scope that could go live in the next three months?' },
+      { ja: '落としてよい要件を決められるのは誰ですか?', en: 'Who is empowered to decide which requirements get dropped?' },
+      { ja: '意思決定待ちで止まっている項目は今いくつありますか。平均何日待っていますか?', en: 'How many items are blocked waiting on a decision right now, and for how many days on average?' },
+      { ja: 'このプロジェクトを中止する判断基準はありますか。誰が判断しますか?', en: 'Are there criteria for cancelling this project, and who makes that call?' },
+    ],
+  },
+  {
+    id: 'ai-adoption',
+    name: { ja: 'AI / 生成 AI の活用', en: 'AI and Generative AI Adoption' },
+    keywords: [
+      'ai', '生成ai', 'llm', '機械学習', '自動化', 'ml', 'rag', 'エージェント', 'chatgpt', 'claude', 'copilot',
+      'artificial intelligence', 'generative ai', 'machine learning', 'agent', 'automation',
+    ],
+    diagnosis: {
+      ja: 'AI 活用は「どのビジネス能力を、どの程度引き上げるのか」で語らないと、PoC 止まりになる。アーキテクチャ上の論点は、データの品質と正本、権限管理、出力の検証プロセス、そして運用時のコスト構造。フェーズ B(どの業務に効かせるか)と C(データが揃っているか)が先で、D は後。',
+      en: 'AI adoption that is not framed as "which business capability, raised by how much" stops at proof-of-concept. The architectural issues are data quality and systems of record, access control, the process for verifying outputs, and the run-time cost structure. Phase B (which operations benefit) and Phase C (is the data there) come first; Phase D comes after.',
+    },
+    phaseIds: ['b', 'c', 'd', 'e', 'g'],
+    techniqueIds: ['capability-based-planning', 'business-scenarios', 'risk-management', 'gap-analysis'],
+    deliverableIds: ['business-capability-map', 'data-entity-catalog', 'architecture-requirements-spec', 'architecture-roadmap', 'compliance-assessment'],
+    actions: [
+      { ja: '対象業務をビジネスシナリオで具体化し、「人間が最終判断する箇所」を明示する。', en: 'Make the target operation concrete as a business scenario and mark explicitly where a human makes the final call.' },
+      { ja: '入力となるデータの正本と品質を先に確認する。データが揃っていない領域の PoC は必ず失敗する。', en: 'Verify the system of record and quality of the input data first. Proofs-of-concept in areas without the data always fail.' },
+      { ja: '出力の検証プロセスと、誤った出力が業務に流れた場合の影響範囲を評価する。', en: 'Define how outputs are verified and assess the blast radius when a wrong output reaches the business.' },
+      { ja: '推論コストを利用量ベースで見積もり、運用コストとして予算に組み込む。', en: 'Model inference cost against expected usage and put it into the budget as run cost.' },
+      { ja: '入力データの機密区分と、外部サービスへの送信可否を技術標準に明記する。', en: 'Write the sensitivity classification of input data and what may be sent to external services into the technology standards.' },
+    ],
+    questions: [
+      { ja: 'AI で引き上げたいビジネス能力は具体的に何で、現在の水準と目標水準は何ですか?', en: 'Which business capability is being raised, and from what level to what level?' },
+      { ja: '出力が誤っていた場合、誰がどの時点で気づき、誰が責任を負いますか?', en: 'If an output is wrong, who notices, at what point, and who is accountable?' },
+      { ja: '入力するデータに、外部に送信してはいけない情報は含まれますか?', en: 'Does the input data include anything that must not be sent outside the organization?' },
+      { ja: 'PoC が成功した場合、本番運用のコストと体制は誰が負担しますか?', en: 'If the proof-of-concept succeeds, who funds and staffs the production operation?' },
+    ],
+  },
+  {
+    id: 'skills-and-people',
+    name: { ja: '人材・スキル不足', en: 'Skills and Capacity Shortfall' },
+    keywords: [
+      '人材', 'スキル', '要員', '育成', '採用', '属人', '人が足りない', 'ベンダー依存', '内製', 'ノウハウ',
+      'skills', 'talent', 'staffing', 'headcount', 'training', 'vendor lock', 'in-house', 'knowledge transfer', 'key person',
+    ],
+    diagnosis: {
+      ja: 'スキル不足は「教育で解決」の一行で片付けられがちだが、実際には工数・期間・機会損失を伴う投資。ビジネス変革準備度評価で因子として明示的に評価し、ロードマップに育成・採用の期間を組み込まないと、計画通りに人は現れない。',
+      en: 'A skills gap is usually dismissed with "we will train them", but it is an investment with effort, elapsed time, and opportunity cost. Assess it explicitly as a readiness factor and build the hiring and training time into the roadmap — otherwise the people simply do not appear on schedule.',
+    },
+    phaseIds: ['preliminary', 'a', 'e', 'f', 'h'],
+    techniqueIds: ['business-transformation-readiness', 'capability-based-planning', 'architecture-maturity', 'risk-management'],
+    deliverableIds: ['organizational-model', 'implementation-migration-plan', 'architecture-roadmap', 'architecture-repository'],
+    actions: [
+      { ja: '必要スキルを役割単位で定義し、現在の充足状況とのギャップを人数で出す。', en: 'Define required skills per role and express the gap in headcount.' },
+      { ja: '充足手段(採用/育成/外部調達)ごとに、必要な期間とコストを見積もる。', en: 'Estimate the time and cost of each route: hire, train, or contract.' },
+      { ja: '属人化している領域を特定し、決定ログとドキュメントで知識を資産化する。', en: 'Identify where knowledge sits with one person and turn it into an asset through decision logs and documentation.' },
+      { ja: 'ベンダー依存が高い領域では、アーキテクチャ契約で成果物と知識移転を義務付ける。', en: 'Where vendor dependence is high, make deliverables and knowledge transfer contractual in the Architecture Contract.' },
+      { ja: 'ロードマップの各段階に、その段階を実行できる体制が存在するかを確認する。', en: 'For each roadmap step, verify a team capable of executing it will actually exist.' },
+    ],
+    questions: [
+      { ja: 'この計画を実行するために必要なスキルのうち、社内にないものは何ですか?', en: 'Which of the skills this plan needs do you not have in house?' },
+      { ja: '育成する場合、対象者が実務から離れる期間の業務は誰が引き受けますか?', en: 'If you train people, who covers their day job while they are away?' },
+      { ja: '現在、特定の 1 名しか対応できない領域はどこですか?', en: 'Where today can only one specific person handle the work?' },
+      { ja: 'ベンダーが撤退した場合、自社で運用を継続できますか?', en: 'If the vendor withdrew, could you keep operating on your own?' },
+    ],
+  },
+];

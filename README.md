@@ -51,6 +51,7 @@ claude mcp add togaf-eap -- node /path/to/togaf10_EAP_MCP/dist/index.js
 | `list_adm_phases` / `get_adm_phase` | ADM フェーズ(Preliminary〜H, Requirements Management)の目的・入力・ステップ・成果物・実務のコツ |
 | `list_techniques` / `get_technique` | ギャップ分析・ビジネスシナリオ等の ADM 技法の解説と適用場面 |
 | `list_deliverables` / `get_deliverable` | Architecture Vision 等の成果物の説明・作成タイミング・記載項目 |
+| `get_glossary_term` | EA / TOGAF 頻出用語の日英定義(引数なしで全件一覧) |
 | `search_togaf` | 知識ベース全体の日英キーワード検索 |
 | `generate_deliverable_template` | 成果物の Markdown 雛形を生成 |
 | `consult` | 状況の自由記述から、関連フェーズ・技法・成果物・アクション・確認質問を提案 |
@@ -65,11 +66,27 @@ claude mcp add togaf-eap -- node /path/to/togaf10_EAP_MCP/dist/index.js
 - 「この案件のエンゲージメントを開始して、リスクを登録して」→ `start_engagement` / `update_engagement`
 - 「ダッシュボードをブラウザで開いて」→ `open_dashboard`(作業を進めると自動でライブ更新されます)
 
-## データ保存先 / Data Location
+## 設定 / Configuration
 
-エンゲージメント状態は既定で `~/.togaf-eap/engagement.json` に保存されます。環境変数 `TOGAF_EAP_DATA_DIR` で変更できます。
+| 環境変数 | 既定値 | 説明 |
+| --- | --- | --- |
+| `TOGAF_EAP_DATA_DIR` | `~/.togaf-eap` | エンゲージメント状態(`engagement.json`)の保存先ディレクトリ |
+| `TOGAF_EAP_DASHBOARD_PORT` | `0`(空きポート自動割当) | `open_dashboard` が listen するポート |
 
-The engagement state is persisted to `~/.togaf-eap/engagement.json` by default; override with the `TOGAF_EAP_DATA_DIR` environment variable.
+エンゲージメント状態は既定で `~/.togaf-eap/engagement.json` に保存されます。書き込みは一時ファイル + rename の atomic 書き込みなので、ダッシュボードが書きかけの JSON を読むことはありません。
+
+The engagement state is persisted to `~/.togaf-eap/engagement.json` by default; override with `TOGAF_EAP_DATA_DIR`. Writes are atomic (temp file + rename), so the dashboard never reads a half-written file.
+
+### ダッシュボードのエンドポイント / Dashboard endpoints
+
+`open_dashboard` は `127.0.0.1` のみに bind します(外部公開しません)。
+
+| パス | 内容 |
+| --- | --- |
+| `/` | ダッシュボード HTML(自己完結・外部 CDN 参照なし・印刷用 CSS 付き) |
+| `/api/state` | 現在のエンゲージメント JSON |
+| `/events` | SSE。状態ファイルの変更を push |
+| `/health` | 死活確認 |
 
 ## 開発 / Development
 
