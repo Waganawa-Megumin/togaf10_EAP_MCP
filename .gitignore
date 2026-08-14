@@ -7,3 +7,7 @@ coverage/
 .dev-progress/
 .playwright-mcp/
 redteam-samples/
+
+# 統計帯を切り落とす前のインフォグラフィック(手元にのみ保持)
+# 外したはずの古いツール件数が写っているため公開しない
+pic/infograph-original.png
