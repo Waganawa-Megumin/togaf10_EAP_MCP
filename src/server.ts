@@ -14,9 +14,19 @@ import { registerRoadmapTools } from './tools/roadmap.js';
 import { registerExportTools } from './tools/export.js';
 import { registerPrompts } from './tools/prompts.js';
 import { registerResources } from './tools/resources.js';
+import { registerArchiMateTools } from './tools/archimate.js';
+import { registerArchiMateReferenceTools } from './tools/archimate-reference.js';
+import { registerArchiMateExportTools } from './tools/archimate-export.js';
+import { registerDiagramTools } from './tools/diagrams.js';
+import { registerFrameworkTools } from './tools/frameworks.js';
+import { registerBusinessArchitectureTools } from './tools/business-architecture.js';
+import { registerGuideTools } from './tools/guide.js';
+import { registerSecurityTools } from './tools/security.js';
+import { registerDocumentTools } from './tools/documents.js';
+import { registerLlmTools } from './tools/llm.js';
 
 export const SERVER_NAME = 'togaf10-eap-mcp';
-export const SERVER_VERSION = '0.1.0';
+export const SERVER_VERSION = '0.2.0';
 
 const INSTRUCTIONS = `TOGAF 10 EAP MCP — TOGAF Standard 10th Edition (Enterprise Architecture Practitioner) をベースにした非公式のコンサルティングサーバー。
 
@@ -37,8 +47,15 @@ export function createServer(): McpServer {
     { instructions: INSTRUCTIONS },
   );
 
+  // 入口: 何をすればいいか分からない人はここから
+  registerGuideTools(server);
   // 知識・参照系
   registerKnowledgeTools(server);
+  registerFrameworkTools(server);
+  registerBusinessArchitectureTools(server);
+  registerArchiMateTools(server);
+  registerArchiMateReferenceTools(server);
+  registerSecurityTools(server);
   // コンサルティング
   registerConsultTool(server);
   // エンゲージメント(単数の作成/更新 + 複数案件の一覧・切替)
@@ -48,9 +65,14 @@ export function createServer(): McpServer {
   registerAnalysisTools(server);
   registerReviewTools(server);
   registerRoadmapTools(server);
-  // ダッシュボードと書き出し
+  // 図・ダッシュボード・書き出し
+  registerDiagramTools(server);
   registerDashboardTools(server);
   registerExportTools(server);
+  registerArchiMateExportTools(server);
+  // 既存ドキュメントの取り込みと、任意の Claude API 連携
+  registerDocumentTools(server);
+  registerLlmTools(server);
   // MCP prompts / resources
   registerPrompts(server);
   registerResources(server);

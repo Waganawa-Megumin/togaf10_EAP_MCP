@@ -18,6 +18,51 @@ export { GLOSSARY, findTerm } from './glossary.js';
 export { CONSULT_RULES } from './consulting.js';
 export { VIEWPOINTS, findViewpoint, type Viewpoint } from './viewpoints.js';
 export { INDUSTRIES, findIndustry, type IndustryGuidance } from './industries.js';
+// ArchiMate(記述言語)と TOGAF ADM(手法)の対応
+export {
+  ARCHIMATE_LAYERS,
+  ARCHIMATE_ELEMENTS,
+  ARCHIMATE_RELATIONSHIPS,
+  TOGAF_ARCHIMATE_MAPPING,
+  findArchiMateElement,
+  findArchiMateLayer,
+  findArchiMateRelationship,
+  elementsByLayer,
+  type ArchiMateLayerId,
+  type ArchiMateLayer,
+  type ArchiMateElement,
+  type ArchiMateRelationship,
+} from './archimate.js';
+// 周辺フレームワーク(BIZBOK / Zachman / C4 / Wardley など)
+export {
+  FRAMEWORKS,
+  findFramework,
+  frameworksForPhase,
+  frameworksByCategory,
+  type Framework,
+  type FrameworkCategory,
+} from './frameworks.js';
+// セキュリティ EA(SABSA を参照)
+export {
+  SABSA_LAYERS,
+  SABSA_QUESTIONS,
+  SECURITY_PHASE_MAP,
+  SECURITY_ARTIFACTS,
+  SECURITY_PITFALLS,
+  THREAT_LENSES,
+  type SabsaLayer,
+  type SecurityArtifact,
+} from './security-ea.js';
+// ビジネスアーキテクチャの作り方
+export {
+  CAPABILITY_LEVELS,
+  CAPABILITY_METHOD,
+  VALUE_STREAM_METHOD,
+  CROSS_MAPPING,
+  REFERENCE_CAPABILITIES,
+  type Method,
+  type ReferenceCapability,
+} from './business-architecture.js';
 
 /** ASCII のみで構成されるか(単語境界マッチを使ってよいか)の判定 */
 function isAscii(s: string): boolean {

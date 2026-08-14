@@ -41,6 +41,10 @@ const LOCAL = {
   themeDark: { ja: 'テーマ: ダーク', en: 'Theme: Dark' },
   openOnly: { ja: '未対応のみ', en: 'Open only' },
   unscheduled: { ja: '時期未定', en: 'Unscheduled' },
+  disposalMissing: {
+    ja: '⚠ 未設定 — 誰がいつ捨てるかを決めないと、暫定は恒久化します',
+    en: '⚠ Not set — without an owner and a date, the workaround becomes permanent',
+  },
   quadrantRule: {
     ja: '「中」以上を高側に配置しています',
     en: 'Medium and above is plotted on the high side',
@@ -256,11 +260,15 @@ footer { margin-top: 24px; color: var(--muted); font-size: 12px; text-align: cen
 .tl-mark > i { display: block; width: 0; height: 100%; border-left: 2px dashed var(--accent); }
 .tl-mark.warn > i { border-left-color: var(--crit); }
 .tl-chips { display: flex; flex-wrap: wrap; gap: 4px; justify-content: center; padding-bottom: 4px; z-index: 2; }
+/* 端の列ではラベルがはみ出して切れるため、内側に寄せる */
+.tl-chips.at-end { justify-content: flex-end; }
+.tl-chips.at-start { justify-content: flex-start; }
 .tl-chip {
   font-size: 11px; padding: 2px 8px; border-radius: 999px; white-space: nowrap;
   border: 1px solid var(--accent); color: var(--accent); background: var(--panel);
 }
 .tl-chip.warn { border-color: var(--crit); color: var(--crit); }
+.warntx { color: var(--crit); }
 .tl-head { font-size: 11px; color: var(--muted); text-align: center; white-space: nowrap; padding: 0 2px 5px; border-bottom: 1px solid var(--line); z-index: 1; }
 .tl-head.rowlab { text-align: left; }
 .tl-lab { font-size: 12px; padding-right: 12px; z-index: 1; min-width: 0; display: flex; align-items: center; gap: 6px; }
@@ -558,7 +566,9 @@ footer { margin-top: 24px; color: var(--muted); font-size: 12px; text-align: cen
           return '<span class="tl-chip' + (t.standalone === false ? ' warn' : '') + '" title="' + esc(t.name + ' — ' + hint) + '">'
             + esc(t.name) + '</span>';
         }).join('');
-        cells.push('<div class="tl-chips" style="grid-column:' + (2 + c) + ';grid-row:1">' + chips + '</div>');
+        /* 端の列は中央寄せだとラベルがはみ出して切れるので、内側に寄せる */
+        var edge = c >= cols - 1 ? ' at-end' : (c <= 0 ? ' at-start' : '');
+        cells.push('<div class="tl-chips' + edge + '" style="grid-column:' + (2 + c) + ';grid-row:1">' + chips + '</div>');
       });
       cells.push('<div class="tl-head rowlab" style="grid-column:1;grid-row:2">' + esc(S.quarter) + '</div>');
       for (var i = 0; i < cols; i++) {
@@ -638,7 +648,12 @@ footer { margin-top: 24px; color: var(--muted); font-size: 12px; text-align: cen
           dl += '<dt>' + esc(S.capabilities) + '</dt><dd>' + esc(t.capabilities.join('; ')) + '</dd>';
         }
         if (t.interim) dl += '<dt>' + esc(S.interim) + '</dt><dd>' + esc(t.interim) + '</dd>';
-        if (t.disposalPlan) dl += '<dt>' + esc(S.disposalPlan) + '</dt><dd>' + esc(t.disposalPlan) + '</dd>';
+        if (t.disposalPlan) {
+          dl += '<dt>' + esc(S.disposalPlan) + '</dt><dd>' + esc(t.disposalPlan) + '</dd>';
+        } else if (t.interim) {
+          // 暫定の仕組みがあるのに廃棄計画が無い場合は警告する(暫定が恒久化する典型)
+          dl += '<dt>' + esc(S.disposalPlan) + '</dt><dd class="warntx">' + esc(S.disposalMissing) + '</dd>';
+        }
         if (t.note) dl += '<dt>' + esc(S.note) + '</dt><dd>' + esc(t.note) + '</dd>';
         return '<div class="tcard' + (warn ? ' warn' : '') + '"><h3>' + esc(t.name)
           + tag(warn ? 'critical' : 'completed', S.standalone + ': ' + (warn ? S.standaloneNo : S.standaloneYes))
