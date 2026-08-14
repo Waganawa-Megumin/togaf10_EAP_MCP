@@ -1,0 +1,16 @@
+# 空の Issue を無効化し、まずドキュメントに誘導する。
+# Blank issues are disabled so people land on the docs first.
+blank_issues_enabled: false
+
+contact_links:
+  - name: 🍵 はじめかた / Getting Started
+    url: https://github.com/Waganawa-Megumin/togaf10_EAP_MCP/blob/HEAD/docs/GETTING-STARTED.md
+    about: 入れ方(Claude に頼むだけの方法つき)、最初の一言の例、うまく動かないときの対処。まずここ / Install (including "just ask Claude"), first prompts to copy-paste, and troubleshooting. Start here.
+
+  - name: 🏗 アーキテクチャ / Architecture
+    url: https://github.com/Waganawa-Megumin/togaf10_EAP_MCP/blob/HEAD/docs/ARCHITECTURE.md
+    about: 全体像の図、各層の責務、設計判断とその理由 / Overview diagram, layer responsibilities, and the reasoning behind the design decisions.
+
+  - name: 📄 ライセンス / License
+    url: https://github.com/Waganawa-Megumin/togaf10_EAP_MCP/blob/HEAD/LICENSE.md
+    about: 個人利用のみ・AI 学習禁止。使ってよい範囲の質問はまずこちら / Personal use only; AI/ML training prohibited. Check here before asking about permitted use.

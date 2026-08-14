@@ -1,0 +1,100 @@
+name: 使い方の質問 / Question
+description: 入れ方・言い方・どのツールを使えばいいか / How to install it, what to say, which tool to use
+title: "[Question] "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## 先に読むと早いもの / Read these first
+
+        - **[はじめかた / Getting Started](https://github.com/Waganawa-Megumin/togaf10_EAP_MCP/blob/HEAD/docs/GETTING-STARTED.md)** —
+          入れ方(Claude に頼むだけの方法つき)と、最初に何と言えばいいかの例文集。
+          「うまく動かないとき」の節もここです。
+        - **[アーキテクチャ / Architecture](https://github.com/Waganawa-Megumin/togaf10_EAP_MCP/blob/HEAD/docs/ARCHITECTURE.md)** — 中身の構造と設計判断。
+
+        > Getting Started covers installation and gives copy-paste phrases; Architecture covers
+        > the internals. Most questions are answered there.
+
+        **ツール名を覚える必要はありません。** やりたいことを日本語で書いてもらえれば大丈夫です。
+        You never need to name a tool — just describe what you are trying to do.
+
+        ---
+
+        ### ⚠️ 貼り付ける前に / Before you paste
+
+        このサーバーは実際の案件を扱います。**顧客名・社名・個人名・ホスト名・実ファイルパスは
+        伏せ字にしてください。** API キーは絶対に貼らないでください。
+
+        > Redact client, company, personal, host and path information. Never paste an API key.
+
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: 秘密情報の確認 / Confidentiality check
+      description: これは公開の Issue です / This issue will be public.
+      options:
+        - label: 顧客名・社名・個人名・実ファイルパス・API キーを含んでいません / No client, company, personal, path or key information is included
+          required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: どのあたりの話ですか / Which area
+      options:
+        - 入れ方・設定 / Install and setup
+        - 何と言えばいいか / What to say to the assistant
+        - どのツールを使えばいいか / Which tool to use
+        - エンゲージメント(案件)の管理 / Engagement tracking
+        - ダッシュボード(Markdown / HTML) / Dashboard
+        - 図の生成(Mermaid) / Diagrams
+        - ドキュメント取り込み / Document intake
+        - ArchiMate・Archi 連携 / ArchiMate and Archi
+        - セキュリティ EA(SABSA) / Security EA
+        - TOGAF そのものの考え方 / TOGAF concepts
+        - その他 / Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: question
+    attributes:
+      label: 聞きたいこと / Your question
+      description: |
+        「何をしようとしていて、どこで止まっているか」まで書いてもらえると、答えが具体的になります。
+        Telling us what you were trying to achieve — not only what you tried — gets a far more useful answer.
+      placeholder: |
+        例) 手元の情報セキュリティ報告書から案件の素材を起こしたいのですが、
+        PDF しか手元にありません。どうするのが早いですか?
+    validations:
+      required: true
+
+  - type: textarea
+    id: tried
+    attributes:
+      label: 試したこと / What you already tried
+      description: 読んだドキュメント、打ったコマンド、返ってきた出力(伏せ字にしたうえで) / Docs you read, commands you ran, output you got — redacted.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: client
+    attributes:
+      label: MCP クライアント / MCP client
+      options:
+        - Claude Code
+        - Claude Desktop
+        - "scripts/mcp-cli.mjs (同梱 CLI / bundled CLI)"
+        - まだ入れていない / Not installed yet
+        - その他 / Other
+    validations:
+      required: true
+
+  - type: input
+    id: node-version
+    attributes:
+      label: Node.js のバージョン / Node.js version
+      description: "インストール周りの質問のときだけで結構です(`node -v`)/ Only needed for install questions (`node -v`)."
+      placeholder: "v20.11.1"
+    validations:
+      required: false

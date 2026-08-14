@@ -4,6 +4,29 @@
   "description": "TOGAF 10 Enterprise Architecture Practitioner consulting MCP server (unofficial, bilingual JA/EN)",
   "type": "module",
   "license": "SEE LICENSE IN LICENSE.md",
+  "author": "WaganawaMegumin",
+  "homepage": "https://github.com/Waganawa-Megumin/togaf10_EAP_MCP#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Waganawa-Megumin/togaf10_EAP_MCP.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Waganawa-Megumin/togaf10_EAP_MCP/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "togaf",
+    "enterprise-architecture",
+    "adm",
+    "archimate",
+    "sabsa",
+    "business-architecture",
+    "capability-map",
+    "mermaid",
+    "consulting",
+    "bilingual"
+  ],
   "bin": {
     "togaf10-eap-mcp": "dist/index.js"
   },

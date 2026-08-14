@@ -1,3 +1,5 @@
+<a href="../README.md"><img src="../pic/web/icon-256.png" alt="" height="18" align="top"> ← README に戻る / Back to README</a> ・ <a href="./GETTING-STARTED.md">はじめかた / Getting Started</a>
+
 # アーキテクチャ / Architecture
 
 このサーバーがどう組まれているか、そして**なぜそう組んだか**の簡略な解説です。使い方の案内は [はじめかた](./GETTING-STARTED.md) にあります。
@@ -70,9 +72,11 @@ src/
 ├── knowledge/        知識ベース(静的・バイリンガル・副作用なし)
 ├── engagement/       エンゲージメントの型と JSON 永続化
 ├── dashboard/        Markdown / HTML の描画と、SSE 付き HTTP サーバー
-├── tools/            MCP ツールの実装(登録モジュール 22 + 共通ヘルパ)
+├── tools/            MCP ツールの実装(ツール登録 20 + prompts/resources 2 + 共通ヘルパ 2)
 └── llm/              任意の Claude API クライアント
 ```
+
+現在の規模は **ツール 84 / prompts 8 / resources 8**。`tools/` の分割単位は 1 モジュール = 1 つの関心事(知識参照、案件更新、図の生成、書き出し…)で、ツールが増えてもファイルは増えにくいようにしてあります。
 
 | 層 | 責務 | してはいけないこと |
 | --- | --- | --- |
@@ -113,7 +117,7 @@ src/
 
 - **HTTP サーバーは `node:http`** — express も ws も入れない。SSE は「`text/event-stream` を返して書き続ける」だけなので、標準モジュールで十分
 - **Claude API は `fetch` 直叩き** — 公式 SDK を入れない。使うのは 1 往復のテキスト生成とトークン数えだけで、Node 標準の `fetch` で足ります。呼び出し側には `callClaude` / `countClaudeTokens` しか見せていないので、将来 SDK に差し替えるとしてもこの層だけの変更で済みます
-- **ドキュメント解析も標準モジュールのみ** — テキスト系(txt/md/csv/tsv/json/html/xml)を自前で正規化する。バイナリ形式は 3.1 のとおりホストに任せる
+- **ドキュメント解析も標準モジュールのみ** — テキスト系(txt / md / csv / tsv / json / html / xml / log)を自前で正規化する。バイナリ形式は 3.1 のとおりホストに任せる
 
 `npm install` が引くパッケージが少ないほど、社内で入れてもらえる確率が上がります。EA の道具は「配れないと意味がない」ので、ここは機能より優先しています。
 
@@ -146,6 +150,14 @@ MCP のツールが例外で落ちると、ホストには扱いにくい失敗�
 引数なしで呼ばれたときも同じ思想です。エラーにせず、**入れるべき項目の説明と、コピペできる JSON の例**を返します(`assess_readiness '{}'` が典型)。前提知識ゼロの人が最初に打つのは、たいてい空の呼び出しだからです。
 
 > Handlers never throw; they return an error result whose body says what was missing and what to do next. Called with no arguments at all, tools answer with the fields they want plus a copy-pasteable example — because an empty call is what a first-time user actually types.
+
+### 3.5 入力スキーマは strict — 綴り違いは黙って捨てない
+
+MCP SDK の既定では、スキーマに無いキーは**黙って捨てられます**。呼び出し側が `relations` を `relationships` と打ち間違えても、返るのは「関係 0 件」の正常な結果です。呼んでいるのが LLM である以上、これは必ず起きます。
+
+そこで `server.ts` の `strictifyToolSchemas()` が全ツールのスキーマを一括で `.strict()` に包み、未知のキーをその場でエラーにします。**空の正解より、明示された失敗のほうが安い**という判断です。ツール側は生のシェイプのまま書けるので、型推論も書き味も変わりません。
+
+> The SDK silently drops unknown keys, so a typo returns a clean, empty, wrong answer — and the caller here is an LLM, so typos are certain. `strictifyToolSchemas()` wraps every tool's schema in `.strict()` at registration so a misspelled key fails loudly instead. A visible failure is cheaper than a plausible void.
 
 ---
 
@@ -198,6 +210,7 @@ sequenceDiagram
 └── archimate/                   # Archi 取り込み用 CSV / Open Exchange XML
 ```
 
+- **DB ではなく JSON にした理由** — 状態は「1 人のアーキテクトの案件が数十件」であって、同時書き込みも全文検索も要りません。その規模で SQLite を入れると、依存が 1 つ増え、スキーマ移行の仕事が生まれ、そして**利用者が中身を読めなくなります**。JSON なら `cat` で見え、`git` で差分が取れ、壊れたらエディタで直せる。EA の成果物は「後から人が読んで疑える」ことが要件なので、そこを人間可読側に倒しました
 - **索引と本体を分けた理由** — 一覧・切替は索引だけ読めば済み、案件が増えても軽いままだからです。1 ファイルに全案件を詰めると、1 件更新するたびに全体を書き直すことになります
 - **atomic 書き込み** — 一時ファイル + `rename`。ダッシュボードが並行して読んでいても壊れません
 - **変更の伝播は 2 経路** — 同一プロセス内は `storeEvents`(EventEmitter)、外部からの変更は `fs.watch`。`recursive` は環境依存なので使わず、データディレクトリと `engagements/` を別々に監視しています
@@ -206,7 +219,7 @@ sequenceDiagram
 
 読み書きの範囲も絞っています。ドキュメント読み込みは**作業ディレクトリ配下・データディレクトリ配下・ホーム配下**に限定し、`.` で始まる隠しディレクトリ／隠しファイルは読みません(資格情報ファイルの誤読を避けるため)。書き出しはデータディレクトリ配下か作業ディレクトリ配下のみで、既存ファイルは `overwrite=true` が無ければ上書きしません。
 
-> An index file plus one file per engagement keeps listing and switching cheap. Writes are atomic; changes propagate in-process via an EventEmitter and out-of-process via `fs.watch`. Reads are confined to the working directory, the data directory, and the home directory, with dotfiles excluded.
+> Plain JSON rather than a database: at this scale there is no concurrency and no search to speak of, and a database would cost a dependency, a migration story, and — worst — the user's ability to read their own data. Files you can `cat`, diff in git, and repair in an editor matter more here. An index file plus one file per engagement keeps listing and switching cheap; writes are atomic; changes propagate in-process via an EventEmitter and out-of-process via `fs.watch`. Reads are confined to the working directory, the data directory, and the home directory, with dotfiles excluded.
 
 ---
 
@@ -239,11 +252,22 @@ sequenceDiagram
 6. `tests/` に vitest を足し、`scripts/mcp-cli.mjs` で実際に呼んで出力を目視する
 
 ```bash
-node scripts/mcp-cli.mjs tools --quiet          # ツール一覧
+node scripts/mcp-cli.mjs tools --quiet          # ツール一覧(現在 84 件)
 node scripts/mcp-cli.mjs schema <tool>          # 入力スキーマ
 node scripts/mcp-cli.mjs call <tool> '<JSON>' --data-dir /tmp/scratch --quiet
+
+npm test        # vitest
+npm run smoke   # dist を子プロセスで起動して stdio JSON-RPC を通しで検証
 ```
 
 **「入力が違えば出力の中身が変わる」ことが、このサーバーの品質基準です。** 見出しだけ変わって本文が同じなら、そのツールはまだ役に立っていません。2 つの異なる入力で呼んで diff を取ってから完成としてください。
 
 > Add tools as a `registerXxxTools(server)` module, define input with zod in both languages, never throw, escape pipes in externally-sourced strings, and register from `createServer()`. The quality bar: different input must change the *substance* of the output, not just the headings — check it by diffing two real calls.
+
+---
+
+## 次に読むもの
+
+- [はじめかた / Getting Started](./GETTING-STARTED.md) — 入れ方と、最初に何と言えばいいか
+- [実際の出力例 / Examples](./EXAMPLES.md) — ここで説明した整形が実際にどう出るか
+- [README](../README.md) — ツール 84 件の一覧、設定、ライセンス

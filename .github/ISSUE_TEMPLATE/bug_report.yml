@@ -1,0 +1,152 @@
+name: バグ報告 / Bug report
+description: 期待どおりに動かない・落ちる・出力がおかしい / Something crashes or returns the wrong thing
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## ⚠️ 貼り付ける前に / Before you paste anything
+
+        このサーバーは**実際の案件**を扱います。エンゲージメント名・顧客名・社名・製品名・
+        個人名・ホスト名・ファイルパスが、ツールの出力にそのまま入ります。
+
+        **公開の Issue に貼る前に、必ず伏せ字にしてください。**
+        例) `A 社基幹刷新` → `<顧客A> <案件名>` / `/Users/taro/work/...` → `/path/to/...`
+
+        再現に必要なのは**構造**(どのツールを、どんな形の入力で呼んだか)だけです。
+        中身が業務情報なら、ダミーの値に置き換えたうえで再現するかを確かめてください。
+
+        > **This server handles real client work.** Engagement names, company names, people,
+        > hostnames and file paths appear verbatim in tool output. **Redact them before posting.**
+        > Only the *shape* of the input is needed to reproduce a bug — replace real content with
+        > dummy values and check whether it still reproduces.
+
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: 秘密情報の確認 / Confidentiality check
+      description: これは公開の Issue です / This issue will be public.
+      options:
+        - label: 貼り付ける内容から、顧客名・社名・個人名・ホスト名・実ファイルパスを伏せました / I have redacted client, company, personal, host and real path information
+          required: true
+        - label: API キーやトークンを含んでいません / No API keys or tokens are included
+          required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: 何が起きたか / What happened
+      description: 一言で。詳細は下の欄に / One or two sentences; details go below.
+      placeholder: |
+        例) 案件を作ったあとに <ツール名> を呼ぶと、毎回エラーで返る。
+    validations:
+      required: true
+
+  - type: input
+    id: tool
+    attributes:
+      label: 関係するツール名 / Tool name
+      description: |
+        分かる範囲で。一覧は `node scripts/mcp-cli.mjs tools --quiet` で出ます。
+        分からなければ「不明」で構いません。
+        The full list comes from `node scripts/mcp-cli.mjs tools --quiet`. "unknown" is fine.
+      placeholder: "start_here / draft_capability_map / ingest_document ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: 再現手順 / Steps to reproduce
+      description: |
+        できれば同梱の CLI で再現してください。会話の言い回しより、ツール呼び出しの方が特定が速いです。
+        `node scripts/mcp-cli.mjs call <tool> '<JSON>' --data-dir /tmp/scratch --quiet`
+        Reproducing through the bundled CLI pins the bug down far faster than a chat transcript.
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 実際の出力 / Actual output
+      description: エラーメッセージやスタックトレースをそのまま(伏せ字にしたうえで) / Paste the error or output verbatim, redacted.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期待した出力 / Expected output
+      description: どうなるはずだと思ったか / What you expected instead.
+    validations:
+      required: true
+
+  - type: input
+    id: node-version
+    attributes:
+      label: Node.js のバージョン / Node.js version
+      description: "`node -v` の出力をそのまま / Output of `node -v`."
+      placeholder: "v20.11.1"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: OS
+      options:
+        - macOS
+        - Windows
+        - Linux
+        - WSL
+        - その他 / Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: client
+    attributes:
+      label: MCP クライアント / MCP client
+      description: どこから呼んだか / Where you called it from.
+      options:
+        - Claude Code
+        - Claude Desktop
+        - "scripts/mcp-cli.mjs (同梱 CLI / bundled CLI)"
+        - その他 / Other
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: このサーバーのバージョン / Server version
+      description: "`package.json` の `version`、または `git rev-parse --short HEAD` の出力 / The `version` in `package.json`, or `git rev-parse --short HEAD`."
+      placeholder: "0.2.0 (または短いコミットハッシュ / or the short commit hash)"
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: 補足 / Anything else
+      description: |
+        スクリーンショット、直前にやっていたこと、心当たりなど。**ここも伏せ字を忘れずに。**
+        Screenshots, what you were doing just before, hunches. **Redact here too.**
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: sanity
+    attributes:
+      label: 事前確認 / Sanity checks
+      options:
+        - label: "`npm ci && npm run build` を通したうえで再現しました / I reproduced this after `npm ci && npm run build`"
+          required: false
+        - label: 同じ内容の Issue が既にないか探しました / I searched for an existing issue
+          required: false

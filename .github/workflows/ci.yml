@@ -1,0 +1,68 @@
+# ビルド → 型検査 → 単体テスト → stdio スモークテスト
+# Build -> type check -> unit tests -> stdio smoke test.
+#
+# 秘密情報は一切使いません。ANTHROPIC_API_KEY は任意機能(analyze_text_with_claude /
+# estimate_tokens)のためのもので、無くてもすべてのテストが通ります。
+# No secrets are used. ANTHROPIC_API_KEY only enables optional tools; every test
+# passes without it.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # package.json の engines は ">=18"。実際に検証するのは現行 LTS の 2 本。
+        # engines says ">=18"; these are the two current LTS lines we actually verify.
+        node: ['20', '22']
+
+    env:
+      CI: 'true'
+      # ダッシュボードのテストがブラウザを起動しないようにする。
+      # Keep the dashboard tests from launching a browser on the runner.
+      TOGAF_EAP_NO_BROWSER: '1'
+      # 状態ファイルをランナーのワークスペース配下に閉じ込める(既定は ~/.togaf-eap)。
+      # Keep engagement state inside the workspace instead of ~/.togaf-eap.
+      TOGAF_EAP_DATA_DIR: ${{ github.workspace }}/.ci-togaf-eap
+
+    steps:
+      - name: Checkout / チェックアウト
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ matrix.node }} / Node.js を用意
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install dependencies / 依存をインストール
+        run: npm ci
+
+      - name: Build / ビルド (tsc -> dist)
+        run: npm run build
+
+      - name: Type check / 型検査
+        run: npx tsc --noEmit
+
+      - name: Unit tests / 単体テスト (vitest)
+        run: npx vitest run
+
+      - name: Smoke test / スモークテスト (stdio JSON-RPC)
+        run: npm run smoke
