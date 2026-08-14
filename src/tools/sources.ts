@@ -206,9 +206,8 @@ export function registerSourceTools(server: McpServer): void {
     {
       title: 'What this knowledge is based on, and how fresh it is',
       description:
-        'この知識ベースが何に基づいているか、いつ一次情報と突き合わせたか、何を持っていないかを返す。' +
-        '**古くなっている可能性がある場合や、正確な原文が必要な場合に、どこを見ればよいか**を示す。 / ' +
-        'Report what this knowledge base is based on, when it was last checked against the primary sources, and what it deliberately does not contain — plus where to look when you need the authoritative wording or suspect it is out of date.',
+        'この知識ベースが何に基づき、いつ一次情報と突き合わせ、何を持っていないか。原文が必要なときの参照先も示す。 / ' +
+        'What this knowledge base is based on, when it was last checked against the primary sources, what it lacks, and where to find authoritative wording.',
       inputSchema: { lang: langSchema },
     },
     async ({ lang }) => {
@@ -269,16 +268,11 @@ export function registerSourceTools(server: McpServer): void {
     {
       title: 'Find the primary source for a topic',
       description:
-        '話題を渡すと、その一次情報の URL と「このサーバーが持っていない範囲」を返す。' +
-        'このサーバーの説明が疑わしいとき、版が古い可能性があるとき、原文が必要なときに使う。' +
-        '**サーバー自身は取得しない。クライアント側の Web 取得機能で読んでください。** / ' +
-        'Given a topic, return the primary source URLs and what this server deliberately lacks. ' +
-        'Use it when you doubt an answer here, suspect a newer edition, or need authoritative wording. This server does not fetch; your client does.',
+        '話題を渡すと一次情報の URL と「このサーバーが持っていない範囲」を返す。答えが疑わしいとき・版が古い疑いがあるとき・原文が必要なときに使う。' +
+        '**サーバーは取得しない。読むのはクライアント側。** / ' +
+        'Return the primary source URLs for a topic, plus what this server deliberately lacks. Use it when you doubt an answer here, suspect a newer edition, or need authoritative wording. This server does not fetch; your client does.',
       inputSchema: {
-        topic: z
-          .string()
-          .min(1)
-          .describe('調べたい話題(例: "ADM フェーズ B の成果物", "ArchiMate の関係", "経営層への報告")'),
+        topic: z.string().min(1).describe('調べたい話題。例 "ADM フェーズ B の成果物" / The topic to look up'),
         lang: langSchema,
       },
     },

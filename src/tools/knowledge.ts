@@ -50,7 +50,7 @@ export function registerKnowledgeTools(server: McpServer): void {
     {
       title: 'List ADM phases',
       description:
-        'TOGAF ADM の全フェーズ(予備フェーズ、A〜H、要件管理)を一覧する。各フェーズの ID・コード・名称・一行要約を返す。 / List all ADM phases with id, code, name, and a one-line summary.',
+        'ADM 全フェーズ(予備、A〜H、要件管理)を ID・コード・名称・一行要約で一覧。 / List all ADM phases with id, code, name, one-line summary.',
       inputSchema: { lang: langSchema },
     },
     async ({ lang }) => {
@@ -80,11 +80,9 @@ export function registerKnowledgeTools(server: McpServer): void {
     {
       title: 'Get an ADM phase',
       description:
-        'ADM フェーズ 1 件の目的・主な入力・主なステップ・主な成果物・実務のコツ・関連技法/成果物を返す。 / Return purpose, inputs, steps, outputs, practitioner tips, and related techniques and deliverables for one ADM phase.',
+        'ADM フェーズ 1 件の目的・入力・ステップ・成果物・実務のコツ・関連技法/成果物。 / One ADM phase: purpose, inputs, steps, outputs, tips, related techniques and deliverables.',
       inputSchema: {
-        phase: z
-          .string()
-          .describe('フェーズ ID / コード。例: "a", "Phase A", "preliminary", "requirements-management"'),
+        phase: z.string().describe('フェーズ ID / コード。例 "a" "preliminary" / Phase id or code'),
         lang: langSchema,
       },
     },
@@ -108,9 +106,9 @@ export function registerKnowledgeTools(server: McpServer): void {
     {
       title: 'List ADM techniques',
       description:
-        'ADM の主要技法(ギャップ分析、ビジネスシナリオ、ステークホルダー管理など)を一覧する。 / List the ADM techniques with a short summary each.',
+        'ADM の主要技法(ギャップ分析、ビジネスシナリオ等)を要約付きで一覧。 / List ADM techniques with a short summary each.',
       inputSchema: {
-        phase: z.string().optional().describe('指定するとそのフェーズで使う技法に絞り込む / Filter by phase id'),
+        phase: z.string().optional().describe('フェーズ ID で絞り込む / Filter by phase id'),
         lang: langSchema,
       },
     },
@@ -146,9 +144,9 @@ export function registerKnowledgeTools(server: McpServer): void {
     {
       title: 'Get an ADM technique',
       description:
-        '技法 1 件の概要・適用場面・進め方・落とし穴・関連フェーズを返す。 / Return summary, when to use, how to run it, pitfalls, and related phases for one technique.',
+        '技法 1 件の概要・適用場面・進め方・落とし穴・関連フェーズ。 / One technique: summary, when to use, how to run it, pitfalls, related phases.',
       inputSchema: {
-        technique: z.string().describe('技法 ID または名称。例: "gap-analysis", "ギャップ分析"'),
+        technique: z.string().describe('技法 ID または名称。例 "gap-analysis" / Technique id or name'),
         lang: langSchema,
       },
     },
@@ -172,7 +170,7 @@ export function registerKnowledgeTools(server: McpServer): void {
     {
       title: 'List deliverables',
       description:
-        'TOGAF の主要成果物を一覧する。フェーズを指定するとそのフェーズで作成・更新する成果物に絞り込む。 / List the main deliverables, optionally filtered by phase.',
+        'TOGAF の主要成果物を一覧。フェーズ指定でそのフェーズの分だけに絞れる。 / List the main deliverables, optionally filtered by phase.',
       inputSchema: {
         phase: z.string().optional().describe('フェーズ ID で絞り込む / Filter by phase id'),
         lang: langSchema,
@@ -219,9 +217,9 @@ export function registerKnowledgeTools(server: McpServer): void {
     {
       title: 'Get a deliverable',
       description:
-        '成果物 1 件の説明・作成/更新フェーズ・記載項目・作成のコツを返す。 / Return the description, phases, contents, and tips for one deliverable.',
+        '成果物 1 件の説明・作成/更新フェーズ・記載項目・作成のコツ。 / One deliverable: description, phases, contents, tips.',
       inputSchema: {
-        deliverable: z.string().describe('成果物 ID または名称。例: "architecture-vision"'),
+        deliverable: z.string().describe('成果物 ID または名称。例 "architecture-vision" / Deliverable id or name'),
         lang: langSchema,
       },
     },
@@ -245,13 +243,13 @@ export function registerKnowledgeTools(server: McpServer): void {
     {
       title: 'Search the TOGAF knowledge base',
       description:
-        'フェーズ・技法・成果物・用語集を横断して日英どちらのキーワードでも検索する。 / Search phases, techniques, deliverables, and the glossary in Japanese or English.',
+        'フェーズ・技法・成果物・用語集を横断検索(日英どちらのキーワードでも可)。 / Search phases, techniques, deliverables, glossary in Japanese or English.',
       inputSchema: {
         query: z.string().min(1).describe('検索キーワード / Search keywords'),
         kinds: z
           .array(z.enum(['phase', 'technique', 'deliverable', 'glossary']))
           .optional()
-          .describe('検索対象の種別を絞り込む / Restrict the kinds searched'),
+          .describe('種別で絞り込む / Restrict the kinds searched'),
         limit: z.number().int().min(1).max(50).default(10).describe('最大件数 / Maximum hits'),
         lang: langSchema,
       },
@@ -291,7 +289,7 @@ export function registerKnowledgeTools(server: McpServer): void {
     {
       title: 'Get a glossary term',
       description:
-        'EA / TOGAF 頻出用語の日英定義を返す。引数なしで全件一覧。 / Return the bilingual definition of a term; omit the argument to list all terms.',
+        'EA / TOGAF 頻出用語の日英定義。引数なしで全件一覧。 / Bilingual definition of a term; omit the argument to list all.',
       inputSchema: {
         term: z.string().optional().describe('用語 ID または名称 / Term id or name'),
         lang: langSchema,
@@ -327,24 +325,20 @@ export function registerKnowledgeTools(server: McpServer): void {
     {
       title: 'Generate a deliverable template',
       description:
-        '成果物の Markdown 雛形(節構成 + 記入の手引き)を生成する。既定では現在の案件に登録済みのステークホルダー・リスク・作業パッケージ・移行状態を該当する節に流し込むので、他のツールの出力から転記する必要がない。 / Generate a Markdown skeleton for a deliverable. By default it pre-fills the sections with the stakeholders, risks, work packages, and transition states already recorded in the current engagement, so nothing has to be transcribed by hand.',
+        '成果物の Markdown 雛形(節構成 + 記入の手引き)を生成する。既定では現在の案件のステークホルダー・リスク・作業パッケージ・移行状態を該当節に流し込むので転記が要らない。 / Generate a Markdown skeleton for a deliverable, pre-filled by default with the stakeholders, risks, work packages, and transition states already in the current engagement.',
       inputSchema: {
         deliverable: z
           .string()
           .optional()
-          .describe('成果物 ID または名称。省略すると一覧を返す / Deliverable id or name; omit to list them'),
+          .describe('成果物 ID または名称。省略で一覧 / Deliverable id or name; omit to list'),
         engagementName: z
           .string()
           .optional()
-          .describe(
-            '見出しに入れる案件名。省略時は現在の案件名 / Engagement name for the title; defaults to the current engagement',
-          ),
+          .describe('見出しの案件名。既定は現在の案件 / Engagement name for the title'),
         useEngagement: z
           .boolean()
           .default(true)
-          .describe(
-            '現在の案件の登録済みデータを雛形に流し込む(既定 true)。false で空の雛形 / Pre-fill from the current engagement (default true); false returns the blank skeleton',
-          ),
+          .describe('案件データを流し込む(既定 true)。false で空の雛形 / Pre-fill from the engagement; false = blank skeleton'),
         lang: langSchema,
       },
     },

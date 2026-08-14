@@ -7,6 +7,8 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { ADM_PHASES, findDeliverable, findPhase, text, type Bilingual, type Lang } from '../knowledge/index.js';
 import {
   ACTION_STATUSES,
+  CONFIDENCE_DEFINITIONS,
+  CONFIDENCE_LEVELS,
   DECISION_STATUSES,
   DELIVERABLE_STATUSES,
   EngagementInputError,
@@ -23,14 +25,21 @@ import {
   capCell,
   capNotice,
   capRows,
+  checkProvenance,
   createEngagement,
+  hasProvenance,
   makeId,
+  mergeProvenance,
   now,
+  provenanceCell,
   summarizeProgress,
+  summarizeProvenance,
   type Action,
   type Decision,
   type DeliverableProgress,
   type Engagement,
+  type Provenance,
+  type ProvenanceInput,
   type Risk,
   type Stakeholder,
   type TextFieldKind,
@@ -224,8 +233,206 @@ function resolvePhaseId(value: string | undefined): string | undefined {
   return findPhase(value)?.id;
 }
 
+// ---------------------------------------------------------------------------
+// 出典と確度の入力 / Provenance input
+//
+// 台帳に載る項目は「文書にそう書いてあった」ものと「こちらが導いた」ものが混ざる。
+// 欄が無いと両者が同じ顔をして、後から**どちらだったか誰も分からなくなる**。
+// 実際の案件では書き手が `role` の末尾に「(p.5)」と手で足していた。
+// 手書きの出典は表の整形で消え、機械で数えられない。だから引数として受ける。
+// ---------------------------------------------------------------------------
+
+/**
+ * `source` の説明文。**具体例を必ず入れる。**
+ * 「出典」とだけ書くと "NEC" や "報告書" のような、後から辿れない値が入ってくる。
+ *
+ * **短く保つこと。** この文字列は `provenanceFields()` 経由で 5 種別
+ * (risks / decisions / actions / stakeholders / deliverables)に複製されるので、
+ * ここで 1 文字増やすと tools/list は 5 文字増える。詳しい約束事は
+ * `update_engagement` のツール説明に 1 回だけ書く。
+ */
+export const SOURCE_DESC =
+  '出典。例 "csr2026.pdf p.17 図3" / "2026-08-14 ヒアリング(情シス部長)"' +
+  ' / Where it came from, e.g. "csr2026.pdf p.17 fig.3"';
+
+/**
+ * `confidence` の説明文。**省略時に何が起きるか**をここで約束する。
+ * SOURCE_DESC と同じく 5 種別に複製されるので短く保つ。
+ */
+export const CONFIDENCE_DESC =
+  '確度。省略は未設定のまま(stated にしない) / omitted stays unset, never stated';
+
+/**
+ * 5 種類の入力に同じ形で足す(欄名が種別ごとに違うと機械で数えられない)。
+ *
+ * **毎回あたらしい zod インスタンスを作る**のが肝。1 個のインスタンスを 5 か所に
+ * 使い回すと zod-to-json-schema が重複を検出して
+ * `{"$ref":"#/properties/risks/items/properties/source"}` に畳んでしまい、
+ * risks 以外の 4 種別から説明文が消える(実測)。$ref を解決しない読み手には
+ * 「何を書く欄なのか」が届かなくなるので、ここは意図的に複製する。
+ */
+export function provenanceFields() {
+  return {
+    source: z.string().optional().describe(SOURCE_DESC),
+    confidence: z.enum(CONFIDENCE_LEVELS).optional().describe(CONFIDENCE_DESC),
+  };
+}
+
+/**
+ * 出典・確度を項目に反映する。
+ *
+ * 引数を渡さなければ今の値を保ち、空文字を渡すと消す(`mergeProvenance` の約束)。
+ * 検査は `runChecks` で先に済ませてあるので、ここで投げることは無い。
+ */
+export function applyProvenance<T extends Provenance>(item: T, input: ProvenanceInput, field: string): void {
+  if (input.source === undefined && input.confidence === undefined) return;
+  const merged = mergeProvenance(item, input, field);
+  if (merged.source === undefined) delete item.source;
+  else item.source = merged.source;
+  if (merged.confidence === undefined) delete item.confidence;
+  else item.confidence = merged.confidence;
+}
+
+/** この呼び出しで触った項目(出典の付き具合をその場で見せるため) */
+export interface TouchedEntry {
+  kind: string;
+  label: string;
+  id: string;
+  entity: Provenance;
+}
+
+/**
+ * 出典の付き具合を返す節を組み立てる。
+ *
+ * ここが**この機能の要**。入力欄を足しただけでは誰も埋めない。
+ * 「いま入れた分のうち何件が出典なしか」「台帳全体で何件残っているか」を毎回突き返し、
+ * 最後に **id を差した具体的な次の一手**で終える。
+ */
+export function renderProvenanceSection(engagement: Engagement, touched: TouchedEntry[], l: Lang): string[] {
+  const out: string[] = [];
+  const summary = summarizeProvenance(engagement);
+  if (summary.total === 0) return out;
+
+  const noSource = touched.filter((t) => !hasProvenance(t.entity));
+  const noConfidence = touched.filter((t) => !t.entity.confidence);
+
+  out.push('');
+  out.push(`**${msg('出典', 'Provenance', l)}**`);
+  out.push('');
+
+  if (touched.length > 0) {
+    out.push(
+      `- ${msg(
+        `この呼び出しで登録・更新: ${touched.length} 件(出典なし ${noSource.length} 件 / 確度未設定 ${noConfidence.length} 件)`,
+        `This call touched ${touched.length} entr${touched.length === 1 ? 'y' : 'ies'} (${noSource.length} without a source, ${noConfidence.length} with confidence unset)`,
+        l,
+      )}`,
+    );
+    if (noConfidence.length > 0) {
+      // 省略された確度を黙って stated にはしない。何をしたかをここで言い切る。
+      out.push(
+        `  - ${msg(
+          '確度が省略された項目は**未設定のまま**保存しました(stated にはしていません)。',
+          'Entries with confidence omitted were stored with it **unset** — they were not recorded as stated.',
+          l,
+        )}`,
+      );
+    }
+  }
+
+  const c = summary.byConfidence;
+  const marks = CONFIDENCE_DEFINITIONS;
+  // 括弧まで日英で分ける。en に全角括弧が混ざると `lang="en"` の約束が崩れる。
+  const counts = (one: 'ja' | 'en'): string =>
+    `${marks.stated.marker} ${text(marks.stated.label, one)} ${c.stated} / ` +
+    `${marks.inferred.marker} ${text(marks.inferred.label, one)} ${c.inferred} / ` +
+    `${marks.unknown.marker} ${text(marks.unknown.label, one)} ${c.unknown} / ` +
+    `${one === 'ja' ? '未設定' : 'unset'} ${c.unset}`;
+  out.push(
+    `- ${msg(
+      `台帳全体: ${summary.total} 件中 ${summary.withoutSource} 件に出典なし(${counts('ja')})`,
+      `Whole ledger: ${summary.withoutSource} of ${summary.total} entries have no source (${counts('en')})`,
+      l,
+    )}`,
+  );
+
+  if (touched.length > 0) {
+    out.push('');
+    out.push(`| ${msg('種別', 'Kind', l)} | ${msg('項目', 'Entry', l)} | ${msg('出典・確度', 'Source / confidence', l)} |`);
+    out.push('| --- | --- | --- |');
+    const capped = capRows(touched, OUTPUT_LIMITS.rows);
+    for (const t of capped.rows) {
+      const label = capCell(t.label, 60).replace(/\|/g, '\\|');
+      out.push(`| ${t.kind} | ${label} \`${t.id}\` | ${provenanceCell(t.entity, l)} |`);
+    }
+    const notice = capNotice(
+      capped,
+      { ja: '全件は `get_engagement` で確認してください。', en: 'See them all with `get_engagement`.' },
+      l,
+    );
+    if (notice) out.push('');
+    if (notice) out.push(notice);
+  }
+
+  out.push('');
+  if (summary.withoutSource === 0) {
+    out.push(
+      c.unset > 0
+        ? msg(
+            `次の一手: ${summary.total} 件すべてに出典が付いています。残りは確度が未設定の ${c.unset} 件です。` +
+              '原文を指させるものは confidence="stated"、導いたものは confidence="inferred" を付けてください。',
+            `Next: all ${summary.total} entries carry a source. What remains is the ${c.unset} with confidence unset: ` +
+              'set confidence="stated" where the passage can be pointed at, confidence="inferred" where it was derived.',
+            l,
+          )
+        : msg(
+            `次の一手: ${summary.total} 件すべてに出典と確度が付いています。` +
+              '△ 推測の項目はまだ相手に確認できていない項目です。次の打ち合わせで確認し、確認できたら confidence="stated" に、否定されたら消してください。',
+            `Next: all ${summary.total} entries carry both a source and a confidence. ` +
+              'The △ inferred ones are the unconfirmed ones: raise them at the next meeting, then set confidence="stated" once confirmed, or delete them if the client says otherwise.',
+            l,
+          ),
+    );
+    return out;
+  }
+
+  // 具体例は実在の id を差す。「出典を付けましょう」だけでは誰も動かない。
+  // 例に使えるのは update_engagement が受ける 5 種別だけ。ロードマップ側の項目
+  // (transition / workPackage / assessment)を例に出すと、そのまま打って必ず止まる。
+  const argNames: Record<string, string> = {
+    risk: 'risks',
+    decision: 'decisions',
+    action: 'actions',
+    stakeholder: 'stakeholders',
+    deliverable: 'deliverables',
+  };
+  const example =
+    noSource.find((t) => argNames[t.kind]) ?? summary.missing.find((m) => argNames[m.kind] && m.id.length > 0);
+  const exampleId = example?.id ?? '';
+  const argName = example ? argNames[example.kind] ?? 'risks' : 'risks';
+  out.push(
+    msg(
+      `次の一手: 出典が無い ${summary.withoutSource} 件に出典を足してください。` +
+        (exampleId
+          ? `例: \`update_engagement\` に \`${argName}: [{ id: "${exampleId}", source: "csr2026.pdf p.5", confidence: "stated" }]\` を渡す。`
+          : '') +
+        '文書に書かれていないものは confidence="inferred" にして source に「何から導いたか」を書き、' +
+        '出所を辿れないものは confidence="unknown" にしたうえで、確認するか消すかをその場で決めてください。',
+      `Next: attach a source to the ${summary.withoutSource} ${summary.withoutSource === 1 ? 'entry that lacks' : 'entries that lack'} one. ` +
+        (exampleId
+          ? `For example, call \`update_engagement\` with \`${argName}: [{ id: "${exampleId}", source: "csr2026.pdf p.5", confidence: "stated" }]\`. `
+          : '') +
+        'Use confidence="inferred" with what it was derived from in source when the document does not say it, ' +
+        'and confidence="unknown" when the origin cannot be traced — then decide, there and then, to confirm it or delete it.',
+      l,
+    ),
+  );
+  return out;
+}
+
 const riskInput = z.object({
   id: z.string().optional().describe('既存リスクの ID。省略すると新規追加 / Existing risk id; omit to add a new one'),
+  ...provenanceFields(),
   title: z.string().optional(),
   description: z.string().optional(),
   level: z.enum(RISK_LEVELS).optional().describe('対策前のリスクレベル'),
@@ -238,6 +445,7 @@ const riskInput = z.object({
 
 const decisionInput = z.object({
   id: z.string().optional(),
+  ...provenanceFields(),
   title: z.string().optional(),
   context: z.string().optional().describe('背景・検討した選択肢'),
   decision: z.string().optional().describe('決定内容'),
@@ -249,6 +457,7 @@ const decisionInput = z.object({
 
 const actionInput = z.object({
   id: z.string().optional(),
+  ...provenanceFields(),
   title: z.string().optional(),
   owner: z.string().optional(),
   due: z.string().optional().describe('期限 YYYY-MM-DD'),
@@ -260,6 +469,7 @@ const actionInput = z.object({
 
 const stakeholderInput = z.object({
   id: z.string().optional(),
+  ...provenanceFields(),
   name: z.string().optional(),
   role: z.string().optional(),
   organization: z.string().optional(),
@@ -271,6 +481,7 @@ const stakeholderInput = z.object({
 
 const deliverableInput = z.object({
   id: z.string().optional(),
+  ...provenanceFields(),
   deliverableId: z.string().optional().describe('知識ベースの成果物 ID(例: architecture-vision)'),
   name: z.string().optional(),
   status: z.enum(DELIVERABLE_STATUSES).optional(),
@@ -384,6 +595,25 @@ export function registerEngagementTools(server: McpServer): void {
         const cur = findPhase(saved.currentPhaseId);
         if (cur) out.push(`- ${msg('現在フェーズ', 'Current phase', l)}: ${cur.code}. ${text(cur.name, l)}`);
         out.push('');
+        // 台帳が空のいま、出典の約束を先に置く。項目が溜まってから遡って付けるのは実務上できない。
+        out.push(
+          msg(
+            `次の一手: \`update_engagement\` で項目を登録します。**登録するときに必ず source と confidence を付けてください。** ` +
+              `source は「どの資料のどこか / 誰にいつ聞いたか」(例: "csr2026.pdf p.5"、"2026-08-14 ヒアリング(情シス部長)")。` +
+              `confidence は ${CONFIDENCE_DEFINITIONS.stated.marker} stated(原文を指させる) / ` +
+              `${CONFIDENCE_DEFINITIONS.inferred.marker} inferred(書かれていないが導いた) / ` +
+              `${CONFIDENCE_DEFINITIONS.unknown.marker} unknown(出所が辿れない)の 3 値です。` +
+              `省略すると未設定のまま保存し、応答が「出典なし」として数え続けます。`,
+            `Next: register entries with \`update_engagement\`, and **attach source and confidence as you go.** ` +
+              `source says which document and where, or who said it and when (for example "csr2026.pdf p.5", "2026-08-14 interview (Head of IT)"). ` +
+              `confidence is one of ${CONFIDENCE_DEFINITIONS.stated.marker} stated (the passage can be pointed at), ` +
+              `${CONFIDENCE_DEFINITIONS.inferred.marker} inferred (derived, not written), ` +
+              `${CONFIDENCE_DEFINITIONS.unknown.marker} unknown (origin cannot be traced). ` +
+              `Omit it and it stays unset, and every response keeps counting the entry as missing a source.`,
+            l,
+          ),
+        );
+        out.push('');
         out.push(renderDashboardMarkdown(saved, l));
         return textResult(out.join('\n'));
       } catch (error) {
@@ -436,7 +666,7 @@ export function registerEngagementTools(server: McpServer): void {
     {
       title: 'Update the engagement',
       description:
-        'エンゲージメントを部分更新する。フェーズ状態の変更、リスク・決定事項・アクション・ステークホルダー・成果物の追加/更新、メモの追記ができる。各項目は id を指定すれば更新、省略すれば新規追加。 / Partially update the engagement: change phase statuses and add or update risks, decisions, actions, stakeholders, deliverables, and notes. Supply an id to update an entry, omit it to add one.',
+        'エンゲージメントを部分更新する。フェーズ状態の変更、リスク・決定事項・アクション・ステークホルダー・成果物の追加/更新、メモの追記ができる。各項目は id を指定すれば更新、省略すれば新規追加。各項目には出典 source(例 "csr2026.pdf p.5")と確度 confidence(stated / inferred / unknown)を付けられる — 応答が出典の付いていない件数を毎回返す。 / Partially update the engagement: change phase statuses and add or update risks, decisions, actions, stakeholders, deliverables, and notes. Supply an id to update an entry, omit it to add one. Every entry can carry source (for example "csr2026.pdf p.5") and confidence (stated / inferred / unknown); the response reports how many entries still have no source. With confidence="inferred", record in source what the entry was derived from (e.g. "from the headcount on p.5 and the org chart on p.9").',
       inputSchema: {
         name: z.string().optional(),
         client: z.string().optional(),
@@ -495,6 +725,7 @@ export function registerEngagementTools(server: McpServer): void {
             () => checkText(`risks[${i}].owner`, r.owner, 'title', l),
             () => checkText(`risks[${i}].mitigation`, r.mitigation, 'text', l),
             () => checkText(`risks[${i}].phase`, r.phase, 'title', l, PHASE_HINT),
+            () => checkProvenance(`risks[${i}]`, r, l),
           ]),
           ...(input.decisions ?? []).flatMap((d, i) => [
             () => checkText(`decisions[${i}].id`, d.id, 'title', l, ID_HINT),
@@ -504,6 +735,7 @@ export function registerEngagementTools(server: McpServer): void {
             () => checkText(`decisions[${i}].rationale`, d.rationale, 'text', l),
             () => checkText(`decisions[${i}].decidedBy`, d.decidedBy, 'title', l),
             () => checkText(`decisions[${i}].phase`, d.phase, 'title', l, PHASE_HINT),
+            () => checkProvenance(`decisions[${i}]`, d, l),
           ]),
           ...(input.actions ?? []).flatMap((a, i) => [
             () => checkText(`actions[${i}].id`, a.id, 'title', l, ID_HINT),
@@ -512,6 +744,7 @@ export function registerEngagementTools(server: McpServer): void {
             () => checkText(`actions[${i}].due`, a.due, 'title', l),
             () => checkText(`actions[${i}].note`, a.note, 'text', l),
             () => checkText(`actions[${i}].phase`, a.phase, 'title', l, PHASE_HINT),
+            () => checkProvenance(`actions[${i}]`, a, l),
           ]),
           ...(input.stakeholders ?? []).flatMap((s, i) => [
             () => checkText(`stakeholders[${i}].id`, s.id, 'title', l, ID_HINT),
@@ -520,6 +753,7 @@ export function registerEngagementTools(server: McpServer): void {
             () => checkText(`stakeholders[${i}].organization`, s.organization, 'title', l),
             () => checkTextList(`stakeholders[${i}].concerns`, s.concerns, 'concern', l),
             () => checkText(`stakeholders[${i}].approach`, s.approach, 'text', l),
+            () => checkProvenance(`stakeholders[${i}]`, s, l),
           ]),
           ...(input.deliverables ?? []).flatMap((d, i) => [
             () => checkText(`deliverables[${i}].id`, d.id, 'title', l, ID_HINT),
@@ -529,6 +763,7 @@ export function registerEngagementTools(server: McpServer): void {
             () => checkText(`deliverables[${i}].link`, d.link, 'title', l),
             () => checkText(`deliverables[${i}].note`, d.note, 'text', l),
             () => checkText(`deliverables[${i}].phase`, d.phase, 'title', l, PHASE_HINT),
+            () => checkProvenance(`deliverables[${i}]`, d, l),
           ]),
         ]);
         if (problem) return limitErrorResult(problem, l);
@@ -547,6 +782,8 @@ export function registerEngagementTools(server: McpServer): void {
         const e: Engagement = current;
         const changes: ChangeLog = { added: [], updated: [], removed: [] };
         const problems: string[] = [];
+        // この呼び出しで触った項目。出典の付き具合を「いま入れた分」について即座に返すため。
+        const touched: TouchedEntry[] = [];
         const timestamp = now();
 
         if (input.name) { e.name = input.name; changes.updated.push('name'); }
@@ -581,7 +818,7 @@ export function registerEngagementTools(server: McpServer): void {
           changes.updated.push(`phase ${findPhase(id)?.code ?? id} → ${p.status}`);
         }
 
-        for (const r of input.risks ?? []) {
+        for (const [i, r] of (input.risks ?? []).entries()) {
           const err = upsert<Risk>(
             e.risks,
             r,
@@ -605,6 +842,8 @@ export function registerEngagementTools(server: McpServer): void {
               if (r.owner !== undefined) item.owner = r.owner;
               if (r.mitigation !== undefined) item.mitigation = r.mitigation;
               if (r.phase !== undefined) item.phaseId = resolvePhaseId(r.phase);
+              applyProvenance(item, r, `risks[${i}]`);
+              touched.push({ kind: 'risk', label: item.title, id: item.id, entity: item });
             },
             changes,
             'risk',
@@ -613,7 +852,7 @@ export function registerEngagementTools(server: McpServer): void {
           if (err) problems.push(err);
         }
 
-        for (const d of input.decisions ?? []) {
+        for (const [i, d] of (input.decisions ?? []).entries()) {
           const err = upsert<Decision>(
             e.decisions,
             d,
@@ -636,6 +875,8 @@ export function registerEngagementTools(server: McpServer): void {
               if (d.status !== undefined) item.status = d.status;
               if (d.decidedBy !== undefined) item.decidedBy = d.decidedBy;
               if (d.phase !== undefined) item.phaseId = resolvePhaseId(d.phase);
+              applyProvenance(item, d, `decisions[${i}]`);
+              touched.push({ kind: 'decision', label: item.title, id: item.id, entity: item });
             },
             changes,
             'decision',
@@ -644,7 +885,7 @@ export function registerEngagementTools(server: McpServer): void {
           if (err) problems.push(err);
         }
 
-        for (const a of input.actions ?? []) {
+        for (const [i, a] of (input.actions ?? []).entries()) {
           const err = upsert<Action>(
             e.actions,
             a,
@@ -667,6 +908,8 @@ export function registerEngagementTools(server: McpServer): void {
               if (a.priority !== undefined) item.priority = a.priority;
               if (a.note !== undefined) item.note = a.note;
               if (a.phase !== undefined) item.phaseId = resolvePhaseId(a.phase);
+              applyProvenance(item, a, `actions[${i}]`);
+              touched.push({ kind: 'action', label: item.title, id: item.id, entity: item });
             },
             changes,
             'action',
@@ -675,7 +918,7 @@ export function registerEngagementTools(server: McpServer): void {
           if (err) problems.push(err);
         }
 
-        for (const s of input.stakeholders ?? []) {
+        for (const [i, s] of (input.stakeholders ?? []).entries()) {
           const err = upsert<Stakeholder>(
             e.stakeholders,
             s,
@@ -699,6 +942,8 @@ export function registerEngagementTools(server: McpServer): void {
               if (s.interest !== undefined) item.interest = s.interest;
               if (s.concerns !== undefined) item.concerns = s.concerns;
               if (s.approach !== undefined) item.approach = s.approach;
+              applyProvenance(item, s, `stakeholders[${i}]`);
+              touched.push({ kind: 'stakeholder', label: item.name, id: item.id, entity: item });
             },
             changes,
             'stakeholder',
@@ -707,7 +952,7 @@ export function registerEngagementTools(server: McpServer): void {
           if (err) problems.push(err);
         }
 
-        for (const d of input.deliverables ?? []) {
+        for (const [i, d] of (input.deliverables ?? []).entries()) {
           const known = d.deliverableId ? findDeliverable(d.deliverableId) : undefined;
           if (d.deliverableId && !known) {
             problems.push(`deliverables: knowledge-base id "${echo(d.deliverableId)}" not found`);
@@ -740,6 +985,8 @@ export function registerEngagementTools(server: McpServer): void {
               if (d.link !== undefined) item.link = d.link;
               if (d.note !== undefined) item.note = d.note;
               if (d.phase !== undefined) item.phaseId = resolvePhaseId(d.phase);
+              applyProvenance(item, d, `deliverables[${i}]`);
+              touched.push({ kind: 'deliverable', label: item.name, id: item.id, entity: item });
             },
             changes,
             'deliverable',
@@ -812,6 +1059,7 @@ export function registerEngagementTools(server: McpServer): void {
         }
         out.push('');
         out.push(`${msg('進捗', 'Progress', l)}: ${progress.percent}% (${progress.completed}/${progress.total - progress.skipped})`);
+        out.push(...renderProvenanceSection(saved, touched, l));
         out.push('');
         out.push(renderDashboardMarkdown(saved, l));
         return textResult(out.join('\n'));

@@ -15,6 +15,12 @@
 
 import { ADM_PHASES, type Bilingual, type Lang } from '../knowledge/index.js';
 import {
+  CONFIDENCE_DEFINITIONS,
+  CONFIDENCE_LEVELS,
+  NO_SOURCE_LABEL,
+  NO_SOURCE_MARK,
+} from '../engagement/model.js';
+import {
   ACTION_STATUS_LABEL,
   ASSESSMENT_KIND_LABEL,
   DECISION_STATUS_LABEL,
@@ -55,6 +61,13 @@ const LOCAL = {
   summary: { ja: '所見', en: 'Summary' },
   scale: { ja: '尺度', en: 'Scale' },
   assessedAt: { ja: '評価日', en: 'Assessed' },
+  source: { ja: '出典', en: 'Source' },
+  sourceLegend: {
+    ja: '「? 出所未記入」は出典が 1 文字も書かれていない行で、「× 出所不明」(書いたが辿れない)とは別物です。',
+    en: '"? no source" means nothing was recorded at all, which is not the same as "× untraceable" (recorded but cannot be traced).',
+  },
+  sourceCoverage: { ja: '出典あり', en: 'With a source' },
+  confidenceUnset: { ja: '確度未設定', en: 'Confidence unset' },
 } satisfies Record<string, Bilingual>;
 
 /** JSON をそのまま <script> に埋めても壊れないようにする */
@@ -88,6 +101,15 @@ export function renderDashboardHtml(lang: Lang = 'both'): string {
     deliverableStatus: labelMap(DELIVERABLE_STATUS_LABEL, lang),
     workPackageStatus: labelMap(WORK_PACKAGE_STATUS_LABEL, lang),
     assessmentKind: labelMap(ASSESSMENT_KIND_LABEL, lang),
+    // 確度の印とラベルは engagement/model.ts に 1 か所だけ定義がある。
+    // ここで文字列リテラルを書き写すと、値が増減したときにこの画面だけ古くなる。
+    confidence: Object.fromEntries(
+      CONFIDENCE_LEVELS.map((v) => [
+        v,
+        { marker: CONFIDENCE_DEFINITIONS[v].marker, label: label(CONFIDENCE_DEFINITIONS[v].label, lang) },
+      ]),
+    ),
+    noSource: { marker: NO_SOURCE_MARK, label: label(NO_SOURCE_LABEL, lang) },
   };
 
   return `<!doctype html>
@@ -219,6 +241,9 @@ section > h2 .tools { margin-left: auto; display: inline-flex; gap: 6px; align-i
 h3.sub { font-size: 13px; margin: 18px 0 8px; color: var(--muted); font-weight: 600; }
 .bar { height: 10px; border-radius: 999px; background: var(--line); overflow: hidden; }
 .bar > i { display: block; height: 100%; background: var(--accent); transition: width .4s ease; }
+.src { font-size: 12px; }
+.src.none { color: var(--muted); }
+.src.conf { font-size: 13px; }
 .stats { display: flex; flex-wrap: wrap; gap: 20px; margin-top: 12px; }
 .stat .n { font-size: 20px; font-weight: 600; }
 .stat .k { font-size: 12px; color: var(--muted); }
@@ -428,6 +453,32 @@ footer { margin-top: 24px; color: var(--muted); font-size: 12px; text-align: cen
     return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
   }
   function tag(cls, txt) { return '<span class="tag ' + esc(cls) + '">' + esc(txt) + '</span>'; }
+  /* 出典セル。出典も確度も無い行は空欄にせず「? 出所未記入」と出す。
+     空欄にすると「見るところが無い」に見えて、埋めるべき行がそのまま見落とされる。 */
+  function srcCell(x) {
+    var src = (x && typeof x.source === 'string') ? x.source.replace(/\\s+/g, ' ').trim() : '';
+    var conf = (x && D.confidence[x.confidence]) ? D.confidence[x.confidence] : null;
+    if (!src && !conf) {
+      return '<span class="src none" title="' + esc(S.sourceLegend) + '">'
+        + esc(D.noSource.marker + ' ' + D.noSource.label) + '</span>';
+    }
+    var out = '';
+    if (conf) out += '<span class="src conf" title="' + esc(conf.label) + '">' + esc(conf.marker) + '</span> ';
+    return out + '<span class="src">' + esc(src || conf.label) + '</span>';
+  }
+  /* 出典の付き具合を数える(件数だけ見せると「これだけ積み上がった」で話が終わる) */
+  function provenanceStats(e) {
+    var kinds = ['risks', 'decisions', 'actions', 'stakeholders', 'deliverables', 'transitions', 'workPackages', 'assessments'];
+    var total = 0, withSource = 0, by = { stated: 0, inferred: 0, unknown: 0, unset: 0 };
+    kinds.forEach(function (k) {
+      (e[k] || []).forEach(function (x) {
+        total += 1;
+        if (x && typeof x.source === 'string' && x.source.trim()) withSource += 1;
+        if (x && D.confidence[x.confidence]) by[x.confidence] += 1; else by.unset += 1;
+      });
+    });
+    return { total: total, withSource: withSource, by: by };
+  }
   /* 保管先はローカルパスや file:// も許すが、クリックでコードが走る URL はリンクにしない */
   function safeHref(url) {
     return /^\\s*(javascript|data|vbscript):/i.test(String(url)) ? null : String(url);
@@ -480,6 +531,15 @@ footer { margin-top: 24px; color: var(--muted); font-size: 12px; text-align: cen
     var extra = '';
     if ((e.workPackages || []).length) extra += stat(e.workPackages.length, S.workPackages);
     if ((e.transitions || []).length) extra += stat(e.transitions.length, S.transitions);
+    /* 台帳が空のときは出さない。0/0 を「100%」や「出典管理が良い」と読ませないため */
+    var prov = provenanceStats(e);
+    if (prov.total > 0) {
+      var marks = D.noSource ? Object.keys(D.confidence).map(function (k) {
+        return D.confidence[k].marker + ' ' + prov.by[k];
+      }).join(' / ') : '';
+      extra += stat(prov.withSource + '/' + prov.total, S.sourceCoverage + ' — ' + marks
+        + ' / ' + S.confidenceUnset + ' ' + prov.by.unset);
+    }
     return '<section>'
       + '<div class="bar"><i style="width:' + pct + '%"></i></div>'
       + '<div class="stats">'
@@ -678,10 +738,11 @@ footer { margin-top: 24px; color: var(--muted); font-size: 12px; text-align: cen
       return '<tr><td class="n">' + esc(s.name) + '</td><td class="n">' + esc([s.role, s.organization].filter(Boolean).join(' / '))
         + '</td><td class="c">' + tag(s.influence, D.influence[s.influence] || s.influence)
         + '</td><td class="c">' + tag(s.interest, D.influence[s.interest] || s.interest)
-        + '</td><td>' + esc((s.concerns || []).join('; ')) + '</td><td>' + esc(s.approach) + '</td></tr>';
+        + '</td><td>' + esc((s.concerns || []).join('; ')) + '</td><td>' + esc(s.approach)
+        + '</td><td>' + srcCell(s) + '</td></tr>';
     });
     return section(S.stakeholders, e.stakeholders.length, table(
-      [{ t: S.name, n: 1 }, { t: S.role, n: 1 }, { t: S.influence, c: 1 }, { t: S.interest, c: 1 }, { t: S.concerns }, { t: S.approach }],
+      [{ t: S.name, n: 1 }, { t: S.role, n: 1 }, { t: S.influence, c: 1 }, { t: S.interest, c: 1 }, { t: S.concerns }, { t: S.approach }, { t: S.source }],
       rows), 'stakeholders');
   }
 
@@ -731,11 +792,12 @@ footer { margin-top: 24px; color: var(--muted); font-size: 12px; text-align: cen
         + '</td><td class="c">' + tag(r.level, D.riskLevel[r.level] || r.level)
         + '</td><td class="c">' + (r.residualLevel ? tag(r.residualLevel, D.riskLevel[r.residualLevel]) : '')
         + '</td><td class="c">' + tag(r.status, D.riskStatus[r.status] || r.status)
-        + '</td><td class="n">' + esc(r.owner) + '</td><td>' + esc(r.mitigation) + '</td></tr>';
+        + '</td><td class="n">' + esc(r.owner) + '</td><td>' + esc(r.mitigation)
+        + '</td><td>' + srcCell(r) + '</td></tr>';
     });
     var count = state.openRisksOnly ? list.length + ' / ' + e.risks.length : e.risks.length;
     return section(S.risks, count, table(
-      [{ t: S.title }, { t: S.level, c: 1 }, { t: S.residual, c: 1 }, { t: S.status, c: 1 }, { t: S.owner, n: 1 }, { t: S.mitigation }],
+      [{ t: S.title }, { t: S.level, c: 1 }, { t: S.residual, c: 1 }, { t: S.status, c: 1 }, { t: S.owner, n: 1 }, { t: S.mitigation }, { t: S.source }],
       rows), 'risks', toggleBtn('risks', state.openRisksOnly));
   }
 

@@ -17,17 +17,28 @@ import {
   type Lang,
 } from '../knowledge/index.js';
 import {
+  CONFIDENCE_DEFINITIONS,
+  CONFIDENCE_LEVELS,
+  NO_SOURCE_LABEL,
+  NO_SOURCE_MARK,
   OUTPUT_LIMITS,
   capCell,
   capNotice,
   capRows,
+  checkProvenance,
+  hasProvenance,
   makeId,
+  normalizeProvenance,
   now,
+  provenanceCell,
+  sourceCell,
+  summarizeProvenance,
   type Assessment,
   type AssessmentFactor,
   type AssessmentKind,
   type Engagement,
   type InfluenceLevel,
+  type Provenance,
   type Risk,
   type RiskLevel,
   type RiskStatus,
@@ -173,6 +184,143 @@ function referenceSection(lines: (string | null)[], lang: Lang): string[] {
   out.push(`## ${inline('参考', 'References', lang)}`);
   out.push('');
   for (const line of valid) out.push(`- ${line}`);
+  out.push('');
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// 出典 / Provenance in the detail tables
+//
+// 実際の案件で起きたこと: 文書から読み取った数字と、こちらが推測した数字が、
+// 台帳の中で同じ顔をして並んだ。表に出典の列が無いと、後から
+// 「これは資料に書いてあったのか、我々が言ったのか」を確かめられない。
+//
+// 出典が無い行を**空欄にしない**のはそのため。空欄は「まだ入れていない」ではなく
+// 「見るところが無い」に見えて、そのまま見落とされる。
+// ---------------------------------------------------------------------------
+
+// 印・ラベル・セル生成の実体は `engagement/model.ts` に 1 か所だけ置いてある。
+// ダッシュボード(markdown / html)と図(diagrams.ts)も同じものを使うので、
+// ここで作り直すと表ごとに未記入の見た目が変わる。再輸出だけにとどめること。
+export { NO_SOURCE_MARK, NO_SOURCE_LABEL, sourceCell };
+
+/** 複数の要素にまたがる行(現行 → 目標 など)の出典セル */
+function combinedSourceCell(entities: (Provenance | null | undefined)[], lang: Lang): string {
+  const parts: string[] = [];
+  for (const e of entities) {
+    if (!hasProvenance(e) && !e?.confidence) continue;
+    const rendered = provenanceCell(e, lang);
+    if (!parts.includes(rendered)) parts.push(rendered);
+  }
+  if (parts.length === 0) {
+    return `${NO_SOURCE_MARK} ${inline(NO_SOURCE_LABEL.ja, NO_SOURCE_LABEL.en, lang)}`;
+  }
+  return parts.join(' / ');
+}
+
+/**
+ * 出典列の凡例。記号だけを出して意味を書かないと、読む側が印を無視する。
+ * 確度の 3 値は `CONFIDENCE_DEFINITIONS`(model.ts)に 1 か所だけ定義があり、ここはそれを引く。
+ */
+export function provenanceLegend(lang: Lang): string {
+  const line = (l: 'ja' | 'en'): string =>
+    [
+      ...CONFIDENCE_LEVELS.map((v) => `\`${CONFIDENCE_DEFINITIONS[v].marker}\` ${text(CONFIDENCE_DEFINITIONS[v].label, l)}`),
+      `\`${NO_SOURCE_MARK}\` ${l === 'ja' ? NO_SOURCE_LABEL.ja : NO_SOURCE_LABEL.en}`,
+    ].join(' / ');
+  return msg(
+    `出典欄の凡例: ${line('ja')}。「${NO_SOURCE_MARK} ${NO_SOURCE_LABEL.ja}」は出典が 1 文字も書かれていない行で、「${CONFIDENCE_DEFINITIONS.unknown.marker} ${text(CONFIDENCE_DEFINITIONS.unknown.label, 'ja')}」(出典は書いたが辿れない)とは別物です。`,
+    `Source column legend: ${line('en')}. "${NO_SOURCE_MARK} ${NO_SOURCE_LABEL.en}" means nothing at all was recorded, which is not the same as "${CONFIDENCE_DEFINITIONS.unknown.marker} ${text(CONFIDENCE_DEFINITIONS.unknown.label, 'en')}" (a source was written down but cannot be traced).`,
+    lang,
+  );
+}
+
+/** 出典の付き具合(この表に載っている分) */
+function countProvenance(items: readonly (Provenance | null | undefined)[]): {
+  total: number;
+  withSource: number;
+  withoutSource: number;
+} {
+  const total = items.length;
+  const withSource = items.filter((x) => hasProvenance(x)).length;
+  return { total, withSource, withoutSource: total - withSource };
+}
+
+/**
+ * 「登録済み項目のうち出典が付いているのは N/M 件」の節。
+ *
+ * 人が目で照合していたことを機械にやらせる第一歩。件数だけでなく、
+ * 出典の無い項目を**名前で**出す(件数だけだと、どれを直すのかが分からない)。
+ */
+function provenanceCoverageSection(
+  subject: Bilingual,
+  items: readonly (Provenance | null | undefined)[],
+  engagement: Engagement,
+  lang: Lang,
+): string[] {
+  const local = countProvenance(items);
+  const all = summarizeProvenance(engagement);
+  const out: string[] = [];
+  out.push(`## ${inline('出典の記入状況', 'Source coverage', lang)}`);
+  out.push('');
+  const breakdown = (l: 'ja' | 'en'): string =>
+    [
+      ...CONFIDENCE_LEVELS.map(
+        (v) => `${CONFIDENCE_DEFINITIONS[v].marker} ${text(CONFIDENCE_DEFINITIONS[v].label, l)} ${all.byConfidence[v]}`,
+      ),
+      `${l === 'ja' ? '確度未設定' : 'confidence not set'} ${all.byConfidence.unset}`,
+    ].join(' / ');
+  out.push(
+    bullets(
+      [
+        {
+          ja: `この表の${subject.ja}: **${local.withSource}/${local.total} 件**に出典が付いています(未記入 ${local.withoutSource} 件)。`,
+          en: `${subject.en} in this table: **${local.withSource} of ${local.total}** carry a source (${local.withoutSource} without).`,
+        },
+        {
+          ja: `案件全体(リスク・決定事項・アクション・関係者・成果物・移行状態・作業パッケージ・評価): **${all.withSource}/${all.total} 件**。確度の内訳: ${breakdown('ja')}。`,
+          en: `Across the whole engagement (risks, decisions, actions, stakeholders, deliverables, transitions, work packages, assessments): **${all.withSource} of ${all.total}**. By confidence: ${breakdown('en')}.`,
+        },
+      ],
+      lang,
+    ),
+  );
+  out.push('');
+  if (all.missing.length > 0) {
+    const shown = capRows(all.missing);
+    out.push(
+      msg(
+        `出典が無い項目 ${all.missing.length} 件:`,
+        `${all.missing.length} entries with no source:`,
+        lang,
+      ),
+    );
+    out.push('');
+    for (const m of shown.rows) {
+      out.push(`- \`${m.kind}\` ${cell(capCell(m.label || m.id))}${m.id ? ` (\`${m.id}\`)` : ''}`);
+    }
+    if (shown.capped) {
+      out.push('');
+      out.push(
+        `_${capNotice(
+          shown,
+          {
+            ja: '出典の無い項目は種別順。全件は `get_engagement` の format="json" で確認できる。',
+            en: 'Ordered by kind. Read them all with format="json" on `get_engagement`.',
+          },
+          lang,
+        )}_`,
+      );
+    }
+    out.push('');
+  }
+  out.push(
+    msg(
+      '出典の無い項目は、後から真偽を確かめられません。消す判断も残す判断もできないまま台帳に残り続けます。出典を足すか、項目そのものを消すかを決めてください。',
+      'An entry with no source cannot be checked later. It stays on the ledger with nobody able to decide whether to keep it or drop it. Either attach a source or remove the entry.',
+      lang,
+    ),
+  );
   out.push('');
   return out;
 }
@@ -345,10 +493,18 @@ interface ResolvedMapping {
 /** マトリクスを表として描ける上限(超えたら一覧表示に切り替える) */
 const MATRIX_MAX = 12;
 
+/** 要素 1 件の出典(gap_analysis の sources 引数) */
+interface ElementSourceInput {
+  element: string;
+  source?: string;
+  confidence?: string;
+}
+
 interface GapAnalysisInput {
   baseline: string[];
   target: string[];
   mappings?: { from: string; to: string; kind: MappingKind }[];
+  sources?: ElementSourceInput[];
   domain?: string;
   save?: boolean;
   lang: string;
@@ -435,7 +591,8 @@ function runGapAnalysis(input: GapAnalysisInput): ToolResult {
   const tooMany =
     findTooManyItems('baseline', input.baseline) ??
     findTooManyItems('target', input.target) ??
-    findTooManyItems('mappings', input.mappings);
+    findTooManyItems('mappings', input.mappings) ??
+    findTooManyItems('sources', input.sources);
   if (tooMany) return tooManyItemsResult(tooMany, lang);
   const tooLong = checkFreeText(
     [
@@ -455,11 +612,23 @@ function runGapAnalysis(input: GapAnalysisInput): ToolResult {
         { field: `mappings[${i}].from`, value: m.from, limit: IDENTIFIER_LIMIT, hint: HINTS.listItem },
         { field: `mappings[${i}].to`, value: m.to, limit: IDENTIFIER_LIMIT, hint: HINTS.listItem },
       ]),
+      ...(input.sources ?? []).map((s, i) => ({
+        field: `sources[${i}].element`,
+        value: s.element,
+        limit: IDENTIFIER_LIMIT,
+        hint: HINTS.listItem,
+      })),
       { field: 'domain', value: input.domain, limit: IDENTIFIER_LIMIT, hint: HINTS.identifier },
     ],
     lang,
   );
   if (tooLong) return tooLong;
+
+  // 出典の値そのものの検査(長さと 3 値)。投げない入口を使う決まり
+  const badProvenance = runChecks(
+    (input.sources ?? []).map((s, i) => () => checkProvenance(`sources[${i}]`, s, lang)),
+  );
+  if (badProvenance) return errorResult(badProvenance);
 
   const baseline = uniqueNames(input.baseline);
   const target = uniqueNames(input.target);
@@ -506,6 +675,41 @@ function runGapAnalysis(input: GapAnalysisInput): ToolResult {
     if (resolved.some((r) => r.fromIndex === fromIndex && r.toIndex === toIndex)) continue;
     resolved.push({ fromIndex, toIndex, kind: m.kind });
   }
+
+  // --- 要素ごとの出典 ---
+  // 要素名は利用者(=資料を読んだ側)が付けた名前なので、突き合わせは名前の正規化で行う。
+  // baseline / target のどちらにも無い名前は、黙って捨てずに警告する
+  // (「出典を付けたつもり」で通ってしまうのが一番まずい)。
+  const sourceByElement = new Map<string, Provenance>();
+  for (const s of input.sources ?? []) {
+    const key = normalizeName(s.element ?? '');
+    if (key.length === 0) continue;
+    if (!baselineKeys.includes(key) && !targetKeys.includes(key)) {
+      warnings.push(
+        inline(
+          `出典の element「${s.element}」は baseline にも target にも見つかりません(無視しました)。`,
+          `Source entry for element "${s.element}" matches neither baseline nor target; it was ignored.`,
+          lang,
+        ),
+      );
+      continue;
+    }
+    // 検査は上の checkProvenance で済んでいるのでここには来ないが、
+    // ツールハンドラから例外を投げない決まりなので受け止めておく
+    try {
+      sourceByElement.set(key, normalizeProvenance(s, `sources[${s.element}]`));
+    } catch {
+      warnings.push(
+        inline(
+          `出典の element「${s.element}」は値を読み取れませんでした(無視しました)。`,
+          `The source entry for element "${s.element}" could not be read; it was ignored.`,
+          lang,
+        ),
+      );
+    }
+  }
+  const provenanceOf = (element: string): Provenance | undefined =>
+    sourceByElement.get(normalizeName(element));
 
   // 現行にも目標にも同名で存在する要素は「維持」。
   // ここは以前、その現行要素に別の対応があるとき / その目標要素に別の対応が入っているときに
@@ -698,11 +902,21 @@ function runGapAnalysis(input: GapAnalysisInput): ToolResult {
   out.push(`## ${inline('検出したギャップと推奨アクション', 'Detected gaps and recommended actions', lang)}`);
   out.push('');
 
-  const gapRows: { kind: 'new' | 'eliminated' | MappingKind; subject: string }[] = [];
-  for (const j of newIdx) gapRows.push({ kind: 'new', subject: target[j] });
-  for (const i of eliminatedIdx) gapRows.push({ kind: 'eliminated', subject: baseline[i] });
-  for (const m of byKind.modified) gapRows.push({ kind: 'modified', subject: `${baseline[m.fromIndex]} → ${target[m.toIndex]}` });
-  for (const m of byKind.replaced) gapRows.push({ kind: 'replaced', subject: `${baseline[m.fromIndex]} → ${target[m.toIndex]}` });
+  const gapRows: { kind: 'new' | 'eliminated' | MappingKind; subject: string; elements: string[] }[] = [];
+  for (const j of newIdx) gapRows.push({ kind: 'new', subject: target[j], elements: [target[j]] });
+  for (const i of eliminatedIdx) gapRows.push({ kind: 'eliminated', subject: baseline[i], elements: [baseline[i]] });
+  for (const m of byKind.modified)
+    gapRows.push({
+      kind: 'modified',
+      subject: `${baseline[m.fromIndex]} → ${target[m.toIndex]}`,
+      elements: [baseline[m.fromIndex], target[m.toIndex]],
+    });
+  for (const m of byKind.replaced)
+    gapRows.push({
+      kind: 'replaced',
+      subject: `${baseline[m.fromIndex]} → ${target[m.toIndex]}`,
+      elements: [baseline[m.fromIndex], target[m.toIndex]],
+    });
 
   if (gapRows.length === 0) {
     out.push(
@@ -723,14 +937,33 @@ function runGapAnalysis(input: GapAnalysisInput): ToolResult {
     );
     out.push('');
     out.push(
-      `| ${inline('区分', 'Category', lang)} | ${inline('対象', 'Element', lang)} | ${label(L.recommendation, lang)} |`,
+      `| ${inline('区分', 'Category', lang)} | ${inline('対象', 'Element', lang)} | ${label(L.recommendation, lang)} | ${inline('出典', 'Source', lang)} |`,
     );
-    out.push('| --- | --- | --- |');
+    out.push('| --- | --- | --- | --- |');
     for (const row of gapRows) {
       out.push(
-        `| ${text(GAP_KIND_TITLE[row.kind], lang)} | ${elementCell(row.subject)} | ${cell(text(GAP_ACTION[row.kind], lang))} |`,
+        `| ${text(GAP_KIND_TITLE[row.kind], lang)} | ${elementCell(row.subject)} | ${cell(text(GAP_ACTION[row.kind], lang))} | ${combinedSourceCell(row.elements.map(provenanceOf), lang)} |`,
       );
     }
+    out.push('');
+    out.push(provenanceLegend(lang));
+    out.push('');
+    const elementCoverage = countProvenance([...baseline, ...target].map(provenanceOf));
+    out.push(
+      msg(
+        `出典が付いている要素は **${elementCoverage.withSource}/${elementCoverage.total} 件**です(現行 ${baseline.length} + 目標 ${target.length})。${
+          elementCoverage.withSource === 0
+            ? '1 件も付いていません。sources 引数に element と source(必要なら confidence)を渡すと、この列に出典が入ります。この分析の結論を会議で使うなら、少なくとも廃止と新規の要素には出典が要ります(「なぜこれを止めるのか」を必ず聞かれるため)。'
+            : '未記入の要素は、後から「誰がそう言ったのか」を確かめられません。sources 引数で足してください。'
+        }`,
+        `**${elementCoverage.withSource} of ${elementCoverage.total}** elements carry a source (${baseline.length} baseline + ${target.length} target). ${
+          elementCoverage.withSource === 0
+            ? 'None do. Pass element and source (and confidence if you have it) in the sources argument and this column fills in. If this analysis is going into a meeting, the eliminated and new elements need one at minimum — you will be asked why each is on the list.'
+            : 'For the rest, nobody can later check who said so. Add them through the sources argument.'
+        }`,
+        lang,
+      ),
+    );
     out.push('');
   }
 
@@ -1125,9 +1358,9 @@ function runRiskMatrix(lang: Lang): ToolResult {
   );
   const shownRisks = capRows(sortedRisks);
   out.push(
-    `| ID | ${label(L.title, lang)} | ${label(L.level, lang)} | ${label(L.residual, lang)} | ${label(L.status, lang)} | ${label(L.owner, lang)} | ${label(L.mitigation, lang)} |`,
+    `| ID | ${label(L.title, lang)} | ${label(L.level, lang)} | ${label(L.residual, lang)} | ${label(L.status, lang)} | ${label(L.owner, lang)} | ${label(L.mitigation, lang)} | ${inline('出典', 'Source', lang)} |`,
   );
-  out.push('| --- | --- | :-: | :-: | :-: | --- | --- |');
+  out.push('| --- | --- | :-: | :-: | :-: | --- | --- | --- |');
   for (const r of shownRisks.rows) {
     out.push(
       [
@@ -1141,6 +1374,7 @@ function runRiskMatrix(lang: Lang): ToolResult {
         cell(capCell(r.owner ?? '')) || '—',
         // 1 行が長いと 20 件でも表が読めなくなるので、自由記述だけ長さを抑える
         cell(capCell(r.mitigation ?? '')) || '—',
+        sourceCell(r, lang),
         '',
       ].join(' | ').trim(),
     );
@@ -1159,9 +1393,31 @@ function runRiskMatrix(lang: Lang): ToolResult {
     );
   }
   out.push('');
+  out.push(provenanceLegend(lang));
+  out.push('');
+
+  // --- 出典の記入状況 ---
+  out.push(...provenanceCoverageSection({ ja: 'リスク', en: 'Risks' }, risks, engagement, lang));
 
   // --- 要対応の指摘 ---
   const findings: Finding[] = [];
+  const severeWithoutSource = risks.filter(
+    (r) => (r.level === 'critical' || r.level === 'high') && !hasProvenance(r),
+  );
+  if (severeWithoutSource.length > 0) {
+    findings.push({
+      severity: 'medium',
+      subject: inline('全体', 'Overall', lang),
+      issue: {
+        ja: `重大リスク ${severeWithoutSource.length} 件に出典が無い`,
+        en: `${severeWithoutSource.length} severe risks carry no source`,
+      },
+      recommendation: {
+        ja: '重大と判定した根拠(どの資料の何ページ、誰の発言、どの障害)を出典として入れる。根拠を示せない重大リスクは、対策予算を要求する場で必ず「本当にそうなのか」と問われて止まる。',
+        en: 'Record what made it severe — which page of which document, whose statement, which incident. A severe risk you cannot source gets stopped the moment you ask for budget against it.',
+      },
+    });
+  }
   for (const r of risks) {
     const active = isActive(r);
     const severe = r.level === 'critical' || r.level === 'high';
@@ -2459,6 +2715,8 @@ function runStakeholderMatrix(lang: Lang): ToolResult {
   // --- 象限ごとの方針 ---
   out.push(`## ${inline('象限ごとの関与方針', 'Engagement approach per quadrant', lang)}`);
   out.push('');
+  out.push(provenanceLegend(lang));
+  out.push('');
   const quadrantOrder: Quadrant[] = ['manageClosely', 'keepSatisfied', 'keepInformed', 'monitor'];
   for (const q of quadrantOrder) {
     const members = groups[q];
@@ -2483,9 +2741,9 @@ function runStakeholderMatrix(lang: Lang): ToolResult {
     );
     const shownMembers = capRows(ordered, quadrantLimit(members.length, people.length));
     out.push(
-      `| ${label(L.name, lang)} | ${label(L.role, lang)} | ${label(L.influence, lang)} | ${label(L.interest, lang)} | ${label(L.concerns, lang)} | ${label(L.approach, lang)} |`,
+      `| ${label(L.name, lang)} | ${label(L.role, lang)} | ${label(L.influence, lang)} | ${label(L.interest, lang)} | ${label(L.concerns, lang)} | ${label(L.approach, lang)} | ${inline('出典', 'Source', lang)} |`,
     );
-    out.push('| --- | --- | :-: | :-: | --- | --- |');
+    out.push('| --- | --- | :-: | :-: | --- | --- | --- |');
     for (const s of shownMembers.rows) {
       out.push(
         [
@@ -2496,6 +2754,7 @@ function runStakeholderMatrix(lang: Lang): ToolResult {
           label(INFLUENCE_LABEL[s.interest], lang),
           cell(capCell(s.concerns.join(' / '))) || '—',
           cell(capCell(s.approach ?? '')) || '—',
+          sourceCell(s, lang),
           '',
         ].join(' | ').trim(),
       );
@@ -2516,12 +2775,32 @@ function runStakeholderMatrix(lang: Lang): ToolResult {
     out.push('');
   }
 
+  // --- 出典の記入状況 ---
+  out.push(...provenanceCoverageSection({ ja: '関係者', en: 'Stakeholders' }, people, engagement, lang));
+
   // --- 関係者間の対立 ---
   const conflicts = detectStakeholderConflicts(people);
   out.push(...renderStakeholderConflicts(people, conflicts, lang));
 
   // --- 指摘 ---
   const findings: Finding[] = [];
+  // 影響力の高い層(密に関与 / 満足を維持)の位置付けは、誰かの判断で決まっている。
+  // その判断の出所が残っていないと、体制が変わったときに全部やり直しになる。
+  const heavyWithoutSource = [...groups.manageClosely, ...groups.keepSatisfied].filter((s) => !hasProvenance(s));
+  if (heavyWithoutSource.length > 0) {
+    findings.push({
+      severity: 'medium',
+      subject: inline('全体', 'Overall', lang),
+      issue: {
+        ja: `影響力の高い ${heavyWithoutSource.length} 名に出典が無い`,
+        en: `${heavyWithoutSource.length} high-influence stakeholders carry no source`,
+      },
+      recommendation: {
+        ja: 'その人を「影響力が高い」と判断した根拠(組織図・決裁権限規程・面談日・誰の紹介か)を出典として入れる。根拠が残っていない人物像は、担当が代わった時点で最初から作り直しになる。',
+        en: 'Record what put them there — the org chart, the delegation-of-authority rules, the interview date, who introduced them. A stakeholder picture with no trail is rebuilt from scratch the moment the consultant changes.',
+      },
+    });
+  }
   const likely = conflicts.filter((c) => c.confidence === 'likely');
   for (const c of likely.slice(0, 5)) {
     const [repA, repB] = c.representative;
@@ -2903,9 +3182,40 @@ const READINESS_FACTORS: DefaultFactor[] = [
 
 interface FactorInput {
   name: string;
-  current: number;
+  /** 判断できなかった場合は null(評点を付けずに「判断材料なし」として扱う) */
+  current: number | null;
   target: number;
   note?: string;
+  source?: string;
+  confidence?: string;
+}
+
+/**
+ * 「この資料からは判断できない」因子 / A factor the material at hand cannot answer.
+ *
+ * 実測された問題: 根拠が無い因子にも評点が付き、その評点が平均に入って
+ * **誤った結論**(「準備度 68%、条件付きで着手可」など)を出していた。
+ * 判断できないことは 0 点でも 3 点でもない。評点とは別の状態として持ち、
+ * 総合判定から外したうえで、外したこと自体を必ず本文に書く。
+ */
+interface UndeterminedFactor extends Provenance {
+  name: string;
+  target: number;
+  /** なぜ判断できないのか(どの資料に無かったのか) */
+  note?: string;
+}
+
+/**
+ * 因子に付いた出典を `Provenance` に整える。
+ * 呼び出し前に `checkProvenance` を通してあるので投げないが、
+ * ツールハンドラから例外を出さない決まりなので受け止めておく。
+ */
+function sanitizeFactorProvenance(f: { source?: unknown; confidence?: unknown }): Provenance {
+  try {
+    return normalizeProvenance(f);
+  } catch {
+    return {};
+  }
 }
 
 interface AssessmentInput {
@@ -3107,8 +3417,8 @@ function renderFactorTemplate(kind: AssessmentKind, scale: number, lang: Lang): 
   out.push('');
   out.push(
     msg(
-      `因子が指定されていないため、既定の因子セット(${set.length} 件)を提示します。0〜${scale} で現在(current)と目標(target)を付けて、もう一度このツールを呼んでください。`,
-      `No factors were supplied, so here is the default set (${set.length} factors). Rate current and target from 0 to ${scale} and call this tool again.`,
+      `因子が指定されていないため、既定の因子セット(${set.length} 件)を提示します。0〜${scale} で現在(current)と目標(target)を付けて、もう一度このツールを呼んでください。判断できない因子は current に null を渡してください(その因子は総合判定から外し、「判断材料なし」として別に示します)。`,
+      `No factors were supplied, so here is the default set (${set.length} factors). Rate current and target from 0 to ${scale} and call this tool again. For any factor you cannot judge, pass null for current — it is then excluded from the overall verdict and listed separately as undetermined.`,
       lang,
     ),
   );
@@ -3144,6 +3454,14 @@ function renderFactorTemplate(kind: AssessmentKind, scale: number, lang: Lang): 
           ja: '現在の評点は、複数人に別々に付けてもらうと差が出る。その差自体が実態を語る。',
           en: 'Have several people score current levels independently. The spread between them is itself informative.',
         },
+        {
+          ja: '手元の資料からその因子を判断できないときは、current に **null** を渡す(0 ではない)。0 は「無い」という判断、null は「判断していない」。null にした因子は総合判定から外され、「判断材料なし」として別に出る。',
+          en: 'When the material at hand does not let you judge a factor, pass **null** for current — not 0. Zero is a finding ("there is none"); null is the absence of one. Factors set to null are excluded from the overall verdict and listed separately as undetermined.',
+        },
+        {
+          ja: '評点の根拠が資料にあるなら source に出典(例: "csr2026.pdf p.17")を、その出典が本文の記載か自分の推測かを confidence に入れる。出典のある評点だけが、次に測る人に引き継げる。',
+          en: 'When the score comes from a document, put the reference in source (e.g. "csr2026.pdf p.17") and say in confidence whether it is stated there or inferred. Only sourced scores survive a change of assessor.',
+        },
       ],
       lang,
     ),
@@ -3156,18 +3474,46 @@ function renderFactorTemplate(kind: AssessmentKind, scale: number, lang: Lang): 
     JSON.stringify(
       {
         scale,
-        factors: set.slice(0, 3).map((f) => ({
-          name: lang === 'en' ? f.name.en : f.name.ja,
-          current: 2,
-          target: 4,
-          note: '',
-        })),
+        factors: [
+          // source が空のまま confidence: "stated" を例に出さない。
+          // stated は「原文を指させる」という意味なので、出典が空の stated は
+          // それ自体が矛盾で、この雛形をそのまま貼れば「出所不明を確認済みとして
+          // 登録する」ことになる。空欄のときは confidence ごと省く(省略時は
+          // 未設定のまま保存され、stated には決してならない)。
+          ...set.slice(0, 2).map((f) => ({
+            name: lang === 'en' ? f.name.en : f.name.ja,
+            current: 2,
+            target: 4,
+            note: '',
+            source: '',
+          })),
+          // 3 件目は「判断できなかった」例。null は 0 の代わりではないことを見せる
+          ...set.slice(2, 3).map((f) => ({
+            name: lang === 'en' ? f.name.en : f.name.ja,
+            current: null,
+            target: 4,
+            note:
+              lang === 'en'
+                ? 'The material at hand says nothing about this; ask the IT planning lead.'
+                : '手元の資料に記載が無い。情報システム部門の企画担当に確認する。',
+            source: '',
+            confidence: 'unknown',
+          })),
+        ],
       },
       null,
       2,
     ),
   );
   out.push('```');
+  out.push('');
+  out.push(
+    msg(
+      '3 件目は「判断できなかった」書き方の例です(current が null)。適当な評点を置くより、null にして note に「なぜ判断できないか」を書くほうが、評価全体の信頼度が上がります。',
+      'The third entry shows how to say "I could not judge this" (current is null). Setting null and writing why in note makes the whole assessment more trustworthy than guessing a score.',
+      lang,
+    ),
+  );
   out.push('');
   out.push(
     msg(
@@ -3191,6 +3537,113 @@ function renderFactorTemplate(kind: AssessmentKind, scale: number, lang: Lang): 
   return out.join('\n');
 }
 
+/**
+ * 因子名を本文中に並べる。名前は 1 件 300 字まで入るので、件数と長さの両方を切る
+ * (切らないと 100 因子 × 300 字がそのまま本文に出る)。
+ */
+function factorNames(items: readonly { name: string }[], l: 'ja' | 'en', max = 8): string {
+  const shown = items.slice(0, max).map((f) => capCell(f.name, 60));
+  const rest =
+    items.length > max ? (l === 'en' ? ` and ${items.length - max} more` : ` ほか ${items.length - max} 件`) : '';
+  return `${shown.join(l === 'en' ? ', ' : '、')}${rest}`;
+}
+
+/**
+ * 「判断できなかった」因子の節。
+ *
+ * これを出さずに評点だけ返すと、**判断していないこと**が結果から消える。
+ * 消えた瞬間、読んだ人はそれを「問題なし」と受け取る。件数・因子名・理由・出典を必ず出す。
+ */
+function renderUndetermined(
+  kind: AssessmentKind,
+  undetermined: UndeterminedFactor[],
+  totalFactors: number,
+  measuredCount: number,
+  scale: number,
+  lang: Lang,
+): string[] {
+  const out: string[] = [];
+  if (undetermined.length === 0) return out;
+  out.push(`## ${inline('判断できなかった因子', 'Factors that could not be judged', lang)} (${undetermined.length})`);
+  out.push('');
+  out.push(
+    msg(
+      measuredCount > 0
+        ? `${totalFactors} 因子のうち ${undetermined.length} 因子は、判断材料が無いため評点を付けていません。上の平均・到達度・総合判定は、残る ${measuredCount} 因子だけで出した数字です。`
+        : `${totalFactors} 因子すべてに判断材料がなく、評点を付けていません。平均も到達度も総合判定も出していません。`,
+      measuredCount > 0
+        ? `${undetermined.length} of the ${totalFactors} factors carry no score because there was nothing to judge from. The averages, the progress figure, and the verdict above rest on the other ${measuredCount}.`
+        : `None of the ${totalFactors} factors could be judged, so no score was given and no average, progress figure, or verdict was produced.`,
+      lang,
+    ),
+  );
+  out.push('');
+  const shown = capRows(undetermined);
+  out.push(
+    `| ${label(L.factor, lang)} | ${label(L.target, lang)} | ${inline('なぜ判断できないか', 'Why it could not be judged', lang)} | ${inline('出典', 'Source', lang)} |`,
+  );
+  out.push('| --- | --- | --- | --- |');
+  for (const f of shown.rows) {
+    out.push(
+      [
+        '',
+        cell(f.name),
+        `\`${bar(f.target, scale)}\` ${round1(f.target)}`,
+        cell(capCell(f.note ?? '')) ||
+          `**${inline('理由が未記入', 'reason not recorded', lang)}**`,
+        sourceCell(f, lang),
+        '',
+      ].join(' | ').trim(),
+    );
+  }
+  if (shown.capped) {
+    out.push('');
+    out.push(
+      `_${capNotice(
+        shown,
+        {
+          ja: '判断できなかった因子は入力順。全件見るには因子の数を減らして分けて呼ぶ。',
+          en: 'Undetermined factors in input order. Split the call into smaller factor sets to see them all.',
+        },
+        lang,
+      )}_`,
+    );
+  }
+  out.push('');
+  const noReason = undetermined.filter((f) => !(f.note && f.note.trim().length > 0));
+  const reading: Bilingual[] = [];
+  reading.push({
+    ja: '「判断できない」は評価の失敗ではなく、次にやる作業です。因子ごとに「誰に聞けば分かるか」または「どの資料を見れば分かるか」を 1 行決めて、期限付きのアクションとして `update_engagement` の actions に登録してください。',
+    en: 'Not being able to judge is not a failed assessment; it is the next piece of work. For each factor decide in one line who to ask or which document to read, then record it as a dated action via `update_engagement`.',
+  });
+  if (noReason.length > 0) {
+    reading.push({
+      ja: `理由(note)が書かれていない因子が ${noReason.length} 件あります: ${factorNames(noReason, 'ja')}。理由が無いと、次に測る人が同じところで再び止まります。「どの資料のどこに無かったのか」を 1 行入れてください。`,
+      en: `${noReason.length} of them have no reason recorded: ${factorNames(noReason, 'en')}. Without it the next assessor stops at the same place. Write one line on where you looked and what was missing.`,
+    });
+  }
+  if (measuredCount > 0 && undetermined.length >= measuredCount) {
+    reading.push({
+      ja: `判定できた因子(${measuredCount})より判断できなかった因子(${undetermined.length})のほうが多い状態です。この評価は現状の把握には使えますが、着手可否や投資判断の根拠には使えません。判断材料を集めてから測り直してください。`,
+      en: `More factors are undetermined (${undetermined.length}) than judged (${measuredCount}). This assessment can describe what you know, but it cannot support a go/no-go or an investment decision. Gather the missing material and re-measure.`,
+    });
+  }
+  reading.push(
+    kind === 'readiness'
+      ? {
+          ja: '判断できない因子は、変革リスクではなく「調べる」作業です。リスクとして登録すると、調べれば消えるものが対策付きの課題として残り続けます。',
+          en: 'An undetermined factor is an investigation task, not a transformation risk. Logging it as a risk leaves something that a single question would have closed sitting on the register with a mitigation attached.',
+        }
+      : {
+          ja: '判断できない因子が同じ場所に残り続ける場合、その因子は「測れない」のではなく「見ている人がいない」可能性があります。誰の担当なのかを先に決めてください。',
+          en: 'When the same factor stays undetermined round after round, it is usually not unmeasurable — nobody owns it. Settle who owns it before trying to measure it again.',
+        },
+  );
+  out.push(bullets(reading, lang));
+  out.push('');
+  return out;
+}
+
 function runAssessment(kind: AssessmentKind, input: AssessmentInput): ToolResult {
   const lang = input.lang as Lang;
   const scale = input.scale;
@@ -3208,6 +3661,10 @@ function runAssessment(kind: AssessmentKind, input: AssessmentInput): ToolResult
   ]);
   if (tooLong) return limitErrorResult(tooLong, lang);
 
+  // 出典の値そのものの検査(投げない入口を使う)
+  const badProvenance = runChecks(raw.map((f, i) => () => checkProvenance(`factors[${i}]`, f, lang)));
+  if (badProvenance) return errorResult(badProvenance);
+
   // --- 入力検証 ---
   const problems: string[] = [];
   raw.forEach((f, i) => {
@@ -3215,12 +3672,18 @@ function runAssessment(kind: AssessmentKind, input: AssessmentInput): ToolResult
     if (!f.name || f.name.trim().length === 0) {
       problems.push(inline(`${position}: 因子名が空です。`, `${position}: the factor name is empty.`, lang));
     }
-    for (const [key, value] of [
-      ['current', f.current],
-      ['target', f.target],
-    ] as const) {
+    // current=null は「判断できない」の意思表示なので、範囲検査の対象外
+    const checks: [string, number][] = [['target', f.target]];
+    if (f.current !== null && f.current !== undefined) checks.push(['current', f.current]);
+    for (const [key, value] of checks) {
       if (!Number.isFinite(value)) {
-        problems.push(inline(`${position}: ${key} が数値ではありません。`, `${position}: ${key} is not a number.`, lang));
+        problems.push(
+          inline(
+            `${position}: ${key} が数値ではありません。${key === 'current' ? '判断できない場合は null を渡してください(0 ではありません)。' : ''}`,
+            `${position}: ${key} is not a number.${key === 'current' ? ' Pass null when you cannot judge it — not 0.' : ''}`,
+            lang,
+          ),
+        );
       } else if (value < 0 || value > scale) {
         problems.push(
           inline(
@@ -3248,22 +3711,42 @@ function runAssessment(kind: AssessmentKind, input: AssessmentInput): ToolResult
     );
   }
 
-  const factors: AssessmentFactor[] = raw.map((f) => ({
-    name: f.name.trim(),
-    current: f.current,
-    target: f.target,
-    note: f.note,
-  }));
+  // --- 判定できた因子と、判断材料が無かった因子に分ける ---
+  // ここが分かれていないと、根拠の無い因子の評点が平均に混ざり、
+  // 「準備度 68%」のような**根拠の無い結論**が出る。
+  const factors: AssessmentFactor[] = [];
+  const undetermined: UndeterminedFactor[] = [];
+  for (const f of raw) {
+    const prov = sanitizeFactorProvenance(f);
+    if (f.current === null || f.current === undefined) {
+      undetermined.push({ name: f.name.trim(), target: f.target, note: f.note, ...prov });
+    } else {
+      factors.push({ name: f.name.trim(), current: f.current, target: f.target, note: f.note, ...prov });
+    }
+  }
+  const totalFactors = raw.length;
+  const measuredCount = factors.length;
 
   const defaults = defaultFactorsFor(kind);
   const gaps = factors.map((f) => f.target - f.current);
-  const avgCurrent = factors.reduce((a, f) => a + f.current, 0) / factors.length;
-  const avgTarget = factors.reduce((a, f) => a + f.target, 0) / factors.length;
+  const avgCurrent = measuredCount > 0 ? factors.reduce((a, f) => a + f.current, 0) / measuredCount : 0;
+  const avgTarget = measuredCount > 0 ? factors.reduce((a, f) => a + f.target, 0) / measuredCount : 0;
   const achievement = avgTarget > 0 ? Math.round((avgCurrent / avgTarget) * 100) : 100;
-  const maxGap = Math.max(...gaps);
-  const weakest = factors.reduce((a, b) => (a.current <= b.current ? a : b));
+  const maxGap = gaps.length > 0 ? Math.max(...gaps) : 0;
+  const weakest = measuredCount > 0 ? factors.reduce((a, b) => (a.current <= b.current ? a : b)) : null;
   /** 変革リスクとして扱うギャップの目安 */
   const riskThreshold = Math.max(1, Math.round(scale * 0.3));
+  /** 「N 因子中 M 因子で判定」の 1 行。除外があるときだけ後半を足す */
+  const scopeLine: Bilingual = {
+    ja:
+      undetermined.length > 0
+        ? `**${totalFactors} 因子中 ${measuredCount} 因子で判定**しました。残り ${undetermined.length} 因子は判断材料がなく、下の数字には入っていません。`
+        : `${totalFactors} 因子すべてを判定しました(判断材料なしの因子はありません)。`,
+    en:
+      undetermined.length > 0
+        ? `**Judged on ${measuredCount} of ${totalFactors} factors.** The other ${undetermined.length} had nothing to judge from and are not in the figures below.`
+        : `All ${totalFactors} factors were judged; none were left undetermined.`,
+  };
 
   const customTitle = input.title && input.title.trim().length > 0 ? input.title.trim() : null;
   // 保存する記録には必ず名前を持たせる(未指定なら評価種別をそのまま名前にする)
@@ -3276,8 +3759,8 @@ function runAssessment(kind: AssessmentKind, input: AssessmentInput): ToolResult
   out.push('');
   out.push(
     inline(
-      `評価尺度 0〜${scale} / 因子 ${factors.length} 件`,
-      `Scale 0–${scale}, ${factors.length} factors`,
+      `評価尺度 0〜${scale} / 因子 ${totalFactors} 件`,
+      `Scale 0–${scale}, ${totalFactors} factors`,
       lang,
     ),
   );
@@ -3287,9 +3770,9 @@ function runAssessment(kind: AssessmentKind, input: AssessmentInput): ToolResult
   out.push(`## ${inline('因子ごとの評価', 'Factor scores', lang)}`);
   out.push('');
   out.push(
-    `| ${label(L.factor, lang)} | ${label(L.current, lang)} | ${label(L.target, lang)} | ${label(L.gap, lang)} | ${label(L.note, lang)} |`,
+    `| ${label(L.factor, lang)} | ${label(L.current, lang)} | ${label(L.target, lang)} | ${label(L.gap, lang)} | ${label(L.note, lang)} | ${inline('出典', 'Source', lang)} |`,
   );
-  out.push('| --- | --- | --- | :-: | --- |');
+  out.push('| --- | --- | --- | :-: | --- | --- |');
   factors.forEach((f, i) => {
     out.push(
       [
@@ -3299,14 +3782,107 @@ function runAssessment(kind: AssessmentKind, input: AssessmentInput): ToolResult
         `\`${bar(f.target, scale)}\` ${round1(f.target)}`,
         gaps[i] > 0 ? `+${round1(gaps[i])}` : String(round1(gaps[i])),
         cell(f.note) || '',
+        sourceCell(f, lang),
         '',
       ].join(' | ').trim(),
     );
   });
+  // 判断できなかった因子も同じ表に出す。別の表にすると「無かったこと」になる
+  for (const f of undetermined) {
+    out.push(
+      [
+        '',
+        cell(f.name),
+        `**${inline('判断材料なし', 'undetermined', lang)}**`,
+        `\`${bar(f.target, scale)}\` ${round1(f.target)}`,
+        '—',
+        cell(f.note) || '',
+        sourceCell(f, lang),
+        '',
+      ].join(' | ').trim(),
+    );
+  }
   out.push('');
+  if (undetermined.length > 0) {
+    out.push(
+      msg(
+        `「判断材料なし」は評点 0 ではありません。0 は「無い」という判定、判断材料なしは「まだ判定していない」です。この ${undetermined.length} 件は下の平均・到達度・総合判定のいずれにも入っていません。`,
+        `"Undetermined" is not a score of 0. Zero is a finding — there is none. Undetermined means no finding was made. These ${undetermined.length} are excluded from the averages, the progress figure, and the verdict below.`,
+        lang,
+      ),
+    );
+    out.push('');
+  }
+  out.push(provenanceLegend(lang));
+  out.push('');
+
+  // --- 判定できた因子が 1 件も無い場合 ---
+  // ここで平均を出すと 0 除算になるだけでなく、「到達度 100%」のような
+  // **測っていないのに測ったように見える数字**が出る。総合判定そのものを出さない。
+  if (measuredCount === 0) {
+    out.push(`## ${inline('総合', 'Overall', lang)}`);
+    out.push('');
+    out.push(
+      msg(
+        `**総合判定は出せません。** ${totalFactors} 因子すべてが「判断材料なし」です。平均も到達度も、判定できた因子が 1 件も無い以上、計算しても意味を持ちません(0 点として平均すると「最低水準」という誤った結論になります)。`,
+        `**No overall verdict.** All ${totalFactors} factors are undetermined. An average or a progress figure computed from nothing would be meaningless — and averaging them as zeros would state the false conclusion that everything is at the lowest level.`,
+        lang,
+      ),
+    );
+    out.push('');
+    out.push(
+      ...renderUndetermined(kind, undetermined, totalFactors, measuredCount, scale, lang),
+    );
+    out.push(`## ${inline('保存', 'Saving', lang)}`);
+    out.push('');
+    out.push(
+      msg(
+        '判定できた因子が 1 件も無いため、save の指定にかかわらず保存していません。評点の付いた因子が 1 件でもあれば保存できます。',
+        'Nothing was saved regardless of the save flag, because not a single factor was judged. Saving becomes possible as soon as one factor carries a score.',
+        lang,
+      ),
+    );
+    out.push('');
+    out.push(`## ${inline('次の一手', 'Next steps', lang)}`);
+    out.push('');
+    out.push(
+      bullets(
+        [
+          {
+            ja: '因子ごとに「誰に聞けば分かるか」を 1 人ずつ決める。全部を 1 人に聞こうとすると止まる。',
+            en: 'Name one person to ask per factor. Routing every factor to one person is where this stalls.',
+          },
+          {
+            ja: '判断材料が集まった因子から順に current を入れて、このツールをもう一度呼ぶ。全因子が揃うまで待つ必要はない。',
+            en: 'Fill in current for each factor as its evidence arrives and call this tool again. There is no need to wait for a complete set.',
+          },
+          {
+            ja: '資料しか無い状態で全因子に評点を付けようとしないこと。根拠のない評点は、根拠のない結論になって独り歩きする。',
+            en: 'Do not score every factor from documents alone. Scores without evidence become conclusions without evidence, and those travel.',
+          },
+        ],
+        lang,
+      ),
+    );
+    out.push('');
+    out.push(
+      ...referenceSection(
+        kind === 'maturity'
+          ? [techniquePointer('architecture-maturity', lang), techniquePointer('architecture-governance', lang)]
+          : [
+              techniquePointer('business-transformation-readiness', lang),
+              techniquePointer('capability-based-planning', lang),
+            ],
+        lang,
+      ),
+    );
+    return textResult(out.join('\n'));
+  }
 
   // --- 総合 ---
   out.push(`## ${inline('総合', 'Overall', lang)}`);
+  out.push('');
+  out.push(para(scopeLine, lang));
   out.push('');
   out.push(`- ${label(L.current, lang)}: \`${bar(avgCurrent, scale, 20)}\` ${round1(avgCurrent)} / ${scale}`);
   out.push(`- ${label(L.target, lang)}: \`${bar(avgTarget, scale, 20)}\` ${round1(avgTarget)} / ${scale}`);
@@ -3378,6 +3954,16 @@ function runAssessment(kind: AssessmentKind, input: AssessmentInput): ToolResult
             };
   out.push(text(verdict, lang));
   out.push('');
+  if (undetermined.length > 0) {
+    out.push(
+      msg(
+        `この判定は ${totalFactors} 因子中 ${measuredCount} 因子に基づくものです。除外した ${undetermined.length} 因子(${factorNames(undetermined, 'ja')})は「良い」でも「悪い」でもなく、判断していません。判定を人に伝えるときは、必ずこの範囲も一緒に伝えてください。除外した因子が実は最も低い水準だった場合、この判定は上振れしています。`,
+        `This verdict rests on ${measuredCount} of ${totalFactors} factors. The ${undetermined.length} excluded (${factorNames(undetermined, 'en')}) are neither good nor bad — they were not judged. Always pass on the scope with the verdict: if an excluded factor turns out to be the weakest of all, this verdict reads high.`,
+        lang,
+      ),
+    );
+    out.push('');
+  }
 
   // --- 因子ごとの読みと次の一手 ---
   // 推奨は「因子名 × 評点帯 × ギャップ幅」で選び、利用者が書いた note を本文で参照する。
@@ -3411,8 +3997,8 @@ function runAssessment(kind: AssessmentKind, input: AssessmentInput): ToolResult
   if (withoutNote.length > 0) {
     out.push(
       msg(
-        `${factors.length} 件中 ${withoutNote.length} 件の因子に根拠(note)がありません: ${withoutNote.map((f) => f.name).join('、')}。根拠の無い評点は、評価者が代わると再現しません。`,
-        `${withoutNote.length} of ${factors.length} factors carry no evidence in note: ${withoutNote.map((f) => f.name).join(', ')}. Scores without evidence do not reproduce when the assessor changes.`,
+        `評点を付けた ${measuredCount} 件中 ${withoutNote.length} 件の因子に根拠(note)がありません: ${factorNames(withoutNote, 'ja')}。根拠の無い評点は、評価者が代わると再現しません。`,
+        `${withoutNote.length} of the ${measuredCount} scored factors carry no evidence in note: ${factorNames(withoutNote, 'en')}. Scores without evidence do not reproduce when the assessor changes.`,
         lang,
       ),
     );
@@ -3479,13 +4065,16 @@ function runAssessment(kind: AssessmentKind, input: AssessmentInput): ToolResult
   if (ranked.length === 0) {
     out.push(
       msg(
-        'すべての因子が目標水準に達しています。目標が低すぎないか、あるいは評価が甘くないかを、別の評価者と突き合わせて確認してください。',
-        'Every factor is at target. Check with a second assessor whether the targets are too low or the scoring too generous.',
+        `評点を付けた ${measuredCount} 因子はすべて目標水準に達しています。目標が低すぎないか、あるいは評価が甘くないかを、別の評価者と突き合わせて確認してください。`,
+        `All ${measuredCount} scored factors are at target. Check with a second assessor whether the targets are too low or the scoring too generous.`,
         lang,
       ),
     );
     out.push('');
   }
+
+  // --- 判断できなかった因子 ---
+  out.push(...renderUndetermined(kind, undetermined, totalFactors, measuredCount, scale, lang));
 
   // --- 変革リスクの登録案内(readiness のみ)---
   if (kind === 'readiness') {
@@ -3495,8 +4084,16 @@ function runAssessment(kind: AssessmentKind, input: AssessmentInput): ToolResult
     if (risky.length === 0) {
       out.push(
         msg(
-          `ギャップが目安(+${riskThreshold})を超える因子はありません。準備度の面では、いま特別に登録すべきリスクはありません。`,
-          `No factor exceeds the threshold of +${riskThreshold}. Nothing here needs recording as a readiness risk right now.`,
+          `評点を付けた ${measuredCount} 因子の中に、ギャップが目安(+${riskThreshold})を超えるものはありません。${
+            undetermined.length > 0
+              ? `ただし ${undetermined.length} 因子は判断材料が無く、リスクの有無自体が分かっていません。「リスクなし」ではなく「まだ見ていない」です。`
+              : '準備度の面では、いま特別に登録すべきリスクはありません。'
+          }`,
+          `None of the ${measuredCount} scored factors exceeds the threshold of +${riskThreshold}.${
+            undetermined.length > 0
+              ? ` ${undetermined.length} factors remain undetermined, so whether they carry risk is unknown — that is "not looked at yet", not "no risk".`
+              : ' Nothing here needs recording as a readiness risk right now.'
+          }`,
           lang,
         ),
       );
@@ -3565,10 +4162,18 @@ function runAssessment(kind: AssessmentKind, input: AssessmentInput): ToolResult
 
   // --- 保存 ---
   const timestamp = now();
+  const weakestName = weakest ? capCell(weakest.name, 60) : '—';
+  // 保存する要約にも判定の範囲を必ず入れる。後で読む人は本文ではなく要約を見る
+  const scopeSuffix =
+    undetermined.length > 0
+      ? lang === 'en'
+        ? ` Judged on ${measuredCount} of ${totalFactors} factors; ${undetermined.length} undetermined (${factorNames(undetermined, 'en', 3)}).`
+        : ` ${totalFactors} 因子中 ${measuredCount} 因子で判定(判断材料なし ${undetermined.length} 件: ${factorNames(undetermined, 'ja', 3)})。`
+      : '';
   const summary =
     lang === 'en'
-      ? `Average ${round1(avgCurrent)} → ${round1(avgTarget)} of ${scale} (${achievement}% of target). Weakest factor: ${weakest.name}.`
-      : `平均 ${round1(avgCurrent)} → ${round1(avgTarget)}(${scale} 点満点、到達度 ${achievement}%)。最も低い因子: ${weakest.name}。`;
+      ? `Average ${round1(avgCurrent)} → ${round1(avgTarget)} of ${scale} (${achievement}% of target). Weakest factor: ${weakestName}.${scopeSuffix}`
+      : `平均 ${round1(avgCurrent)} → ${round1(avgTarget)}(${scale} 点満点、到達度 ${achievement}%)。最も低い因子: ${weakestName}。${scopeSuffix}`;
 
   out.push(`## ${inline('保存', 'Saving', lang)}`);
   out.push('');
@@ -3602,6 +4207,9 @@ function runAssessment(kind: AssessmentKind, input: AssessmentInput): ToolResult
         createdAt: timestamp,
         updatedAt: timestamp,
       };
+      // 判断できなかった因子は評点を持たないので factors には入れない
+      // (0 や仮の数値を入れると、保存データ側で「測った」ことになってしまう)。
+      // 代わりに要約に範囲を書いてあり、保存後に読んでも判定の範囲が分かる。
       engagement.assessments.push(assessment);
       const stored = trySave(engagement);
       const previous = engagement.assessments.filter((a) => a.kind === kind && a.id !== assessment.id);
@@ -3618,6 +4226,16 @@ function runAssessment(kind: AssessmentKind, input: AssessmentInput): ToolResult
               lang,
             ),
       );
+      if (stored.ok && undetermined.length > 0) {
+        out.push('');
+        out.push(
+          msg(
+            `保存したのは評点の付いた ${measuredCount} 因子だけです。判断材料の無かった ${undetermined.length} 因子(${factorNames(undetermined, 'ja', 3)})は、仮の数値を入れると「測った」ことになってしまうため保存していません。判定の範囲は要約に書いてあります。判断材料が揃ったら、全因子を入れて測り直してください。`,
+            `Only the ${measuredCount} scored factors were stored. The ${undetermined.length} undetermined ones (${factorNames(undetermined, 'en', 3)}) were not: a placeholder number would make them look measured. The scope is recorded in the summary. Re-measure with the full set once the missing material is in hand.`,
+            lang,
+          ),
+        );
+      }
       if (stored.ok && previous.length > 0) {
         // 手書き JSON でも落ちないように、評価日・因子の欠損を許容する
         const at = (a: Assessment): string => (typeof a.assessedAt === 'string' ? a.assessedAt : '');
@@ -3712,9 +4330,25 @@ const factorInputSchema = z.object({
   // 上限の実際の判定は runAssessment 側(TEXT_LIMITS の title / text)。
   // ここでの max は、その手前でメモリを食わないための最後の防波堤。
   name: freeTextSchema('評価因子名 / Factor name', 300).min(1),
-  current: z.number().describe('現在の水準(0〜scale) / Current level, 0 to scale'),
+  current: z
+    .number()
+    .nullable()
+    .describe(
+      '現在の水準(0〜scale)。手元の資料・情報からは判断できない場合は null を渡す(0 ではない。0 は「無い」という判定、null は「判定していない」)。null の因子は平均・到達度・総合判定から除外し、「判断材料なし」として別に示す / Current level 0 to scale. Pass null — not 0 — when the material at hand does not let you judge it: 0 is a finding, null is the absence of one. Null factors are excluded from the averages, the progress figure, and the verdict, and are listed separately as undetermined',
+    ),
   target: z.number().describe('目標の水準(0〜scale) / Target level, 0 to scale'),
-  note: freeTextSchema('根拠・補足 / Evidence or remarks', 4000).optional(),
+  note: freeTextSchema(
+    '根拠。current が null のときは「なぜ判断できないのか」を書く / Evidence; when current is null, write why it could not be judged',
+    4000,
+  ).optional(),
+  source: freeTextSchema(
+    '評点の出典。例: "csr2026.pdf p.17" / "2026-08-14 情シス部長ヒアリング" / Where the score comes from, e.g. "csr2026.pdf p.17"',
+    300,
+  ).optional(),
+  confidence: z
+    .enum(CONFIDENCE_LEVELS)
+    .optional()
+    .describe('stated=出典にそう書いてある / inferred=書かれてはいないが導いた / unknown=出所を辿れない'),
 });
 
 const scaleSchema = z
@@ -3731,7 +4365,7 @@ export function registerAnalysisTools(server: McpServer): void {
     {
       title: 'Run a gap analysis',
       description:
-        '現行(baseline)と目標(target)の構成要素を突き合わせ、マトリクスで対応関係を可視化し、新規に必要なもの・廃止されるもの・改修/置換されるものをギャップとして洗い出して、それぞれの推奨アクションと解釈を返す。廃止側も必ず出すため、コスト削減の根拠が消えない。検出したギャップは `add_work_package` にそのまま渡せる JSON として出力し、save=true で分析の要約を案件のメモに残せる。 / Compare baseline and target elements, render the mapping as a matrix, and derive the gaps: what must be newly created, what gets eliminated, and what is modified or replaced, each with a recommended action. Eliminations are always reported so the cost-reduction case stays visible. The gaps are also emitted as ready-to-paste `add_work_package` JSON, and save=true appends a summary of the analysis to the engagement notes.',
+        '現行(baseline)と目標(target)の構成要素を突き合わせ、マトリクスで対応関係を可視化し、新規に必要なもの・廃止されるもの・改修/置換されるものをギャップとして洗い出して、それぞれの推奨アクションと解釈を返す。廃止側も必ず出すため、コスト削減の根拠が消えない。検出したギャップは `add_work_package` にそのまま渡せる JSON として出力し、save=true で分析の要約を案件のメモに残せる。sources 引数で要素ごとの出典を渡すと、ギャップ一覧に出典列が出る(渡さなかった要素は空欄ではなく「出所未記入」と表示する)。 / Compare baseline and target elements, render the mapping as a matrix, and derive the gaps: what must be newly created, what gets eliminated, and what is modified or replaced, each with a recommended action. Eliminations are always reported so the cost-reduction case stays visible. The gaps are also emitted as ready-to-paste `add_work_package` JSON, and save=true appends a summary of the analysis to the engagement notes. Pass per-element provenance in sources to get a source column on the gap table; elements without one are marked "no source" rather than left blank.',
       inputSchema: {
         baseline: z
           .array(freeTextSchema('現行の構成要素 1 件 / One baseline element', IDENTIFIER_LIMIT))
@@ -3756,6 +4390,30 @@ export function registerAnalysisTools(server: McpServer): void {
           .describe(
             '現行と目標の対応関係。省略した現行要素は、同名の目標があれば維持、無ければ廃止として扱う / Mapping between baseline and target. Unmapped baseline elements are retained when a same-named target exists, otherwise eliminated',
           ),
+        sources: z
+          .array(
+            z.object({
+              element: freeTextSchema(
+                '出典を付ける要素名(baseline か target に書いたものと同じ名前) / The element name this source belongs to; must match a baseline or target entry',
+                IDENTIFIER_LIMIT,
+              ),
+              source: freeTextSchema(
+                '出典の短い呼び名。例: "csr2026.pdf p.17" / "2026-08-14 情シス部長ヒアリング" / A short handle for the source, e.g. "csr2026.pdf p.17"',
+                300,
+              ).optional(),
+              confidence: z
+                .enum(CONFIDENCE_LEVELS)
+                .optional()
+                .describe(
+                  'stated=出典にそう書いてある / inferred=書かれてはいないが導いた / unknown=出所を辿れない',
+                ),
+            }),
+          )
+          .max(MAX_ITEMS)
+          .optional()
+          .describe(
+            '要素ごとの出典。ギャップ一覧に出典列が出る。渡さなかった要素は「出所未記入」と表示される(空欄にはしない) / Per-element provenance. Adds a source column to the gap table; elements you omit are shown as "no source" rather than left blank',
+          ),
         domain: freeTextSchema(
           '対象ドメイン(business / data / application / technology など) / Architecture domain',
           IDENTIFIER_LIMIT,
@@ -3769,8 +4427,8 @@ export function registerAnalysisTools(server: McpServer): void {
         lang: langSchema,
       },
     },
-    async ({ baseline, target, mappings, domain, save, lang }) =>
-      runGapAnalysis({ baseline, target, mappings, domain, save, lang }),
+    async ({ baseline, target, mappings, sources, domain, save, lang }) =>
+      runGapAnalysis({ baseline, target, mappings, sources, domain, save, lang }),
   );
 
   server.registerTool(
@@ -3778,7 +4436,7 @@ export function registerAnalysisTools(server: McpServer): void {
     {
       title: 'Visualize the risk matrix',
       description:
-        '保存されている案件のリスクを、レベル × 状態、および現在レベル × 残存レベルのマトリクスで可視化し、残存リスク未評価・受容者未設定・重大リスクの対策空欄などを要対応として指摘する。 / Plot the stored engagement risks as level x status and current x residual matrices, and flag what needs attention: unassessed residual risk, missing owners, and severe risks with no mitigation.',
+        '保存されている案件のリスクを、レベル × 状態、および現在レベル × 残存レベルのマトリクスで可視化し、残存リスク未評価・受容者未設定・重大リスクの対策空欄などを要対応として指摘する。明細表には出典列(記号の凡例つき)が出て、出典の付いている件数を「N/M 件」で集計し、出典の無い項目を名指しする。 / Plot the stored engagement risks as level x status and current x residual matrices, and flag what needs attention: unassessed residual risk, missing owners, and severe risks with no mitigation. The detail table carries a source column with a legend, and the output counts how many entries can be traced back to a source and names the ones that cannot.',
       inputSchema: { lang: langSchema },
     },
     async ({ lang }) => runRiskMatrix(lang as Lang),
@@ -3789,7 +4447,7 @@ export function registerAnalysisTools(server: McpServer): void {
     {
       title: 'Visualize the stakeholder matrix',
       description:
-        'ステークホルダーを影響力 × 関心度の 4 象限(密に関与 / 満足を維持 / 情報提供 / 監視)に配置し、象限ごとの推奨関与方針と、関心事・関与方針が未記入の人を指摘する。さらに登録された関心事を突き合わせて、利害が衝突しうる組み合わせ(速さ vs 確実さ、標準化 vs 現場裁量、コスト vs 品質、短期 vs 長期、統制 vs 利便性、一気に変える vs 現行業務の継続)を、根拠にした関心事・放置した場合に起きること・裁定者と時期つきで返す。検出できない場合は手で見るべき観点を示す。 / Place stakeholders in the influence x interest quadrants (manage closely, keep satisfied, keep informed, monitor), give the recommended approach per quadrant, and flag anyone missing concerns or an engagement approach. It also compares the recorded concerns to surface pairs whose interests collide — speed vs certainty, standardization vs local autonomy, cost vs quality, short vs long term, control vs convenience, big-bang vs continuity — each with the concerns used as evidence, what happens if it is left alone, and who should arbitrate when. When nothing is detected it says so and gives the lenses to check by hand.',
+        'ステークホルダーを影響力 × 関心度の 4 象限(密に関与 / 満足を維持 / 情報提供 / 監視)に配置し、象限ごとの推奨関与方針と、関心事・関与方針が未記入の人を指摘する。さらに登録された関心事を突き合わせて、利害が衝突しうる組み合わせ(速さ vs 確実さ、標準化 vs 現場裁量、コスト vs 品質、短期 vs 長期、統制 vs 利便性、一気に変える vs 現行業務の継続)を、根拠にした関心事・放置した場合に起きること・裁定者と時期つきで返す。検出できない場合は手で見るべき観点を示す。象限ごとの明細表には出典列(記号の凡例つき)が出て、出典の付いている件数を「N/M 件」で集計する。 / Place stakeholders in the influence x interest quadrants (manage closely, keep satisfied, keep informed, monitor), give the recommended approach per quadrant, and flag anyone missing concerns or an engagement approach. It also compares the recorded concerns to surface pairs whose interests collide — speed vs certainty, standardization vs local autonomy, cost vs quality, short vs long term, control vs convenience, big-bang vs continuity — each with the concerns used as evidence, what happens if it is left alone, and who should arbitrate when. When nothing is detected it says so and gives the lenses to check by hand. The per-quadrant tables carry a source column with a legend, and the output counts how many entries can be traced back to a source.',
       inputSchema: { lang: langSchema },
     },
     async ({ lang }) => runStakeholderMatrix(lang as Lang),
@@ -3800,7 +4458,7 @@ export function registerAnalysisTools(server: McpServer): void {
     {
       title: 'Assess EA practice maturity',
       description:
-        'EA 実践の成熟度を因子ごとに評価し、現在/目標/差をバー付きの表、総合スコア、因子ごとの読みと次の一手として返す。推奨は因子名だけでなく評点帯・ギャップ幅・記入した根拠(note)に応じて変わる。因子を省略すると既定の因子セットを提示する。既定では保存しない(save=true を渡したときだけエンゲージメントに記録する)。 / Assess EA practice maturity factor by factor and return a bar table of current, target, and gap, an overall score, and a per-factor reading with the next move. Recommendations vary by score band, gap width, and the evidence you wrote in note — not by factor name alone. Omit factors to get the default factor set. Nothing is stored unless save=true.',
+        'EA 実践の成熟度を因子ごとに評価し、現在/目標/差をバー付きの表、総合スコア、因子ごとの読みと次の一手として返す。推奨は因子名だけでなく評点帯・ギャップ幅・記入した根拠(note)に応じて変わる。手元の資料からは判断できない因子は current に null を渡すと、評点を付けずに「判断材料なし」として総合判定から除外し、除外したことと因子名を明示する(N 因子中 M 因子で判定、と書く)。因子ごとに source / confidence で出典を付けられる。因子を省略すると既定の因子セットを提示する。既定では保存しない(save=true を渡したときだけエンゲージメントに記録する)。 / Assess EA practice maturity factor by factor and return a bar table of current, target, and gap, an overall score, and a per-factor reading with the next move. Recommendations vary by score band, gap width, and the evidence you wrote in note — not by factor name alone. Pass null for current on any factor the material cannot answer: it gets no score, is excluded from the verdict, and is reported by name as undetermined ("judged on M of N factors"). Each factor can carry source and confidence. Omit factors to get the default factor set. Nothing is stored unless save=true.',
       inputSchema: {
         factors: z
           .array(factorInputSchema)
@@ -3826,7 +4484,7 @@ export function registerAnalysisTools(server: McpServer): void {
     {
       title: 'Assess business transformation readiness',
       description:
-        '変革準備度(経営の意思・予算・体制・スキル・変革実績・業務部門の受容度など)を因子ごとに評価し、バー付きの表・総合判定・因子ごとの読みと次の一手を返す。推奨は因子名だけでなく評点帯・ギャップ幅・記入した根拠(note)に応じて変わる。ギャップの大きい因子は変革リスクとして扱い、`update_engagement` での登録用 JSON を添える。既定では保存しない(save=true を渡したときだけエンゲージメントに記録する)。 / Assess transformation readiness (executive intent, funding, organization, skills, track record, business acceptance, and more) and return a bar table, an overall verdict, and a per-factor reading with the next move. Recommendations vary by score band, gap width, and the evidence you wrote in note — not by factor name alone. Wide-gap factors are called out as transformation risks with ready-to-paste `update_engagement` JSON. Nothing is stored unless save=true.',
+        '変革準備度(経営の意思・予算・体制・スキル・変革実績・業務部門の受容度など)を因子ごとに評価し、バー付きの表・総合判定・因子ごとの読みと次の一手を返す。推奨は因子名だけでなく評点帯・ギャップ幅・記入した根拠(note)に応じて変わる。ギャップの大きい因子は変革リスクとして扱い、`update_engagement` での登録用 JSON を添える。判断できない因子は current に null を渡すと、評点を付けずに総合判定から除外し、除外したことを明示する(「リスクなし」と「まだ見ていない」を混同させない)。因子ごとに source / confidence で出典を付けられる。既定では保存しない(save=true を渡したときだけエンゲージメントに記録する)。 / Assess transformation readiness (executive intent, funding, organization, skills, track record, business acceptance, and more) and return a bar table, an overall verdict, and a per-factor reading with the next move. Recommendations vary by score band, gap width, and the evidence you wrote in note — not by factor name alone. Wide-gap factors are called out as transformation risks with ready-to-paste `update_engagement` JSON. Pass null for current on any factor you cannot judge: it is excluded from the verdict and reported separately, so "no risk" is never confused with "not looked at". Each factor can carry source and confidence. Nothing is stored unless save=true.',
       inputSchema: {
         factors: z
           .array(factorInputSchema)

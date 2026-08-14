@@ -25,6 +25,7 @@ import {
   type Engagement,
   type InfluenceLevel,
   type Priority,
+  type ProvenanceConfidence,
   type RiskLevel,
   type RiskStatus,
 } from '../engagement/model.js';
@@ -1208,13 +1209,62 @@ const RISK_STATE_WORDS = [
 ];
 
 const STAKEHOLDER_WORDS = [
-  '本部長', '部長', '課長', '室長', '責任者', '担当者', '担当', 'オーナー', '委員長', '執行役員', '役員', '統括', '推進者',
+  '本部長', '部門長', '部長', '課長', '室長', '責任者', '担当者', '担当', 'オーナー', '委員長', '執行役員', '役員', '統括', '推進者',
+  // 「〜長」型の肩書きは組織図の呼び方に引きずられる。オフィス長 / センター長 / グループ長 が
+  // 無いと、その呼び方を使っている会社では関係者が 1 人も出ない。
+  'オフィス長', 'センター長', 'グループ長', 'チーム長',
   'CISO', 'CIO', 'CTO', 'CEO', 'CFO', 'owner', 'manager', 'lead', 'director', 'sponsor', 'head', 'steward',
+  // 実測で落ちていた略号。評価対象の文書では**最上位スポンサーが CSO** だったのに、
+  // ここに `CSO` が無いためその 1 名だけが関係者一覧から消えていた。
+  // 個人情報保護の文書では `DPO` が同じ立場になる。
+  'CSO', 'DPO', 'COO', 'CHRO', 'CAE',
   // 英語の肩書きは略語で書かれるとは限らない。ここに `chief` / `officer` が無いと
   // `Chief Information Security Officer` の行が役職判定に届く前に落ちる
   // (ROLE_CORE_EN 側にだけ語彙を足しても、この門で止まっていた)。
   'chief', 'officer',
 ];
+
+/**
+ * 「これはリスクだ」と**文末表現が言っている**形 / Predicates that assert a risk.
+ *
+ * 語の出現だけを見ると、広報向けの文書では必ず失敗する。「脅威」「脆弱性」「インシデント」は
+ * *対策を自慢する文*にこそ頻出するからで、実測では対策の記述 3 件がそのまま
+ * level 付きのリスクとして台帳に入った(サイバーセキュリティ経営報告書 32 ページ)。
+ *
+ * 逆に、本当のリスクは「リスク」という語を使わずに文末で言い切られる:
+ * 「〜のおそれがある」「〜が課題です」「〜が懸念となっています」。
+ * ここを見ないと、いちばん拾うべき文が 1 件も取れない。
+ */
+const RISK_ASSERT_RE =
+  /(?:おそれ|恐れ|虞)(?:が|も|は)?(?:あ|生じ|出て)|リスク(?:が\s*(?:あ|高|残|生じ|存在|想定|懸念))|リスクを(?:抱|内包|伴)|リスクとな(?:っ|り)|(?:課題|懸念|問題|弱点|ボトルネック|障壁)(?:です|である|であり|となっ|となり|になっ|がある|があり|があります|が残|が生じ|として残)|(?:課題|懸念|懸案)[。.]?$|可能性(?:が|も)\s*(?:あ|高|否定)|(?:危惧|憂慮|懸念)(?:さ)?れ|しかねな|かねません|(?:低下|悪化|停止|漏えい|漏洩|流出|中断|遅延|逼迫|不足|欠如|喪失|毀損|侵害|被害|損失|障害)(?:する|し|の|が)?(?:おそれ|リスク|可能性)|(?:急務|喫緊)|\brisk\s+of\b|\brisks?\s+(?:that|remain|exist)|\bat\s+risk\b|\b(?:may|could|might)\s+(?:lead|result|cause|expose|allow|fail)|\b(?:is|are|remains?)\s+(?:a\s+)?(?:challenge|concern|issue|gap|weakness|risk|exposed|vulnerable|outstanding|unresolved)/i;
+
+/**
+ * 統制・成果を述べる文末 / Predicates that report a control already in place.
+ *
+ * 「〜を実施しています」「〜しました」で終わる文は、**危険な状態ではなく実施した施策**の記述。
+ * ここを弾かないと、報告書のほぼ全文がリスク候補になる。
+ */
+const CONTROL_ACT =
+  '実施|導入|整備|構築|展開|運用|推進|強化|向上|徹底|活用|適用|実現|拡充|拡大|継続|参画|参加|連携|共有|公開|提供|支援|' +
+  '配置|任命|策定|締結|準拠|適合|取得|認定|認証|開催|定着|浸透|最適化|自動化|標準化|可視化|教育|訓練|周知|啓発|点検|遵守|順守|' +
+  // 実測(NEC 報告書)で残っていた偽陽性の文末。「リスクを低減しています」「基盤を確立しています」は
+  // リスクの記述ではなく施策の記述だが、上の語彙に無いため level 付きでリスク台帳に入っていた。
+  // 「リスクがある」等の危険を主張する述語がある文はこの規則の手前で除外されるので、
+  // ここに 低減 / 軽減 を足しても本物のリスクは落ちない。
+  '確立|低減|軽減|削減|統一|共通化|高度化|効率化|迅速化|一元化|集約|更新|改善';
+
+/** 「〜を実施しています」型(サ変名詞 + 完了/継続の言い切り) */
+const CONTROL_TAIL_RE = new RegExp(
+  `(?:${CONTROL_ACT})(?:し(?:て(?:い(?:ます|る)|おりま[すし]た?|おり|きました|まいりました)|ま[すし]た|た)?|中(?:です)?)$`,
+);
+
+/** 「〜を整えています」「〜に取り組んでいます」型(サ変名詞ではない動詞) */
+const CONTROL_VERB_TAIL_RE =
+  /(?:高め|進め|図っ|努め|行っ|取り組ん|整え|備え|設け|定め|広げ|続け|果たし|担っ|置い|保っ|守っ)(?:て)?(?:い(?:ます|る)|おりま[すし]た?|おり)$|(?:しました|いたしました|してきました|してまいりました|してきています)$/;
+
+/** 英語側の同じ文型 */
+const CONTROL_TAIL_EN_RE =
+  /\b(?:have|has|had)\s+(?:been\s+)?(?:implemented|established|deployed|introduced|completed|obtained|certified|conducted|maintained|rolled\s+out|put\s+in\s+place)\b|\bwe\s+(?:implement|implemented|establish|established|deploy|deployed|conduct|conducted|maintain|maintained|operate|provide)\b|\b(?:is|are)\s+(?:in\s+place|operational|certified|fully\s+deployed)\b/i;
 
 const SYSTEM_WORDS = [
   'システム', '基盤', 'サーバ', 'サーバー', 'データベース', 'アプリケーション', 'ミドルウェア', 'クラウド', 'ポータル',
@@ -1358,13 +1408,31 @@ function nonRiskReason(sentence: string): Bilingual | undefined {
       en: 'a bare predicate — the line does not say what it is about (it continues the previous line)',
     };
   }
+
+  // (5) 実施した統制・成果の記述。
+  // 広報向けの文書に対する偽陽性はほぼここに集中する。「脅威」「脆弱性」「インシデント」は
+  // *対策を説明する文* にこそ多く出るので、語の出現ではなく **文末表現** で切り分ける。
+  // 危険を主張する述語(おそれ / 課題 / リスクがある …)も、危ない状態を表す語も無く、
+  // 「〜を実施しています」「〜しました」「〜を活用し…高めています」で終わる文は統制の記述。
+  if (
+    !RISK_ASSERT_RE.test(body) &&
+    !hasAny(body.toLowerCase(), RISK_STATE_WORDS) &&
+    (CONTROL_TAIL_RE.test(body) || CONTROL_VERB_TAIL_RE.test(body) || CONTROL_TAIL_EN_RE.test(body))
+  ) {
+    return {
+      ja: '実施した統制・成果の記述であって、危険な状態(リスク)の記述ではない',
+      en: 'reports a control that is already in place — an achievement, not an open risk',
+    };
+  }
   return undefined;
 }
 
 /** 役職語から影響度を推定する(あくまで仮置き) */
 function inferInfluence(role: string): InfluenceLevel {
-  if (/本部長|部長|役員|執行|責任者|CISO|CIO|CTO|CEO|CFO|director|sponsor|head|chief|vp/i.test(role)) return 'high';
-  if (/課長|室長|マネージャ|オーナー|リーダ|manager|lead|owner/i.test(role)) return 'medium';
+  if (/本部長|部門長|部長|役員|執行|責任者|オフィス長|センター長|CISO|CIO|CTO|CEO|CFO|CSO|CPO|CHRO|COO|DPO|director|sponsor|head|chief|vp/i.test(role)) {
+    return 'high';
+  }
+  if (/課長|室長|グループ長|チーム長|マネージャ|オーナー|リーダ|manager|lead|owner/i.test(role)) return 'medium';
   return 'medium';
 }
 
@@ -1374,9 +1442,35 @@ function inferInfluence(role: string): InfluenceLevel {
  * が役職として認識されないままだった。
  */
 const ROLE_CORE_JA =
-  '本部長|部門長|事業部長|部長|課長|室長|統括|責任者|担当者|担当|オーナー|委員長|執行役員|役員|推進者|管理者';
+  '本部長|統括部長|部門長|事業部長|部長|課長|室長|オフィス長|センター長|グループ長|チーム長|統括|責任者|担当者|担当|オーナー|委員長|執行役員|役員|推進者|管理者';
 const ROLE_CORE_EN =
-  'Chief\\s+[A-Za-z]+(?:\\s+[A-Za-z]+)?\\s+Officer|CISO|CIO|CTO|CEO|CFO|CDO|CRO|chief|manager|director|owner|sponsor|steward|lead|head';
+  'Chief\\s+[A-Za-z]+(?:\\s+[A-Za-z]+)?\\s+Officer|CISO|CIO|CTO|CEO|CFO|CDO|CRO|CSO|CPO|CHRO|COO|CAE|DPO|chief|manager|director|owner|sponsor|steward|lead|head';
+
+/**
+ * 「語を構成する文字」/ Characters that make up a word.
+ *
+ * 語中から一致を始めないための否定後読みと、修飾部分を取り込む窓の両方で使う。
+ * **PDF から抜いたテキストは素の A-Z / かな漢字だけではない。** 実測(NEC
+ * サイバーセキュリティ経営報告書 2026 の抽出テキスト)では合字 `ﬁ`(U+FB01)が 16 か所あり、
+ * `Certiﬁed Information Security Manager` の `ﬁ` が「語の文字」と見なされていなかったため、
+ * 一致が `ed Information Security Manager` から始まり、`Corporate Executive CISO` で直したはずの
+ * **語中切りがそのまま再発していた**。全角英数・アクセント付きラテン文字も同じ理由で足す。
+ */
+const WORD_CHARS =
+  'A-Za-z0-9' +
+  '\\u00C0-\\u024F' + // アクセント付きラテン文字 (À-ɏ)
+  '\\uFB00-\\uFB06' + // 合字 ﬀ ﬁ ﬂ ﬃ ﬄ ﬅ ﬆ (PDF 抽出テキストに頻出)
+  '\\uFF10-\\uFF19\\uFF21-\\uFF3A\\uFF41-\\uFF5A' + // 全角数字・英字
+  '\\u3005' + // 々
+  '\\u3041-\\u3096' + // ひらがな
+  '\\u30A1-\\u30FA\\u30FC' + // カタカナ + 長音符
+  '\\u4E00-\\u9FFF'; // 漢字
+
+/** 語を構成する文字のうち、ひらがなを除いたもの(組織名・システム名の本体で使う) */
+const WORD_CHARS_NO_HIRAGANA =
+  'A-Za-z0-9\\u00C0-\\u024F\\uFB00-\\uFB06' +
+  '\\uFF10-\\uFF19\\uFF21-\\uFF3A\\uFF41-\\uFF5A' +
+  '\\u3005\\u30A1-\\u30FA\\u30FC\\u4E00-\\u9FFF';
 
 /**
  * 役職を表す語句(前方の修飾を最大 24 文字まで含める)。
@@ -1384,10 +1478,12 @@ const ROLE_CORE_EN =
  * 前方の窓は **語の途中から始めない** ことが要点。境界を見ないと、`Corporate Executive CISO`
  * では「窓 16 文字以内で役職語に届く最初の開始位置」が語中になり、
  * 「orate Executive CISO」という名前が台帳に入る(実際に 3 人が報告)。
- * 先頭に否定先読みを置いて語中開始を禁じ、窓を 24 文字に広げて肩書き全体が入るようにしている。
+ * 先頭の否定後読み(`(?<![…])`)が語中からの開始を禁じ、窓を 24 文字に広げて
+ * 肩書き全体が入るようにしている。**この否定後読みを外すと語中で切れる。**
+ * 文字の並びは `WORD_CHARS` に集約した(合字・全角英数を落とすと語中切りが再発する)。
  */
 const ROLE_RE = new RegExp(
-  `(?<![A-Za-z0-9一-龥ぁ-んァ-ヶー])((?:[一-龥ぁ-んァ-ヶーA-Za-z0-9()（）・]|[ 　](?![ 　])){0,24}(?:${ROLE_CORE_JA}|(?:${ROLE_CORE_EN})(?![A-Za-z])))`,
+  `(?<![${WORD_CHARS}])((?:[${WORD_CHARS}()（）・]|[ 　](?![ 　])){0,24}(?:${ROLE_CORE_JA}|(?:${ROLE_CORE_EN})(?![A-Za-z])))`,
   'gi',
 );
 
@@ -1396,7 +1492,7 @@ const ROLE_RE = new RegExp(
  * 誰のことか分からないまま関係者が 1 人増えるだけなので候補にしない。
  */
 const GENERIC_ROLE_RE =
-  /^(?:担当|担当者|責任者|統括|オーナー|役員|執行役員|管理者|推進者|委員長|部長|課長|室長|本部長|部門長|owner|manager|lead|head|director|sponsor|steward|chief|officer)$/i;
+  /^(?:担当|担当者|責任者|統括|統括部長|オーナー|役員|執行役員|管理者|推進者|委員長|部長|課長|室長|本部長|部門長|オフィス長|センター長|グループ長|チーム長|owner|manager|lead|head|director|sponsor|steward|chief|officer)$/i;
 
 /** 役職名として持ち回れる形か(混線した行から拾った断片を名前にしないための最終確認) */
 function isCleanRole(role: string | undefined): boolean {
@@ -1462,6 +1558,54 @@ function extractRole(sentence: string): string {
     m = ROLE_RE.exec(sentence);
   }
   return best.length > 40 ? best.slice(0, 40) : best;
+}
+
+/**
+ * 組織名の語尾 / Suffixes that mark an organisation's name.
+ *
+ * 関係者は人だけではない。実測で 3 名が「社外機関を 1 件も拾えない」と報告した原因は、
+ * 判定が **役職語だけ** を見ていたこと。「情報処理推進機構」「内閣サイバーセキュリティ
+ * センター」「デジタル庁」「経済産業省」「日本サイバー犯罪対策協議会」「高等専門学校」は
+ * どれも役職語を含まないため、文の中にあっても関係者候補にならなかった。
+ *
+ * 長い語尾を先に並べる(`高等専門学校` を `学校` より先に置かないと途中で切れる)。
+ */
+const ORG_SUFFIX =
+  '高等専門学校|独立行政法人|国立研究開発法人|一般社団法人|公益社団法人|一般財団法人|公益財団法人|商工会議所|' +
+  '機構|協議会|協会|学会|連盟|振興会|財団|社団|組合|工業会|連合会|コンソーシアム|' +
+  '大学院|大学|学校|研究所|研究機関|センター|庁|省|警察|検察|裁判所|委員会|事務局|本部|支援機構';
+
+/**
+ * 組織名らしき語句。
+ *
+ * 前は語境界(役職と同じく語中から始めない)、修飾部分にひらがなを入れない
+ * (「と連携して情報処理推進機構」のように助詞ごと飲み込まないため)。
+ * 語尾の前に 2 文字以上を要求するので、「委員会」「センター」単体では一致しない。
+ */
+const ORG_RE = new RegExp(
+  `(?<![${WORD_CHARS}])((?:[${WORD_CHARS_NO_HIRAGANA}・]){2,24}(?:${ORG_SUFFIX}))`,
+  'g',
+);
+
+/**
+ * 組織名ではないと分かっている一致。
+ * 施設・設備の一般名詞は「関係者」ではないので候補から外す。
+ */
+const NOT_ORG_RE =
+  /^(?:データ|コール|コンタクト|ショッピング|物流|配送|開発|検証|試験|訓練|保守|運用|バックアップ|災害対策)センター$/;
+
+/** 文中の組織名のうち最も具体的(最長)なものを返す。無ければ空文字。 */
+function extractOrganization(sentence: string): string {
+  ORG_RE.lastIndex = 0;
+  let best = '';
+  let m = ORG_RE.exec(sentence);
+  while (m !== null) {
+    const name = m[1].trim();
+    if (!NOT_ORG_RE.test(name) && name.length > best.length) best = name;
+    if (ORG_RE.lastIndex === m.index) ORG_RE.lastIndex += 1;
+    m = ORG_RE.exec(sentence);
+  }
+  return best.length > 60 ? best.slice(0, 60) : best;
 }
 
 /**
@@ -1982,9 +2126,13 @@ function extractFromText(ctx: ExtractContext, kind: ExtractKind, sections: DocSe
       const lower = sentence.toLowerCase();
       if (kind === 'risks') {
         const explicit = hasAny(lower, RISK_WORDS);
+        // 文末が「〜のおそれがある」「〜が課題です」と言い切っている文は、
+        // 「リスク」という語が 1 つも無くてもリスクそのもの。語だけを見ていたときは
+        // 「サプライチェーン全体でのセキュリティ確保が課題です。」が 1 件も取れなかった。
+        const asserted = !explicit && RISK_ASSERT_RE.test(sentence);
         // 「リスク」と書かれていなくても、危ない**状態**を述べた文は候補にする
-        const stated = !explicit && hasAny(lower, RISK_STATE_WORDS);
-        if (!explicit && !stated) continue;
+        const stated = !explicit && !asserted && hasAny(lower, RISK_STATE_WORDS);
+        if (!explicit && !asserted && !stated) continue;
         // 語は合っていても、リスクを述べていない文は台帳に入れない(理由は残す)
         const notRisk = nonRiskReason(sentence);
         if (notRisk) {
@@ -2005,29 +2153,35 @@ function extractFromText(ctx: ExtractContext, kind: ExtractKind, sections: DocSe
             : sectionLevel && section
               ? inline(`節見出し「${safeText(section.title, 40)}」から`, `from section "${safeText(section.title, 40)}"`, 'both')
               : undefined,
-          confidence: textConfidence(sentence, structured, explicit, ctx.bleed),
+          confidence: textConfidence(sentence, structured, explicit || asserted, ctx.bleed),
           evidence: sentence,
           origin: 'text',
         });
       } else if (kind === 'stakeholders') {
-        if (!hasAny(lower, STAKEHOLDER_WORDS)) continue;
+        // 関係者は人だけではない。役職語が 1 つも無くても、社外機関(〜機構 / 〜庁 / 〜協議会)は
+        // 立派なステークホルダーなので、役職の門で落とさない。
+        const org = extractOrganization(sentence);
+        if (!hasAny(lower, STAKEHOLDER_WORDS) && org.length === 0) continue;
         const role = extractRole(sentence);
-        if (role.length === 0) continue;
-        if (GENERIC_ROLE_RE.test(role)) {
-          ctx.dropped.push({ reason: 'placeholder', title: safeText(role, 30), lines: [lineNo] });
+        const useRole = role.length > 0 && !GENERIC_ROLE_RE.test(role);
+        if (!useRole && org.length === 0) {
+          // 「担当」「責任者」だけでは誰のことか分からない。組織名も取れないなら候補にしない。
+          if (role.length > 0) ctx.dropped.push({ reason: 'placeholder', title: safeText(role, 30), lines: [lineNo] });
           continue;
         }
-        let confidence = textConfidence(sentence, structured, true, ctx.bleed);
+        const title = useRole ? role : org;
+        let confidence = textConfidence(sentence, structured, useRole, ctx.bleed);
         // 2 段組が混線した行でも、役職語そのものが 1 語として取れているなら
         // 「誰が出てくるか」は読めている。ここを断片扱いで捨てると、
         // 実在する CISO / Regional CISO のような**精度の高い側だけ**が落ちる。
-        if (confidence === 'low' && isCleanRole(role)) confidence = 'medium';
+        if (confidence === 'low' && (isCleanRole(title) || (!useRole && org.length >= 3))) confidence = 'medium';
         out.push({
           kind,
           line: lineNo,
-          title: safeText(role, 60),
-          role: safeText(role, 60),
-          influence: inferInfluence(role),
+          title: safeText(title, 60),
+          role: useRole ? safeText(role, 60) : undefined,
+          organization: org.length > 0 ? safeText(org, 60) : undefined,
+          influence: useRole ? inferInfluence(role) : 'medium',
           detail: safeText(sentence, 140),
           confidence,
           evidence: sentence,
@@ -2440,6 +2594,18 @@ function renderCandidateTable(doc: LoadedDoc, result: ExtractResult, lang: Lang,
 // update_engagement 用ペイロード
 // ---------------------------------------------------------------------------
 
+/**
+ * 自動抽出した項目に付ける確度。
+ *
+ * ここは常に `inferred` にする。`stated`(=原文を指させる・確認済み)にしてはいけない。
+ * 抽出はキーワード一致であって読解ではないので、「その文が資料にある」ことは
+ * source(ファイル名:行番号)が保証しても、「それがリスクである」「影響度が中である」は
+ * まだ機械の当て推量でしかない。ここを stated にすると、健全性チェックが
+ * 「出典なし 0 件」を良好な点として褒め、誰も確認していない台帳が確認済みに見える。
+ * 人が原文を開いて確かめたら `update_engagement` で stated に上げる、という順序を守る。
+ */
+const EXTRACTED_CONFIDENCE: ProvenanceConfidence = 'inferred';
+
 interface RiskPayload {
   title: string;
   description?: string;
@@ -2448,6 +2614,8 @@ interface RiskPayload {
   status: RiskStatus;
   owner?: string;
   mitigation?: string;
+  source?: string;
+  confidence?: ProvenanceConfidence;
 }
 interface StakeholderPayload {
   name: string;
@@ -2457,6 +2625,8 @@ interface StakeholderPayload {
   interest: InfluenceLevel;
   concerns: string[];
   approach?: string;
+  source?: string;
+  confidence?: ProvenanceConfidence;
 }
 interface ActionPayload {
   title: string;
@@ -2465,6 +2635,8 @@ interface ActionPayload {
   status: ActionStatus;
   priority: Priority;
   note?: string;
+  source?: string;
+  confidence?: ProvenanceConfidence;
 }
 interface UpdatePayload {
   risks?: RiskPayload[];
@@ -2507,6 +2679,8 @@ function toUpdatePayload(doc: LoadedDoc, results: ExtractResult[]): UpdatePayloa
         status: 'open' as RiskStatus,
         owner: c.owner ? safeText(c.owner, 60) : undefined,
         mitigation: c.detail ? safeText(c.detail, 160) : undefined,
+        source: sourceRef(doc, c.line),
+        confidence: EXTRACTED_CONFIDENCE,
       }));
     } else if (result.kind === 'stakeholders') {
       payload.stakeholders = usable.map((c) => ({
@@ -2517,6 +2691,8 @@ function toUpdatePayload(doc: LoadedDoc, results: ExtractResult[]): UpdatePayloa
         interest: 'medium' as InfluenceLevel,
         concerns: [safeText(c.evidence, 160)],
         approach: `要確認(自動抽出) / to be confirmed — ${ref(c)}`,
+        source: sourceRef(doc, c.line),
+        confidence: EXTRACTED_CONFIDENCE,
       }));
     } else if (result.kind === 'actions') {
       payload.actions = usable.map((c) => ({
@@ -2526,6 +2702,8 @@ function toUpdatePayload(doc: LoadedDoc, results: ExtractResult[]): UpdatePayloa
         status: 'todo' as ActionStatus,
         priority: levelToPriority(c.level),
         note: `${c.dueRaw && !c.due ? `期限表記 / stated due: ${safeText(c.dueRaw, 40)} — ` : ''}${ref(c)}${basis(c)}`,
+        source: sourceRef(doc, c.line),
+        confidence: EXTRACTED_CONFIDENCE,
       }));
     } else if (result.kind === 'systems') {
       for (const c of usable) {
@@ -2674,6 +2852,15 @@ function renderExtraction(
       inline(
         '確認して不要な行を削ってから貼り付けてください。ingest_document(apply=true)でも同じ内容を登録できます。',
         'Review it, delete what you do not want, then paste it. ingest_document with apply=true writes the same content.',
+        lang,
+      ),
+    );
+    out.push('');
+    out.push(
+      inline(
+        '各行の `source` は「ファイル名:行番号」、`confidence` は全件 `inferred`(△ 推測)にしてあります。**`stated` にはしていません** — ' +
+          '出典はその文が資料にあることしか保証せず、リスクかどうか・レベルが妥当かどうかは機械の当て推量だからです。原文を開いて確かめた行だけ `stated` に直してから渡してください。',
+        'Each row carries `source` as "file:line" and `confidence` as `inferred` — **never `stated`**, because the reference only proves the sentence exists; whether it is a risk and whether the level fits are still machine guesses. Change a row to `stated` only after opening the original and checking it.',
         lang,
       ),
     );
@@ -2944,9 +3131,13 @@ const textSchema = z
   .max(HARD_TEXT_CHARS)
   .optional()
   .describe(
-    'ファイルの代わりに直接渡す本文。**PDF / Word / Excel / メール本文など、クライアント側で既に読めているものはこちらで渡す**。' +
+    'ファイルの代わりに直接渡す本文。**あなたが既に読んで理解している本文をここに貼り直しても、読解の精度は上がりません**' +
+    '(この走査はキーワードと文末表現だけを見ており、あなたの読解より劣ります)。' +
+    'ここが役に立つのは、抽出した項目を**出典行番号付きの表と登録用 JSON の形に機械的に整えたい**ときだけです。' +
     'path とはどちらか一方を指定する。 / ' +
-    'Body text to mine instead of a file. Use this for PDF/Word/Excel/email content your client has already read. ' +
+    'Body text to scan instead of a file. **Pasting text you have already read does not improve accuracy** — ' +
+    'this scan only looks at keywords and sentence endings, and it will be worse than your own reading. ' +
+    'It is useful only when you want the result formatted mechanically, with source line numbers and register-ready JSON. ' +
     'Pass either this or path, not both.',
   );
 
@@ -3304,11 +3495,17 @@ export function registerDocumentTools(server: McpServer): void {
       title: 'Extract engagement material from a document',
       description:
         '既存ドキュメント(報告書・台帳・管理表・議事録など)から、リスク / ステークホルダー / システム / 要件 / アクションの候補を' +
-        '決定的なヒューリスティクスで抽出する。**入力はファイル(path)でも、クライアントが既に読んだ本文(text)でもよい' +
-        '— PDF や Word はクライアント側で読んで text で渡すのが最短。** ' +
-        '決定的なヒューリスティクスで抽出し、出典行番号付きの Markdown 表と update_engagement 用 JSON を返す。書き込みは行わない。 / ' +
-        'Pull risk, stakeholder, system, requirement and action candidates out of an existing document using deterministic heuristics. ' +
-        'Returns a Markdown table with source line numbers plus JSON for update_engagement. Nothing is written.',
+        'キーワードと文末表現だけで機械的に切り出し、出典行番号付きの Markdown 表と `update_engagement` 用 JSON にする。書き込みは行わない。\n' +
+        '**このツールは文書を読解しません。** あなたが既に全文を読めているなら、候補出しは自分で行うほうが確実です' +
+        '(このツールの結果はあなたの読解の劣化版で、検証の手間だけが増えます)。\n' +
+        '向いているのは次の 3 つだけ: (1) 会話に載せきれない量のファイルを行番号付きで機械的に走査する、' +
+        '(2) 拾わなかった行とその理由を記録として残す、(3) 台帳に貼れる形(出典付き JSON)に整える。 / ' +
+        'Mechanically pull risk, stakeholder, system, requirement and action candidates out of a document using keywords and ' +
+        'sentence-ending patterns, and return a Markdown table with source line numbers plus JSON for `update_engagement`. Nothing is written.\n' +
+        '**This tool does not read or understand the document.** If you can already read the whole text yourself, do the candidate ' +
+        'selection yourself — this output is a lossy copy of your own reading and only adds verification work.\n' +
+        'It earns its place in three cases: (1) scanning a file too large to hold in the conversation, with line numbers; ' +
+        '(2) keeping a record of what was skipped and why; (3) shaping results into register-ready JSON with citations.',
       inputSchema: {
         path: pathSchema.optional(),
         text: textSchema,
@@ -3549,6 +3746,8 @@ export function registerDocumentTools(server: McpServer): void {
                 status: 'open',
                 owner: c.owner ? safeText(c.owner, 60) : undefined,
                 mitigation: c.detail ? safeText(c.detail, 160) : undefined,
+                source,
+                confidence: EXTRACTED_CONFIDENCE,
                 createdAt: timestamp,
                 updatedAt: timestamp,
               });
@@ -3570,6 +3769,8 @@ export function registerDocumentTools(server: McpServer): void {
                 interest: 'medium',
                 concerns: [safeText(c.evidence, 160)],
                 approach: `要確認(自動抽出) / to be confirmed — ${sourceNote}`,
+                source,
+                confidence: EXTRACTED_CONFIDENCE,
                 createdAt: timestamp,
                 updatedAt: timestamp,
               });
@@ -3590,6 +3791,8 @@ export function registerDocumentTools(server: McpServer): void {
                 status: 'todo',
                 priority: levelToPriority(c.level),
                 note: `${c.dueRaw && !c.due ? `期限表記 / stated due: ${safeText(c.dueRaw, 40)} — ` : ''}${sourceNote}`,
+                source,
+                confidence: EXTRACTED_CONFIDENCE,
                 createdAt: timestamp,
                 updatedAt: timestamp,
               });
@@ -3666,6 +3869,21 @@ export function registerDocumentTools(server: McpServer): void {
           out.push(`## ${inline('追加した項目', 'Added items', l)}`);
           out.push('');
           out.push(addedTable);
+          out.push('');
+          // 出典欄に何を入れたかを言う。表に「出典」列を出しておきながら台帳の
+          // source 欄が空、という状態を作らないための説明でもある。
+          out.push(
+            msg(
+              '上の出典は台帳の `source` 欄にそのまま入っています(`risk_matrix` や `check_engagement_health` の出典欄に出ます)。' +
+                '確度は全件 `inferred`(△ 推測)です。**`stated` にはしていません** — 抽出はキーワード一致であって読解ではないので、' +
+                'その文が資料にあることは出典が保証しても、それがリスクかどうか・レベルが妥当かどうかはまだ機械の当て推量です。' +
+                '原文を開いて確かめた項目だけ、`update_engagement` で `confidence: "stated"` に上げてください。',
+              'Those source references are stored in the register\'s `source` field (they show up in the source column of `risk_matrix` and `check_engagement_health`). ' +
+                'Confidence is `inferred` for every item — **never `stated`**: extraction is keyword matching, not reading, so the reference proves the sentence exists while the classification and level remain machine guesses. ' +
+                'Raise an entry to `confidence: "stated"` with `update_engagement` only after you have opened the original and checked it.',
+              l,
+            ),
+          );
           out.push('');
           if (shortened.length > 0) {
             // 切り詰めたことは必ず言う。言わないと、台帳の表題が原文そのものだと思われる。

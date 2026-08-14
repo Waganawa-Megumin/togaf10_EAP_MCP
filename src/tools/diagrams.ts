@@ -26,16 +26,24 @@ import {
 } from '../knowledge/index.js';
 import { loadEngagement } from '../engagement/store.js';
 import {
+  CONFIDENCE_DEFINITIONS,
+  CONFIDENCE_LEVELS,
   INFLUENCE_LEVELS,
+  isConfidence,
   PHASE_STATUSES,
+  NO_SOURCE_LABEL,
+  NO_SOURCE_MARK,
+  sourceCell,
   RISK_LEVELS,
   RISK_STATUSES,
+  shortSource,
   WORK_PACKAGE_STATUSES,
 } from '../engagement/model.js';
 import type {
   Engagement,
   InfluenceLevel,
   PhaseStatus,
+  ProvenanceConfidence,
   RiskLevel,
   RiskStatus,
   WorkPackageStatus,
@@ -232,6 +240,116 @@ function sourceLine(engagement: Engagement | null, usedEngagement: boolean, lang
     );
   }
   return msg('> データ元: 引数で渡された内容', '> Source: the arguments passed to this tool', lang);
+}
+
+// ---------------------------------------------------------------------------
+// 確度の軸 / The confidence axis
+// ---------------------------------------------------------------------------
+
+/**
+ * 確度(stated / inferred / unknown)を図の上でどう見せるか。
+ *
+ * ここが解いている問題: 能力マップのヒート(投資の焦点)と確度(読み取れた / 推測した)は
+ * **別の軸**なのに、表現手段が「色」しか無いと 1 本の軸に潰れる。実際の案件では
+ * 「赤い能力」が、文書にそう書いてあったのか、こちらがそう推測したのかを、
+ * 図から区別できなかった。区別できないものは会議で確認されない。
+ *
+ * だから手段を分ける。**塗り(fill)は投資の焦点、線(stroke)は出所**。
+ * この 2 つは CSS の別プロパティなので、重ねても互いを消さない(= 視覚的に直交する)。
+ * さらに**線を無視する読み手・線が出ない環境**のために、ラベル先頭に印(● △ ×)も置く。
+ * 印は `CONFIDENCE_DEFINITIONS` の marker をそのまま使う(表・図・点検で同じ記号にする)。
+ */
+const CONFIDENCE_STROKE: Record<ProvenanceConfidence, string> = {
+  // 実線・太め: 原文を指させる。図の中で一番はっきり見える線。
+  stated: 'stroke-width:2px',
+  // 破線: こちらが導いた。輪郭が「切れている」ことが確定していない印になる。
+  inferred: 'stroke-dasharray: 6 4,stroke-width:2px',
+  // 細い点線: 出所が辿れない。線がほとんど消えかけて見える。
+  unknown: 'stroke-dasharray: 2 4,stroke-width:1px',
+};
+
+/** 確度ごとの classDef 名(ヒートの class と併記して両方効かせる) */
+const CONFIDENCE_CLASS: Record<ProvenanceConfidence, string> = {
+  stated: 'confStated',
+  inferred: 'confInferred',
+  unknown: 'confUnknown',
+};
+
+/** 線種の呼び名。凡例で「どの線がどれか」を言葉でも言う(色覚・白黒印刷のため) */
+const CONFIDENCE_STROKE_LABEL: Record<ProvenanceConfidence, Bilingual> = {
+  stated: bi('実線', 'solid outline'),
+  inferred: bi('破線', 'dashed outline'),
+  unknown: bi('細い点線', 'thin dotted outline'),
+};
+
+/** ラベルの先頭に付ける印(確度が未設定なら何も付けない) */
+function confidenceMark(value: ProvenanceConfidence | undefined): string {
+  return value ? `${CONFIDENCE_DEFINITIONS[value].marker} ` : '';
+}
+
+/** 保存済み JSON / 引数から来た値を確度に丸める(未知の値は undefined) */
+function toConfidence(raw: unknown): ProvenanceConfidence | undefined {
+  return isConfidence(raw) ? raw : undefined;
+}
+
+/** 実際に使われた確度の classDef だけを出す(使っていない定義で図を膨らませない) */
+function confidenceClassDefs(used: Set<ProvenanceConfidence>): string[] {
+  return CONFIDENCE_LEVELS.filter((level) => used.has(level)).map(
+    (level) => `  classDef ${CONFIDENCE_CLASS[level]} ${CONFIDENCE_STROKE[level]};`,
+  );
+}
+
+/**
+ * 凡例の確度側。**1 軸目と確度が別の軸であること**を必ず言葉で書く。
+ * 図だけ直交させても、読み手が「色と線は同じことを言っている」と思えば意味がない。
+ *
+ * @param used     実際に図に出た確度
+ * @param unset    確度が未設定だった件数
+ * @param primary  1 軸目の説明(能力マップなら「塗り = ヒート」)
+ * @param channel  確度をどの手段で見せているか(「線」/「名前の前の印」)
+ * @param unsetLook 確度未設定のものが図でどう見えるか(「印なし・細い実線」など)
+ * @param hint     確度が 1 件も無いときの案内(どう付ければ何が見えるようになるか)
+ */
+function confidenceLegendItems(args: {
+  used: Set<ProvenanceConfidence>;
+  unset: number;
+  primary: Bilingual;
+  channel: Bilingual;
+  unsetLook: Bilingual;
+  hint: Bilingual;
+  /** 線種の呼び名を各行に添えるか(quadrantChart は線を描き分けないので付けない) */
+  withStroke: boolean;
+}): Bilingual[] {
+  const { used, unset, primary, channel, unsetLook, hint, withStroke } = args;
+  // 確度が 1 件も無いなら「2 つの軸がある」とは書かない(図には 1 本しか出ていない)
+  if (used.size === 0) return [hint];
+  const items: Bilingual[] = [
+    bi(
+      `**この図は 2 つの軸を重ねています。${primary.ja} / ${channel.ja} = 確度(その判断がどこから来たか)。**別の軸なので、${primary.ja.split(' = ')[0]}が同じでも確度が違えば次にやることは変わります。`,
+      `**Two independent axes are overlaid here. ${primary.en}; ${channel.en} = confidence, i.e. where the judgement came from.** They are independent: the same ${primary.en.split(' = ')[0].toLowerCase()} with a different confidence means a different next action.`,
+    ),
+  ];
+  for (const level of CONFIDENCE_LEVELS) {
+    if (!used.has(level)) continue;
+    const def = CONFIDENCE_DEFINITIONS[level];
+    const strokeJa = withStroke ? `(${CONFIDENCE_STROKE_LABEL[level].ja})` : '';
+    const strokeEn = withStroke ? ` (${CONFIDENCE_STROKE_LABEL[level].en})` : '';
+    items.push(
+      bi(
+        `${def.marker} ${def.label.ja}${strokeJa} — ${def.meaning.ja}`,
+        `${def.marker} ${def.label.en}${strokeEn} — ${def.meaning.en}`,
+      ),
+    );
+  }
+  if (unset > 0) {
+    items.push(
+      bi(
+        `(${unsetLook.ja} / 下の表では \`${NO_SOURCE_MARK}\` ${NO_SOURCE_LABEL.ja})確度が未設定 ${unset} 件 — 出所を書いていないので、後から消す判断ができません。「${NO_SOURCE_MARK}」は 1 文字も書かれていない行で、「${CONFIDENCE_DEFINITIONS.unknown.marker} ${CONFIDENCE_DEFINITIONS.unknown.label.ja}」(書いたが辿れない)とは別物です。`,
+        `(${unsetLook.en}; \`${NO_SOURCE_MARK}\` ${NO_SOURCE_LABEL.en} in the table below) ${unset} without a confidence — with no origin recorded, nobody can decide later whether to keep or drop them. "${NO_SOURCE_MARK}" means nothing was written down at all, unlike "${CONFIDENCE_DEFINITIONS.unknown.marker} ${CONFIDENCE_DEFINITIONS.unknown.label.en}" (written down but untraceable).`,
+      ),
+    );
+  }
+  return items;
 }
 
 // ---------------------------------------------------------------------------
@@ -473,17 +591,26 @@ const HEAT_LABEL: Record<Heat, Bilingual> = {
   high: bi('高(投資の焦点)', 'high (investment focus)'),
 };
 
+/** 塗りが何を表しているかを凡例で言う(確度の線と取り違えさせない) */
+const HEAT_MEANS = bi('ヒート(改善・投資の必要度)', 'heat, i.e. how badly it needs investment');
+
 interface CapabilityInput {
   name: string;
   level?: number;
   parent?: string;
   heat?: Heat;
+  /** その判断がどこから来たか / where the judgement came from */
+  confidence?: ProvenanceConfidence;
+  source?: string;
 }
 
 interface CapabilityNode {
   id: string;
   name: string;
   heat?: Heat;
+  /** 確度。ヒートとは別の軸なので、片方だけ設定されていてよい */
+  confidence?: ProvenanceConfidence;
+  source?: string;
   level: number;
   parent: number | null;
   children: number[];
@@ -499,6 +626,8 @@ function buildCapabilityTree(input: CapabilityInput[]): CapabilityNode[] {
     id: nextId(),
     name: cap.name,
     heat: cap.heat,
+    confidence: toConfidence(cap.confidence),
+    source: typeof cap.source === 'string' && cap.source.trim().length > 0 ? cap.source : undefined,
     level: 1,
     parent: null,
     children: [],
@@ -568,7 +697,7 @@ function registerCapabilityMap(server: McpServer): void {
     {
       title: 'Draw a business capability map',
       description:
-        'ビジネス能力マップを Mermaid の階層図で返す。親子関係を subgraph で表し、ヒート(低/中/高)で投資の焦点を色分けする。フェーズ B の議論を文章ではなく 1 枚の図に載せるためのツール。 / Draw a business capability map as a nested Mermaid diagram, with hierarchy shown as subgraphs and heat (low/medium/high) shown as colour. Turns the Phase B conversation into one picture instead of prose.',
+        'ビジネス能力マップを Mermaid の階層図で返す。親子関係を subgraph、ヒート(低/中/高)を塗り、確度(stated/inferred/unknown)を線種(実線/破線/点線)と印(● △ ×)で描き分ける。塗りと線は別の軸なので、「投資が要る」と資料に書いてあったのか、こちらが推測したのかが 1 枚で区別できる。 / Draw a business capability map as a nested Mermaid diagram: hierarchy as subgraphs, heat (low/medium/high) as fill, and confidence (stated/inferred/unknown) as the outline style plus a mark. Fill and outline are independent axes, so the map distinguishes "the document says this needs investment" from "we inferred it".',
       inputSchema: {
         capabilities: z
           .array(
@@ -586,6 +715,18 @@ function registerCapabilityMap(server: McpServer): void {
                 .enum(['low', 'medium', 'high'])
                 .optional()
                 .describe('ヒート(改善の必要度) / Heat, i.e. how badly it needs investment'),
+              confidence: z
+                .enum(CONFIDENCE_LEVELS)
+                .optional()
+                .describe(
+                  'ヒートの判断の出所。stated=資料にそう書いてある / inferred=そこから導いた / unknown=出所が辿れない。ヒート(塗り)とは別の軸として線種で描き分ける / Where the heat judgement came from; drawn as an outline style, on an axis independent of the fill',
+                ),
+              source: z
+                .string()
+                .optional()
+                .describe(
+                  '出典の短い呼び名(例: csr2026.pdf p.17、2026-08-14 ヒアリング) / Short name of the source, e.g. a file and page or an interview date',
+                ),
             }),
           )
           .default([])
@@ -611,14 +752,18 @@ function registerCapabilityMap(server: McpServer): void {
                 'heat は low / medium / high。「今つらいところ」だけ high にする。全部 high にすると図が意思決定に使えなくなる。',
                 'Set heat to low / medium / high. Mark only what actually hurts today as high; a map where everything is high cannot drive a decision.',
               ),
+              bi(
+                'confidence は heat とは別の軸。資料にそう書いてあれば stated、そこから導いたなら inferred、出所が辿れないなら unknown。塗り(ヒート)と線種(確度)で描き分けるので、「赤いが破線」= 投資が要ると推測しただけ、が図の上で区別できる。source には出典を 1 行で。',
+                'confidence is a separate axis from heat: stated when the document says so, inferred when you derived it, unknown when the origin cannot be traced. Fill shows heat and the outline shows confidence, so "red but dashed" — we merely inferred that this needs investment — is visible on the map. Put the origin in source.',
+              ),
             ],
             `{
   "capabilities": [
     { "name": "顧客管理", "level": 1 },
-    { "name": "顧客情報の統合", "parent": "顧客管理", "heat": "high" },
-    { "name": "問い合わせ対応", "parent": "顧客管理", "heat": "medium" },
+    { "name": "顧客情報の統合", "parent": "顧客管理", "heat": "high", "confidence": "stated", "source": "中期計画 p.12" },
+    { "name": "問い合わせ対応", "parent": "顧客管理", "heat": "medium", "confidence": "inferred", "source": "問い合わせ件数の推移から" },
     { "name": "商品供給", "level": 1 },
-    { "name": "需要予測", "parent": "商品供給", "heat": "high" }
+    { "name": "需要予測", "parent": "商品供給", "heat": "high", "confidence": "unknown" }
   ]
 }`,
           );
@@ -631,19 +776,33 @@ function registerCapabilityMap(server: McpServer): void {
           .map((entry) => entry.index);
 
         const heatMembers: Record<Heat, string[]> = { low: [], medium: [], high: [] };
+        // 確度は塗りではなく線で表すので、ヒートとは別の入れ物に集める
+        const confMembers: Record<ProvenanceConfidence, string[]> = { stated: [], inferred: [], unknown: [] };
+        const usedConfidence = new Set<ProvenanceConfidence>();
         const groupStyles: string[] = [];
+
+        // ラベルの先頭に確度の印を置く。線が出ない環境(白黒印刷・簡易ビューア)でも軸が残る。
+        const nodeLabel = (node: CapabilityNode): string =>
+          `${confidenceMark(node.confidence)}${safeLabel(node.name, '(名称未設定)', 30)}`;
+        const markNode = (node: CapabilityNode): void => {
+          if (node.heat) heatMembers[node.heat].push(node.id);
+          if (node.confidence) {
+            confMembers[node.confidence].push(node.id);
+            usedConfidence.add(node.confidence);
+          }
+        };
 
         const render = (index: number, depth: number, indent: string): string[] => {
           const node = nodes[index];
-          const label = safeLabel(node.name, '(名称未設定)', 30);
+          const label = nodeLabel(node);
           if (node.children.length === 0) {
-            if (node.heat) heatMembers[node.heat].push(node.id);
+            markNode(node);
             return [`${indent}${node.id}["${label}"]`];
           }
           // 深すぎる入れ子は読めなくなるので、3 段目からは平らに並べる
           if (depth >= 2) {
             const out = [`${indent}${node.id}["${label}"]`];
-            if (node.heat) heatMembers[node.heat].push(node.id);
+            markNode(node);
             for (const child of node.children) {
               out.push(...render(child, depth + 1, indent));
               // 入れ子をやめた分、親子関係は線で残す。並べただけでは兄弟に見えてしまう。
@@ -651,7 +810,15 @@ function registerCapabilityMap(server: McpServer): void {
             }
             return out;
           }
-          if (node.heat) groupStyles.push(`  style ${node.id} ${HEAT_FILL[node.heat]};`);
+          // subgraph には class を当てられないので、塗りと線を 1 つの style にまとめて書く。
+          // 塗り(HEAT_FILL)と線(CONFIDENCE_STROKE)は CSS の別プロパティなので、並べても打ち消し合わない。
+          const styleParts: string[] = [];
+          if (node.heat) styleParts.push(HEAT_FILL[node.heat]);
+          if (node.confidence) {
+            styleParts.push(CONFIDENCE_STROKE[node.confidence]);
+            usedConfidence.add(node.confidence);
+          }
+          if (styleParts.length > 0) groupStyles.push(`  style ${node.id} ${styleParts.join(',')};`);
           const out = [`${indent}subgraph ${node.id}["${label}"]`];
           if (depth === 0) out.push(`${indent}  direction TB`);
           for (const child of node.children) out.push(...render(child, depth + 1, `${indent}  `));
@@ -664,22 +831,42 @@ function registerCapabilityMap(server: McpServer): void {
         lines.push('  classDef heatLow fill:#d4efdf,stroke:#1e8449,color:#145a32;');
         lines.push('  classDef heatMid fill:#fdebd0,stroke:#ca6f1e,color:#7e5109;');
         lines.push('  classDef heatHigh fill:#fadbd8,stroke:#c0392b,color:#7b241c;');
+        // 確度側の classDef は fill に触れない。だから同じノードに両方当てても塗りが消えない。
+        lines.push(...confidenceClassDefs(usedConfidence));
         for (const heat of ['low', 'medium', 'high'] as Heat[]) {
           const ids = heatMembers[heat];
           if (ids.length > 0) lines.push(`  class ${ids.join(',')} ${HEAT_CLASS[heat]};`);
+        }
+        // ヒートの class とは別行で当てる(Mermaid のノードは class を複数持てる)
+        for (const level of CONFIDENCE_LEVELS) {
+          const ids = confMembers[level];
+          if (ids.length > 0) lines.push(`  class ${ids.join(',')} ${CONFIDENCE_CLASS[level]};`);
         }
         lines.push(...groupStyles);
 
         const highNames = nodes.filter((n) => n.heat === 'high').map((n) => n.name);
         const noHeat = nodes.filter((n) => !n.heat && n.children.length === 0).length;
+        const noConfidence = nodes.filter((n) => !n.confidence).length;
+        // 2 軸を重ねて初めて見える組み合わせ: 「投資が要る」と**推測しただけ**の能力
+        const unconfirmedHigh = nodes.filter((n) => n.heat === 'high' && n.confidence !== 'stated');
+        const inferredCount = nodes.filter((n) => n.confidence === 'inferred').length;
+        const unknownCount = nodes.filter((n) => n.confidence === 'unknown').length;
 
         const out: string[] = [];
         out.push(`# ${title ? labelOf(title, 60) : line('ビジネス能力マップ', 'Business capability map', l)}`);
         out.push('');
         out.push(
           msg(
-            `能力 ${nodes.length} 件 / 最上位 ${roots.length} 件 / ヒート「高」${highNames.length} 件`,
-            `${nodes.length} ${plural(nodes.length, 'capability', 'capabilities')}, ${roots.length} top-level ${plural(roots.length, 'group', 'groups')}, ${highNames.length} marked high`,
+            `能力 ${nodes.length} 件 / 最上位 ${roots.length} 件 / ヒート「高」${highNames.length} 件 / ${
+              usedConfidence.size === 0
+                ? '確度の記録なし'
+                : `確度あり ${nodes.length - noConfidence} 件(うち推測 ${inferredCount} 件、出所不明 ${unknownCount} 件)`
+            }`,
+            `${nodes.length} ${plural(nodes.length, 'capability', 'capabilities')}, ${roots.length} top-level ${plural(roots.length, 'group', 'groups')}, ${highNames.length} marked high, ${
+              usedConfidence.size === 0
+                ? 'no confidence recorded'
+                : `${nodes.length - noConfidence} with a confidence (${inferredCount} inferred, ${unknownCount} unknown)`
+            }`,
             l,
           ),
         );
@@ -688,8 +875,71 @@ function registerCapabilityMap(server: McpServer): void {
         out.push('');
         out.push(`${line('凡例', 'Legend', l)}:`);
         out.push('');
-        out.push(bullets((['high', 'medium', 'low'] as Heat[]).map((h) => HEAT_LABEL[h]), l));
+        out.push(
+          bullets(
+            [
+              bi(
+                `塗り = ${HEAT_MEANS.ja} — ${(['high', 'medium', 'low'] as Heat[]).map((h) => HEAT_LABEL[h].ja).join(' / ')}`,
+                `Fill = ${HEAT_MEANS.en} — ${(['high', 'medium', 'low'] as Heat[]).map((h) => HEAT_LABEL[h].en).join(' / ')}`,
+              ),
+              ...confidenceLegendItems({
+                used: usedConfidence,
+                unset: noConfidence,
+                primary: bi(`塗り = ${HEAT_MEANS.ja}`, `Fill = ${HEAT_MEANS.en}`),
+                channel: bi('線(実線 / 破線 / 点線)と先頭の印', 'the outline (solid / dashed / dotted) and the mark'),
+                unsetLook: bi('印なし・細い実線', 'no mark, plain outline'),
+                hint: bi(
+                  'confidence が 1 件も指定されていないため、この図には確度の軸が出ていません。`confidence`(stated / inferred / unknown)と `source` を付けると、塗り(ヒート)とは別に線種と印で描き分けられ、「投資が要ると資料に書いてあった」のか「こちらが推測した」のかが図の上で分かれます。',
+                  'No confidence was given, so the confidence axis does not appear on this map. Add `confidence` (stated / inferred / unknown) and `source`, and each box gets an outline style and a mark independent of its fill — separating "the document says this needs investment" from "we inferred it".',
+                ),
+                withStroke: true,
+              }),
+            ],
+            l,
+          ),
+        );
         out.push('');
+
+        // 2 軸を重ねた結果だけを表にする。全件表にすると図を見なくなる。
+        // 確度が 1 件も無いときは出さない(その場合「記載ありでない」= 全件で、表が何も言わない)。
+        if (usedConfidence.size > 0 && unconfirmedHigh.length > 0) {
+          out.push(
+            `### ${line('確認が要る: 投資の焦点だが「記載あり」ではないもの', 'Needs confirming: investment focus without a stated source', l)}`,
+          );
+          out.push('');
+          out.push(
+            `| ${line('能力', 'Capability', l)} | ${line('確度', 'Confidence', l)} | ${line('出典', 'Source', l)} |`,
+          );
+          out.push('| --- | :-: | --- |');
+          for (const node of unconfirmedHigh.slice(0, 20)) {
+            const conf = node.confidence
+              ? `${CONFIDENCE_DEFINITIONS[node.confidence].marker} ${text(CONFIDENCE_DEFINITIONS[node.confidence].label, l === 'both' ? 'ja' : l)}`
+              : line('未設定', 'not set', l);
+            // 出典が空の行を `—` にすると「見るところが無い」に見えて読み飛ばされる。
+            // 他の表(risk_matrix / ダッシュボード / 4 象限)と同じ `? 出所未記入` に揃える。
+            const noSrc = `${NO_SOURCE_MARK} ${line(NO_SOURCE_LABEL.ja, NO_SOURCE_LABEL.en, l)}`;
+            out.push(`| ${md(node.name, '(名称未設定)', 40)} | ${conf} | ${md(shortSource(node.source), noSrc, 40)} |`);
+          }
+          out.push('');
+          if (unconfirmedHigh.length > 20) {
+            out.push(
+              msg(
+                `他 ${unconfirmedHigh.length - 20} 件は省略しました。`,
+                `${unconfirmedHigh.length - 20} more are not shown.`,
+                l,
+              ),
+            );
+            out.push('');
+          }
+          out.push(
+            msg(
+              `この ${unconfirmedHigh.length} 件は、図の上では**赤いが線が実線ではない**もの。「投資が要る」という結論だけが独り歩きしやすい箇所です。予算の話に出す前に、出典を 1 行ずつ埋めるか、相手に当てて stated にしてください。`,
+              `These ${unconfirmedHigh.length} are the boxes that are red but not solid-outlined. The conclusion "this needs investment" is the part that travels on its own, so fill in a source for each — or confirm it with the client and move it to stated — before it reaches a budget conversation.`,
+              l,
+            ),
+          );
+          out.push('');
+        }
 
         if (nodes.length > 40) {
           out.push(
@@ -724,6 +974,30 @@ function registerCapabilityMap(server: McpServer): void {
             bi(
               'ヒートが未設定のため、どこに投資すべきかが図から読み取れない。関係者に「今いちばん困っている能力」を 3 つ選ばせて high を付ける。',
               'No heat is set, so the map cannot say where to invest. Ask the stakeholders to name the three capabilities that hurt most today and mark them high.',
+            ),
+          );
+        }
+        // 確度の指摘はヒートの指摘の直後に置く(この 2 つを並べて読ませたい)
+        if (usedConfidence.size > 0) {
+          const shownInferred = nodes
+            .filter((n) => n.confidence === 'inferred' || n.confidence === 'unknown')
+            .slice(0, 3)
+            .map((n) => `${CONFIDENCE_DEFINITIONS[n.confidence as ProvenanceConfidence].marker}${labelOf(n.name, 20)}`);
+          guideItems.push(
+            bi(
+              `塗りと線は別の軸。線が切れている(破線・点線)${inferredCount + unknownCount} 件${
+                shownInferred.length > 0 ? `(${shownInferred.join('、')})` : ''
+              }は、こちらの読みであって相手の言葉ではない。会議に出す前に、この線を実線に変えられるかどうかだけを確認する。`,
+              `Fill and outline are different axes. The ${inferredCount + unknownCount} ${plural(inferredCount + unknownCount, 'box', 'boxes')} with a broken outline${
+                shownInferred.length > 0 ? ` (${shownInferred.join(', ')})` : ''
+              } ${plural(inferredCount + unknownCount, 'is', 'are')} your reading, not the client's words. Before the meeting, check only one thing: can that outline be made solid?`,
+            ),
+          );
+        } else {
+          guideItems.push(
+            bi(
+              '確度が 1 件も設定されていないため、この図は「どこまでが資料に書いてあったか」を区別できない。せめてヒートが高い能力にだけ confidence(stated / inferred / unknown)と source を付けると、線種で区別されて確認すべき箇所が図から分かる。',
+              'No confidence is set anywhere, so this map cannot separate what the document said from what you concluded. Set confidence (stated / inferred / unknown) and source at least on the high-heat capabilities; they then get a distinct outline and the map shows what to confirm.',
             ),
           );
         }
@@ -1640,6 +1914,12 @@ interface StakeholderPoint {
   influenceHighSide: boolean;
   /** 関心度を高側(中以上)と判定したか */
   interestHighSide: boolean;
+  /**
+   * 影響力・関心度の判定がどこから来たか。象限(位置)とは**別の軸**。
+   * 位置は「どう扱うか」、確度は「その位置をどれだけ信じてよいか」を言う。
+   */
+  confidence?: ProvenanceConfidence;
+  source?: string;
 }
 
 /** 境界線上を示す記号。表・図・読み方ガイドで同じものを使う */
@@ -1675,7 +1955,7 @@ function registerStakeholderMatrix(server: McpServer): void {
     {
       title: 'Draw the stakeholder influence/interest matrix',
       description:
-        'ステークホルダーを影響力 × 関心度の 4 象限に Mermaid の quadrantChart で配置する。象限の判定は `stakeholder_matrix` と同一(中以上を高側に寄せ、境界線上には `*`)。登録済みの関与方針(approach)はその文言のまま表示し、未設定の人だけ一般的な方針を仮置きする。 / Plot stakeholders on an influence-versus-interest quadrant chart in Mermaid. Quadrants are decided by exactly the same rule as `stakeholder_matrix` (medium counts as the high side; boundary cases are marked `*`). Any engagement approach you recorded is shown verbatim; only people without one get a generic placeholder.',
+        'ステークホルダーを影響力 × 関心度の 4 象限に Mermaid の quadrantChart で配置する。象限の判定は `stakeholder_matrix` と同一(中以上を高側に寄せ、境界線上には `*`)。登録済みの関与方針(approach)はその文言のまま表示し、未設定の人だけ一般的な方針を仮置きする。確度(stated/inferred/unknown)は象限とは別の軸として名前の前の印(● △ ×)で示すので、推測で置いた人が図の上で分かる。 /Plot stakeholders on an influence-versus-interest quadrant chart in Mermaid. Quadrants are decided by exactly the same rule as `stakeholder_matrix` (medium counts as the high side; boundary cases are marked `*`). Any engagement approach you recorded is shown verbatim; only people without one get a generic placeholder. Confidence (stated/inferred/unknown) is a second, independent axis, shown as a mark before the name, so people you placed by inference are visible.',
       inputSchema: {
         stakeholders: z
           .array(
@@ -1688,6 +1968,16 @@ function registerStakeholderMatrix(server: McpServer): void {
                 .string()
                 .optional()
                 .describe('関与方針(書けばそのまま表示する) / Engagement approach; shown verbatim when given'),
+              confidence: z
+                .enum(CONFIDENCE_LEVELS)
+                .optional()
+                .describe(
+                  '影響力・関心度の判定の出所。stated=本人や資料がそう言っている / inferred=役職や場の様子から推測した / unknown=出所が辿れない。象限とは別の軸として点の名前の前に印(● △ ×)が付く / Where the influence and interest ratings came from; shown as a mark before the point name, on an axis independent of the quadrant',
+                ),
+              source: z
+                .string()
+                .optional()
+                .describe('出典の短い呼び名(例: 2026-08-14 キックオフ議事録) / Short name of the source'),
             }),
           )
           .default([])
@@ -1704,23 +1994,21 @@ function registerStakeholderMatrix(server: McpServer): void {
         // 保存ファイルは手で編集できるので、文字列であることを確かめてから使う
         const str = (raw: unknown): string | undefined =>
           typeof raw === 'string' && raw.trim().length > 0 ? raw : undefined;
-        const toPoint = (
-          name: string,
-          role: string | undefined,
-          influence: InfluenceLevel,
-          interest: InfluenceLevel,
-          concerns: string[],
-          approach: string | undefined,
-        ): StakeholderPoint => {
+        const toPoint = (input: {
+          name: string;
+          role?: string;
+          influence: InfluenceLevel;
+          interest: InfluenceLevel;
+          concerns: string[];
+          approach?: string;
+          confidence?: ProvenanceConfidence;
+          source?: string;
+        }): StakeholderPoint => {
+          const { name, influence, interest, approach } = input;
           // 判定は表ツールと同じ関数。ここで分岐を書き直すと必ずずれる。
           const verdict = classifyStakeholderQuadrant({ name, influence, interest, approach });
           return {
-            name,
-            role,
-            influence,
-            interest,
-            concerns,
-            approach,
+            ...input,
             quadrant: verdict.quadrant,
             borderline: verdict.borderline,
             influenceHighSide: verdict.influenceHighSide,
@@ -1733,16 +2021,32 @@ function registerStakeholderMatrix(server: McpServer): void {
               const interest = oneOf(INFLUENCE_LEVELS, s.interest, 'medium');
               if (influence !== s.influence) unknownValues.push(String(s.influence));
               if (interest !== s.interest) unknownValues.push(String(s.interest));
-              return toPoint(
-                str(s.name) ?? '',
-                str(s.role),
+              // 保存ファイルは手で編集できる。型が付いていても値は疑う。
+              const confidence = toConfidence(s.confidence);
+              if (s.confidence !== undefined && confidence === undefined) unknownValues.push(String(s.confidence));
+              return toPoint({
+                name: str(s.name) ?? '',
+                role: str(s.role),
                 influence,
                 interest,
-                Array.isArray(s.concerns) ? s.concerns.filter((c) => typeof c === 'string') : [],
-                str(s.approach),
-              );
+                concerns: Array.isArray(s.concerns) ? s.concerns.filter((c) => typeof c === 'string') : [],
+                approach: str(s.approach),
+                confidence,
+                source: str(s.source),
+              });
             })
-          : stakeholders.map((s) => toPoint(s.name, s.role, s.influence, s.interest, [], str(s.approach)));
+          : stakeholders.map((s) =>
+              toPoint({
+                name: s.name,
+                role: s.role,
+                influence: s.influence,
+                interest: s.interest,
+                concerns: [],
+                approach: str(s.approach),
+                confidence: toConfidence(s.confidence),
+                source: str(s.source),
+              }),
+            );
 
         if (points.length === 0) {
           return needInput(
@@ -1758,11 +2062,15 @@ function registerStakeholderMatrix(server: McpServer): void {
                 '影響力は「この人が反対したら止まるか」、関心度は「自分から状況を聞いてくるか」で判定すると迷わない。',
                 'Judge influence by "does it stop if they object?" and interest by "do they ask you for status unprompted?".',
               ),
+              bi(
+                'confidence は象限とは別の軸。本人や資料がそう言っているなら stated、役職から推測して置いたなら inferred。推測で置いた人は点の名前の前に △ が付くので、会議で「この位置は仮です」と言える。',
+                'confidence is an axis of its own, separate from the quadrant. Use stated when the person or a document says so, inferred when you placed them from their job title. Inferred people get a △ before their name, so you can say "this position is provisional" in the room.',
+              ),
             ],
             `{
   "stakeholders": [
-    { "name": "CFO", "influence": "high", "interest": "low", "approach": "投資委員会の 1 週間前に A4 一枚で回収見込みを渡す" },
-    { "name": "営業本部長", "influence": "high", "interest": "high" },
+    { "name": "CFO", "influence": "high", "interest": "low", "approach": "投資委員会の 1 週間前に A4 一枚で回収見込みを渡す", "confidence": "stated", "source": "2026-08-14 キックオフ議事録" },
+    { "name": "営業本部長", "influence": "high", "interest": "high", "confidence": "inferred", "source": "役職から推測" },
     { "name": "現場リーダー", "role": "受注業務", "influence": "low", "interest": "high" }
   ]
 }`,
@@ -1784,11 +2092,14 @@ function registerStakeholderMatrix(server: McpServer): void {
           const y = clampToBand(LEVEL_VALUE[point.influence] + jitter[1] + extra, point.influenceHighSide);
           // 境界線上の人は図の上でも `*` を付けて、判定の根拠を隠さない
           const mark = point.borderline ? MARK : '';
-          let name = `${plainOf(point.name, '(名称未設定)', 24)}${mark}`;
+          // quadrantChart は点ごとの塗り分け・線種を安定して描けない(描画側の版に依存する)ため、
+          // 確度は**名前の前の印**で表す。位置(象限)と印(確度)は互いに独立して読める。
+          const conf = confidenceMark(point.confidence);
+          let name = `${conf}${plainOf(point.name, '(名称未設定)', 24)}${mark}`;
           // 同名が並ぶと Mermaid 側で点が上書きされるので連番を付ける
           let suffix = 2;
           while (usedNames.has(name)) {
-            name = `${plainOf(point.name, '(名称未設定)', 20)}${mark} ${suffix}`;
+            name = `${conf}${plainOf(point.name, '(名称未設定)', 20)}${mark} ${suffix}`;
             suffix += 1;
           }
           usedNames.add(name);
@@ -1826,6 +2137,13 @@ function registerStakeholderMatrix(server: McpServer): void {
         const withOwnApproach = points.filter((p) => (p.approach ?? '').trim().length > 0);
         const withoutApproach = points.filter((p) => (p.approach ?? '').trim().length === 0);
         const borderlineNames = points.filter((p) => p.borderline);
+        // 確度は象限とは別軸なので、象限の集計とは別に数える
+        const usedConfidence = new Set<ProvenanceConfidence>();
+        for (const point of points) if (point.confidence) usedConfidence.add(point.confidence);
+        const guessed = points.filter((p) => p.confidence === 'inferred' || p.confidence === 'unknown');
+        const noConfidence = points.filter((p) => !p.confidence);
+        // 影響力が高い側にいる人ほど、推測で置いたときの間違いが高くつく
+        const guessedHighInfluence = guessed.filter((p) => p.influenceHighSide);
 
         const out: string[] = [];
         out.push(`# ${line('ステークホルダーマトリクス', 'Stakeholder matrix', l)}`);
@@ -1856,15 +2174,44 @@ function registerStakeholderMatrix(server: McpServer): void {
           ),
         );
         out.push('');
+        // 凡例。位置(象限)と印(確度)が別の軸であることを、図のすぐ下で言う。
+        out.push(`${line('凡例', 'Legend', l)}:`);
+        out.push('');
         out.push(
-          `| ${line('氏名・役職', 'Name', l)} | ${line('影響力', 'Influence', l)} | ${line('関心度', 'Interest', l)} | ${line('象限', 'Quadrant', l)} | ${line('関与方針', 'Approach', l)} |`,
+          bullets(
+            [
+              ...confidenceLegendItems({
+                used: usedConfidence,
+                unset: noConfidence.length,
+                primary: bi('位置 = 扱い方(象限)', 'Position = how to treat them (the quadrant)'),
+                channel: bi('名前の前の印', 'the mark before the name'),
+                unsetLook: bi('印なし', 'no mark'),
+                hint: bi(
+                  'confidence が 1 件も登録されていないため、この図には確度の軸が出ていません。`confidence`(stated / inferred / unknown)と `source` を付けると名前の前に印が出て、「本人がそう言った位置」と「こちらが推測して置いた位置」が象限とは別に分かれます。',
+                  'No confidence is recorded, so the confidence axis does not appear here. Add `confidence` (stated / inferred / unknown) and `source`, and a mark appears before each name, separating positions people stated from positions you inferred — independently of the quadrant.',
+                ),
+                // quadrantChart は点ごとの線種を安定して描けないので、線の呼び名は出さない
+                withStroke: false,
+              }),
+              // MARK は `*`。箇条書きの先頭に素で置くと入れ子の箇条書きとして食われるのでコードで囲む
+              bi(
+                `\`${MARK}\` は中(medium)を含むため境界線上にいる人。確度とは無関係の、3 つ目の印。`,
+                `\`${MARK}\` marks people who sit on a boundary because of a medium rating — a third mark, unrelated to confidence.`,
+              ),
+            ],
+            l,
+          ),
         );
-        out.push('| --- | :-: | :-: | --- | --- |');
+        out.push('');
+        out.push(
+          `| ${line('氏名・役職', 'Name', l)} | ${line('影響力', 'Influence', l)} | ${line('関心度', 'Interest', l)} | ${line('象限', 'Quadrant', l)} | ${line('出典・確度', 'Source and confidence', l)} | ${line('関与方針', 'Approach', l)} |`,
+        );
+        out.push('| --- | :-: | :-: | --- | --- | --- |');
         for (const point of points) {
           const role = point.role ? ` (${md(point.role, '-', 30)})` : '';
           const mark = point.borderline ? MARK : '';
           out.push(
-            `| ${md(point.name, '(名称未設定)', 40)}${mark}${role} | ${text(LEVEL_LABEL[point.influence], l)} | ${text(LEVEL_LABEL[point.interest], l)} | ${text(QUADRANT_NAME[point.quadrant], l)} | ${approachCell(point, l)} |`,
+            `| ${md(point.name, '(名称未設定)', 40)}${mark}${role} | ${text(LEVEL_LABEL[point.influence], l)} | ${text(LEVEL_LABEL[point.interest], l)} | ${text(QUADRANT_NAME[point.quadrant], l)} | ${sourceCell(point, l)} | ${approachCell(point, l)} |`,
           );
         }
         out.push('');
@@ -1930,6 +2277,29 @@ function registerStakeholderMatrix(server: McpServer): void {
             ),
           );
         }
+        if (guessed.length > 0) {
+          guideItems.push(
+            bi(
+              `印が ${CONFIDENCE_DEFINITIONS.inferred.marker} / ${CONFIDENCE_DEFINITIONS.unknown.marker} の ${guessed.length} 名(${named(guessed, 'ja')})は、こちらが推測で置いた位置。${
+                guessedHighInfluence.length > 0
+                  ? `うち ${guessedHighInfluence.length} 名は影響力が高い側にいるので、推測が外れたときの損害が大きい。`
+                  : ''
+              }本人か、その人を知っている 1 人に当てて、当たっていれば stated に変える。`,
+              `The ${guessed.length} marked ${CONFIDENCE_DEFINITIONS.inferred.marker} / ${CONFIDENCE_DEFINITIONS.unknown.marker} (${named(guessed, 'en')}) were placed by your inference, not by their words.${
+                guessedHighInfluence.length > 0
+                  ? ` ${guessedHighInfluence.length} of them sit on the high-influence side, where a wrong guess costs the most.`
+                  : ''
+              } Check with the person, or with one person who knows them, and move them to stated once confirmed.`,
+            ),
+          );
+        } else if (noConfidence.length === points.length) {
+          guideItems.push(
+            bi(
+              '確度が 1 件も設定されていないため、この図からは「本人がそう言った位置」と「こちらが推測した位置」が区別できない。せめて影響力が高い人だけ confidence(stated / inferred / unknown)と source を付けると、名前の前に印が出て仮置きが分かる。',
+              'No confidence is recorded, so this chart cannot separate positions people stated from positions you guessed. Set confidence (stated / inferred / unknown) and source at least for the high-influence people; a mark then appears before their name showing what is provisional.',
+            ),
+          );
+        }
         if (withoutApproach.length > 0) {
           guideItems.push(
             bi(
@@ -1938,7 +2308,9 @@ function registerStakeholderMatrix(server: McpServer): void {
             ),
           );
         }
-        // 案件依存の指摘は 4 件までに絞り、共通の「次の一手」は必ず残す
+        // 案件依存の指摘は 5 件までに絞り、共通の「次の一手」は必ず残す。
+        // (4 件だったのを 1 つ広げてある。確度の指摘を足したぶん、
+        //  「関与方針が未設定」の指摘が押し出されて消えていたため)
         const closingItems: Bilingual[] = [
           bi(
             '象限は固定ではない。関心は説明の頻度と内容で動かせるので、右方向に動かしたい人を 2 名決めて働きかける。',
@@ -1949,7 +2321,7 @@ function registerStakeholderMatrix(server: McpServer): void {
             'Next: write down one concern per stakeholder in their own words, and include a view that answers it. Anyone whose concern you cannot write down has not been talked to enough.',
           ),
         ];
-        out.push(readingGuide(l, [...guideItems.slice(0, 4), ...closingItems]));
+        out.push(readingGuide(l, [...guideItems.slice(0, 5), ...closingItems]));
 
         return textResult(out.join('\n'));
       });

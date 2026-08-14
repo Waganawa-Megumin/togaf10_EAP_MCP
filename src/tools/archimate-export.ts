@@ -1158,8 +1158,8 @@ function writeFiles(dir: string, files: OutputFile[], overwrite: boolean, lang: 
 
 const elementInput = z.object({
   name: z.string().min(1).describe('要素名 / Element name'),
-  type: z.string().min(1).describe('要素タイプ(例: Capability, ApplicationComponent)。list_archimate_types 参照 / ArchiMate element type'),
-  documentation: z.string().optional().describe('説明。Archi の Documentation 欄に入る / Documentation text'),
+  type: z.string().min(1).describe('要素タイプ(例 Capability)。list_archimate_types 参照 / Element type'),
+  documentation: z.string().optional().describe('説明(Archi の Documentation 欄) / Documentation text'),
 });
 
 /**
@@ -1171,13 +1171,13 @@ const relationInput = z.object({
   source: z
     .string()
     .optional()
-    .describe('関係元の要素名(同名が複数あるときは `Type:名前`)。`from` でも可 / Source element name; `from` also accepted'),
-  target: z.string().optional().describe('関係先の要素名。`to` でも可 / Target element name; `to` also accepted'),
+    .describe('関係元の要素名(同名が複数なら `Type:名前`) / Source element name'),
+  target: z.string().optional().describe('関係先の要素名 / Target element name'),
   from: z.string().optional().describe('`source` の別名 / Alias of `source`'),
   to: z.string().optional().describe('`target` の別名 / Alias of `target`'),
-  type: z.string().min(1).describe('関係タイプ(例: Realization, Serving, Triggering) / Relationship type'),
-  name: z.string().optional().describe('関係のラベル / Optional label on the relationship'),
-  documentation: z.string().optional().describe('関係の説明 / Documentation text for the relationship'),
+  type: z.string().min(1).describe('関係タイプ(例 Realization, Serving) / Relationship type'),
+  name: z.string().optional().describe('関係のラベル / Label'),
+  documentation: z.string().optional().describe('関係の説明 / Documentation text'),
 });
 
 type ElementInput = z.infer<typeof elementInput>;
@@ -1602,28 +1602,23 @@ export function registerArchiMateExportTools(server: McpServer): void {
     {
       title: 'Export an ArchiMate model as Archi CSV',
       description:
-        'ArchiMate モデルを Archi の CSV インポート形式(elements.csv / relations.csv / properties.csv)で書き出す。`fromEngagement: true` にすると、現在のエンゲージメントのステークホルダー・関心事・移行状態・能力・作業パッケージ・便益・成果物を自動で要素化する。出力後に Archi での取り込み手順を返す。 / Export an ArchiMate model in the CSV layout Archi imports (elements.csv, relations.csv, properties.csv). With `fromEngagement: true` the current engagement (stakeholders, concerns, plateaus, capabilities, work packages, benefits, deliverables) is turned into elements automatically. The reply includes the Archi import steps.',
+        'ArchiMate モデルを Archi の CSV インポート形式(elements/relations/properties.csv)でファイルに書き出す。`fromEngagement: true` で現在の案件のステークホルダー・関心事・移行状態・能力・作業パッケージ・便益・成果物を要素化。Archi での取り込み手順も返す。 / Write an ArchiMate model to disk as the CSV set Archi imports (elements/relations/properties.csv). `fromEngagement: true` turns the current engagement into elements. The reply includes the Archi import steps.',
       inputSchema: {
         elements: z.array(elementInput).default([]).describe('書き出す要素 / Elements to export'),
         relations: z
           .array(relationInput)
           .default([])
-          .describe(
-            '要素間の関係。source/target は要素名(elements の name か fromEngagement で生成された名前)で指定する。渡さないと Archi 上で要素がばらばらに並ぶ / Relationships between elements, referenced by element name. Without them the elements land in Archi unconnected',
-          ),
-        relationships: z
-          .array(relationInput)
-          .optional()
-          .describe('`relations` の別名(どちらで書いても同じ) / Alias of `relations`'),
+          .describe('要素間の関係。渡さないと Archi 上で線が引かれない / Relationships; without them the elements land unconnected'),
+        relationships: z.array(relationInput).optional().describe('`relations` の別名 / Alias of `relations`'),
         fromEngagement: z
           .boolean()
           .default(false)
-          .describe('現在のエンゲージメントから要素を自動生成する / Also generate elements from the current engagement'),
-        modelName: z.string().optional().describe('モデル名(既定: エンゲージメント名) / Model name'),
+          .describe('現在の案件からも要素を生成する / Also generate elements from the current engagement'),
+        modelName: z.string().optional().describe('モデル名(既定: 案件名) / Model name'),
         outputDir: z
           .string()
           .optional()
-          .describe('出力先ディレクトリ。データディレクトリ配下かカレント作業ディレクトリ配下のみ / Output directory; must sit under the data dir or the cwd'),
+          .describe('出力先。データディレクトリかカレント配下のみ / Output dir; under the data dir or cwd only'),
         overwrite: z.boolean().default(false).describe('既存ファイルを上書きする / Overwrite existing files'),
         lang: langSchema,
       },
@@ -1744,29 +1739,24 @@ export function registerArchiMateExportTools(server: McpServer): void {
     {
       title: 'Export an ArchiMate model as an Open Exchange File',
       description:
-        'ArchiMate モデルを Open Exchange File 形式(XML)で書き出す。Archi 以外のツールとも交換できる標準的なファイル形式。入力は export_archimate_csv と同じ。 / Export an ArchiMate model as an Open Exchange File (XML), the interchange format other ArchiMate tools also read. Same inputs as export_archimate_csv.',
+        'ArchiMate モデルを Open Exchange File(XML)としてファイルに書き出す。Archi 以外のツールとも交換できる標準形式。入力は export_archimate_csv と同じ。 / Write an ArchiMate model to disk as an Open Exchange File (XML), the interchange format other ArchiMate tools read. Same inputs as export_archimate_csv.',
       inputSchema: {
         elements: z.array(elementInput).default([]).describe('書き出す要素 / Elements to export'),
         relations: z
           .array(relationInput)
           .default([])
-          .describe(
-            '要素間の関係。source/target は要素名で指定する。渡さないと `<relationships>` が空になり、取り込んでも線が引かれない / Relationships between elements, referenced by element name. Without them `<relationships>` is empty and no line is drawn',
-          ),
-        relationships: z
-          .array(relationInput)
-          .optional()
-          .describe('`relations` の別名(どちらで書いても同じ) / Alias of `relations`'),
+          .describe('要素間の関係。渡さないと線が 1 本も引かれない / Relationships; without them no line is drawn'),
+        relationships: z.array(relationInput).optional().describe('`relations` の別名 / Alias of `relations`'),
         fromEngagement: z
           .boolean()
           .default(false)
-          .describe('現在のエンゲージメントから要素を自動生成する / Also generate elements from the current engagement'),
+          .describe('現在の案件からも要素を生成する / Also generate elements from the current engagement'),
         modelName: z.string().optional().describe('モデル名 / Model name'),
-        fileName: z.string().optional().describe('ファイル名(既定: model.xml) / File name, default model.xml'),
+        fileName: z.string().optional().describe('ファイル名(既定 model.xml) / File name'),
         outputDir: z
           .string()
           .optional()
-          .describe('出力先ディレクトリ。データディレクトリ配下かカレント作業ディレクトリ配下のみ / Output directory; must sit under the data dir or the cwd'),
+          .describe('出力先。データディレクトリかカレント配下のみ / Output dir; under the data dir or cwd only'),
         overwrite: z.boolean().default(false).describe('既存ファイルを上書きする / Overwrite existing files'),
         lang: langSchema,
       },
@@ -1882,12 +1872,12 @@ export function registerArchiMateExportTools(server: McpServer): void {
     {
       title: 'List ArchiMate element and relationship types',
       description:
-        'export_archimate_* に渡せる要素タイプ・関係タイプの一覧を、レイヤ別と使いどころ付きで返す。タイプ名の指定は大文字小文字・空白・ハイフンを無視して照合される。 / List the element and relationship types accepted by the export tools, grouped by layer with practical notes. Type names are matched ignoring case, spaces, and hyphens.',
+        '書き出しツールに渡せる要素タイプ・関係タイプをレイヤ別・使いどころ付きで一覧。タイプ名は大文字小文字・空白・ハイフンを無視して照合される。 / List the element and relationship types the export tools accept, grouped by layer with practical notes. Type names match ignoring case, spaces, hyphens.',
       inputSchema: {
         group: z
           .string()
           .optional()
-          .describe('絞り込み(strategy / business / application / technology / physical / motivation / implementation / other) / Filter by group'),
+          .describe('strategy / business / application / technology / physical / motivation / implementation / other で絞る / Filter by group'),
         relationsOnly: z.boolean().default(false).describe('関係タイプだけ返す / Return relationship types only'),
         lang: langSchema,
       },

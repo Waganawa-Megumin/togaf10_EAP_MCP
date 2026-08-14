@@ -5,12 +5,18 @@
 
 import { ADM_PHASES, findPhase, type Bilingual, type Lang } from '../knowledge/index.js';
 import {
+  CONFIDENCE_DEFINITIONS,
+  CONFIDENCE_LEVELS,
+  NO_SOURCE_LABEL,
+  NO_SOURCE_MARK,
   OUTPUT_LIMITS,
   RISK_LEVELS,
   RISK_STATUSES,
   capCell,
   capRows,
+  sourceCell,
   summarizeProgress,
+  summarizeProvenance,
   type Action,
   type Assessment,
   type Engagement,
@@ -43,6 +49,7 @@ import {
  */
 const M = {
   unassigned: { ja: '(移行状態 未割当)', en: '(no transition)' },
+  source: { ja: '出典', en: 'Source' },
   total: { ja: '計', en: 'Total' },
   average: { ja: '平均', en: 'Average' },
   overdue: { ja: '期限超過', en: 'overdue' },
@@ -1152,6 +1159,56 @@ function moreRow(cap: RowCap, columns: number, lang: Lang): string {
   return `| ${cells.join(' | ')} |`;
 }
 
+// ---------------------------------------------------------------------------
+// 出典 / Provenance
+//
+// ダッシュボードは「そのまま配る 1 枚」なので、ここに出典が出ていないと
+// 台帳に記録した出典が配布物の手前で消える(記録はされているのに誰も見ない)。
+// 印とラベルの実体は engagement/model.ts に 1 か所だけ置いてある。
+// ---------------------------------------------------------------------------
+
+/**
+ * 出典列の凡例。記号だけを出して意味を書かないと、読む側が印を無視する。
+ * 3 値の定義は `CONFIDENCE_DEFINITIONS` を引くので、増減しても追従する。
+ */
+function sourceLegend(lang: Lang): string {
+  const line = (l: 'ja' | 'en'): string =>
+    [
+      ...CONFIDENCE_LEVELS.map((v) => `\`${CONFIDENCE_DEFINITIONS[v].marker}\` ${CONFIDENCE_DEFINITIONS[v].label[l]}`),
+      `\`${NO_SOURCE_MARK}\` ${NO_SOURCE_LABEL[l]}`,
+    ].join(' / ');
+  const ja = `_出典欄: ${line('ja')}。「${NO_SOURCE_MARK} ${NO_SOURCE_LABEL.ja}」は出典が 1 文字も書かれていない行で、「${CONFIDENCE_DEFINITIONS.unknown.marker} ${CONFIDENCE_DEFINITIONS.unknown.label.ja}」(書いたが辿れない)とは別物。_`;
+  const en = `_Source column: ${line('en')}. "${NO_SOURCE_MARK} ${NO_SOURCE_LABEL.en}" means nothing was recorded at all, which is not the same as "${CONFIDENCE_DEFINITIONS.unknown.marker} ${CONFIDENCE_DEFINITIONS.unknown.label.en}" (recorded but untraceable)._`;
+  if (lang === 'ja') return ja;
+  if (lang === 'en') return en;
+  return `${ja}\n${en}`;
+}
+
+/**
+ * 見出し直下に出す 1 行の出典サマリ。
+ * 台帳が空のときは何も出さない(0/0 を「100%」や「良好」と読ませないため)。
+ */
+function provenanceHeadline(e: Engagement, lang: Lang): string[] {
+  const summary = summarizeProvenance(e);
+  if (summary.total === 0) return [];
+  const pct = Math.round((summary.withSource / summary.total) * 100);
+  const breakdown = CONFIDENCE_LEVELS.map(
+    (v) => `${CONFIDENCE_DEFINITIONS[v].marker} ${summary.byConfidence[v]}`,
+  ).join(' / ');
+  const ja = `**出典** — ${summary.withSource}/${summary.total} 件に出典あり (${pct}%) · ${breakdown} · 確度未設定 ${summary.byConfidence.unset}`;
+  const en = `**Sources** — ${summary.withSource}/${summary.total} entries carry a source (${pct}%) · ${breakdown} · confidence unset ${summary.byConfidence.unset}`;
+  const line = lang === 'ja' ? ja : lang === 'en' ? en : `${ja}\n${en}`;
+  const out = [line];
+  if (summary.withoutSource > 0) {
+    const nja = `_出典の無い ${summary.withoutSource} 件は、後から真偽を確かめられません。この 1 枚を配る前に、数字と固有名詞の行だけでも出典を埋めてください。_`;
+    const nen = `_The ${summary.withoutSource} entries without a source cannot be checked later. Before handing this page over, fill in at least the rows carrying figures and proper nouns._`;
+    out.push('');
+    out.push(lang === 'ja' ? nja : lang === 'en' ? nen : `${nja}\n${nen}`);
+  }
+  out.push('');
+  return out;
+}
+
 /** 上位 n 件に絞った結果 */
 interface Taken<T> extends RowCap {
   rows: readonly T[];
@@ -1648,6 +1705,9 @@ export function renderDashboardMarkdown(
     }
     out.push(`**${label(M.recorded, lang)}** — ${counts.join(' | ')}`);
     out.push('');
+    // 件数だけを見せると「これだけ積み上がった」で話が終わる。
+    // 何件が辿れるのかを同じ高さに並べておく。
+    out.push(...provenanceHeadline(e, lang));
   }
 
   // --- ADM フェーズ進捗 ---
@@ -1686,9 +1746,9 @@ export function renderDashboardMarkdown(
       out.push(label(L.none, lang));
     } else {
       out.push(
-        `| ${label(L.name, lang)} | ${label(L.role, lang)} | ${label(L.influence, lang)} | ${label(L.interest, lang)} | ${label(L.concerns, lang)} | ${label(L.approach, lang)} |`,
+        `| ${label(L.name, lang)} | ${label(L.role, lang)} | ${label(L.influence, lang)} | ${label(L.interest, lang)} | ${label(L.concerns, lang)} | ${label(L.approach, lang)} | ${label(M.source, lang)} |`,
       );
-      out.push('| --- | --- | :-: | :-: | --- | --- |');
+      out.push('| --- | --- | :-: | :-: | --- | --- | --- |');
       // compact では影響力 × 関心度の高い人から見せる(絞るときに落とすのは末端の人)
       const weight = (s: Stakeholder): number => {
         const score: Record<string, number> = { high: 3, medium: 2, low: 1 };
@@ -1698,10 +1758,12 @@ export function renderDashboardMarkdown(
       const shown = take(ordered, compact, limit, trim);
       for (const s of shown.rows) {
         out.push(
-          `| ${longCell(s.name)} | ${longCell([s.role, s.organization].filter(Boolean).join(' / '))} | ${labelOf(INFLUENCE_LABEL, s.influence, lang)} | ${labelOf(INFLUENCE_LABEL, s.interest, lang)} | ${longCell(list(s.concerns).join('; '))} | ${longCell(s.approach)} |`,
+          `| ${longCell(s.name)} | ${longCell([s.role, s.organization].filter(Boolean).join(' / '))} | ${labelOf(INFLUENCE_LABEL, s.influence, lang)} | ${labelOf(INFLUENCE_LABEL, s.interest, lang)} | ${longCell(list(s.concerns).join('; '))} | ${longCell(s.approach)} | ${sourceCell(s, lang)} |`,
         );
       }
-      if (shown.hidden > 0) out.push(moreRow(shown, 6, lang));
+      if (shown.hidden > 0) out.push(moreRow(shown, 7, lang));
+      out.push('');
+      out.push(sourceLegend(lang));
     }
     out.push('');
   }
@@ -1714,19 +1776,21 @@ export function renderDashboardMarkdown(
       out.push(label(L.none, lang));
     } else {
       out.push(
-        `| ${label(L.title, lang)} | ${label(L.level, lang)} | ${label(L.residual, lang)} | ${label(L.status, lang)} | ${label(L.owner, lang)} | ${label(L.mitigation, lang)} |`,
+        `| ${label(L.title, lang)} | ${label(L.level, lang)} | ${label(L.residual, lang)} | ${label(L.status, lang)} | ${label(L.owner, lang)} | ${label(L.mitigation, lang)} | ${label(M.source, lang)} |`,
       );
-      out.push('| --- | :-: | :-: | :-: | --- | --- |');
+      out.push('| --- | :-: | :-: | :-: | --- | --- | --- |');
       const order: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 };
       const rank = (level: RiskLevel): number => order[level] ?? 9;
       const sorted = [...e.risks].sort((a, b) => rank(a.level) - rank(b.level));
       const shown = take(sorted, compact, limit, trim);
       for (const r of shown.rows) {
         out.push(
-          `| ${longCell(r.title)} | ${labelOf(RISK_LEVEL_LABEL, r.level, lang)} | ${labelOf(RISK_LEVEL_LABEL, r.residualLevel, lang)} | ${labelOf(RISK_STATUS_LABEL, r.status, lang)} | ${longCell(r.owner)} | ${longCell(r.mitigation)} |`,
+          `| ${longCell(r.title)} | ${labelOf(RISK_LEVEL_LABEL, r.level, lang)} | ${labelOf(RISK_LEVEL_LABEL, r.residualLevel, lang)} | ${labelOf(RISK_STATUS_LABEL, r.status, lang)} | ${longCell(r.owner)} | ${longCell(r.mitigation)} | ${sourceCell(r, lang)} |`,
         );
       }
-      if (shown.hidden > 0) out.push(moreRow(shown, 6, lang));
+      if (shown.hidden > 0) out.push(moreRow(shown, 7, lang));
+      out.push('');
+      out.push(sourceLegend(lang));
     }
     out.push('');
   }

@@ -62,7 +62,7 @@ function registerLlmStatus(server: McpServer): void {
     {
       title: 'Claude API status',
       description:
-        'Claude API 連携が使える状態かを返す(APIキーの有無・使用モデル・設定方法)。キーの値は表示しない。未設定でもホスト側の LLM で代替できる。 / Report whether the optional Claude API path is available: key presence (never its value), model in use, and how to configure it.',
+        'Claude API 連携が使えるかを返す(キーの有無・モデル・設定方法)。キーの値は表示しない。 / Report whether the optional Claude API path is available: key presence (never its value), model, and how to configure it.',
       inputSchema: { lang: langSchema },
     },
     async ({ lang }) => {
@@ -139,13 +139,10 @@ function registerAnalyzeText(server: McpServer): void {
     {
       title: 'Analyze a document with Claude',
       description:
-        '手元の既存ドキュメント(議事録・RFP・設計書など)を解析する。API キーがあれば Claude API に投げ、無ければそのまま使えるプロンプトを返す。kind を指定すると構造化(リスク/ステークホルダ/要件/要約)して返す。 / Analyze an existing document. Calls the Claude API when a key is configured; otherwise returns a ready-to-paste prompt. With `kind`, requests structured JSON output.',
+        '手元の文書(議事録・RFP・設計書など)を解析する。**API キーがあれば本文を Claude API に送信する**(外部通信)。無ければそのまま使えるプロンプトを返すだけ。kind 指定で構造化(リスク/ステークホルダ/要件/要約)。 / Analyze an existing document. **With an API key configured the text is sent to the Claude API** (outbound call); otherwise it only returns a ready-to-paste prompt. `kind` requests structured JSON.',
       inputSchema: {
-        text: z.string().min(1).describe('解析対象の本文 / The document text to analyze (untrusted input).'),
-        task: z
-          .string()
-          .min(1)
-          .describe('何をしてほしいか。例: "この議事録から未決事項と担当者を洗い出して" / What you want done.'),
+        text: z.string().min(1).describe('解析対象の本文(信頼できない入力) / The document text (untrusted input)'),
+        task: z.string().min(1).describe('何をしてほしいか / What you want done'),
         kind: z
           .enum(ANALYSIS_KINDS)
           .optional()
@@ -590,9 +587,9 @@ function registerEstimateTokens(server: McpServer): void {
     {
       title: 'Estimate token count',
       description:
-        'テキストのトークン数を見積もる。API キーがあれば count_tokens で正確に数え、無ければ概算のみ(日本語は文字数ベースで多めに見積もる)。 / Estimate the token count of a text. Exact via the count_tokens endpoint when a key is configured; otherwise a rough character-based approximation.',
+        'テキストのトークン数を見積もる。**API キーがあれば本文を Claude API の count_tokens に送る**(外部通信)。無ければ文字数ベースの概算。 / Estimate a text\'s token count. **With an API key the text is sent to the Claude count_tokens endpoint** (outbound call); otherwise a rough character-based approximation.',
       inputSchema: {
-        text: z.string().min(1).describe('対象テキスト / The text to measure.'),
+        text: z.string().min(1).describe('対象テキスト / The text to measure'),
         lang: langSchema,
       },
     },

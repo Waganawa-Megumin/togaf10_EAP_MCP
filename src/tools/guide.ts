@@ -3164,10 +3164,55 @@ const SIGNAL_DEFS: SignalDef[] = [
 const ABSENT_RE =
   /(?:読み取れ(?:ない|ません)|読み取れなかった|書かれて(?:いない|いません)|記載(?:が|は)?(?:ない|ありません|無い)|記述(?:が|は)?(?:ない|ありません)|不明|未定|わから(?:ない|ず)|判断できない|特定できない|公開されて(?:いない|いません)|not (?:stated|disclosed|available|specified|documented)|no (?:figure|number|amount|target)|cannot be (?:read|determined)|unknown|undisclosed)/i;
 
+/**
+ * 論点の短い呼び名 / A short noun for each signal.
+ *
+ * `SignalDef.label` は「金額が書かれている」のように**肯定の主張**になっている。
+ * 「拾わなかった話題」の一覧でそれを使うと、外したはずの主張がそのまま画面に残り、
+ * 読み手には拾ったのか外したのか区別が付かない。外した側はこの中立な呼び名で出す。
+ */
+const SIGNAL_TOPIC: Record<SignalId, Bilingual> = {
+  money: { ja: '金額', en: 'Money' },
+  deadline: { ja: '期日・時期', en: 'Dates' },
+  failure: { ja: '過去の失敗・停滞', en: 'Past failure' },
+  scale: { ja: '規模', en: 'Scale' },
+  people: { ja: '現場・利用者への影響', en: 'Impact on people' },
+  tech: { ja: '技術方式・移行方式', en: 'Technical approach' },
+  risk: { ja: 'リスク・規制・統制', en: 'Risk and control' },
+  decision: { ja: '判断・承認の依頼', en: 'Asking for a decision' },
+  unsettled: { ja: '未決事項', en: 'Open questions' },
+};
+
+/** 該当文をそのまま出すときの上限。切ったときは末尾に「…」を付けて明示する */
+const SENTENCE_MAX = 140;
+
 interface DetectedSignal {
   def: SignalDef;
-  /** topic から実際に拾った文字列 */
+  /** topic から実際に拾った文字列(正規表現が当たった部分) */
   evidence: string;
+  /**
+   * その語が出てきた文そのもの。
+   *
+   * 部分一致した 3 文字だけを根拠として見せると、読み手は
+   * 「投資額」に否定が付いていたのか肯定だったのかを確かめられない。
+   * 誤読を正せるようにするため、判定に使った単位(=文)をそのまま返す。
+   */
+  sentence: string;
+  /** `sentence` を表示のために切り詰めたか */
+  truncated: boolean;
+}
+
+/** 該当文を表のセルに引用する。lang=en に日本語の鉤括弧を混ぜない */
+function quoteSentence(sentence: string, lang: Lang): string {
+  return lang === 'en' ? `"${sentence}"` : `「${sentence}」`;
+}
+
+/** 該当文を表示用に整える(切ったことが分かる形にする) */
+function sourceSentence(text: string): { sentence: string; truncated: boolean } {
+  const one = flat(text);
+  return one.length <= SENTENCE_MAX
+    ? { sentence: one, truncated: false }
+    : { sentence: `${one.slice(0, SENTENCE_MAX)}…`, truncated: true };
 }
 
 /**
@@ -3203,7 +3248,7 @@ function detectSignals(topic: string): { signals: DetectedSignal[]; excluded: De
           pattern.lastIndex = 0;
           const m = pattern.exec(text);
           if (m && m[0].trim().length > 0) {
-            hit = { def, evidence: clip(m[0], 24) };
+            hit = { def, evidence: clip(m[0], 24), ...sourceSentence(text) };
             break;
           }
         }
@@ -4489,35 +4534,91 @@ export function registerGuideTools(server: McpServer): void {
         out.push(one(WEIGHT_READ[weight][a], l));
         out.push('');
 
+        // --- 拾わなかった論点(拾った側を見せる前に開示する) ---
+        // 順序に意味がある。「冒頭にこれを置け」と指示したあとで
+        // 「実はこれは外した」と書いても、読み手は既に前を信じて動いている。
+        if (excludedSignals.length > 0) {
+          out.push(
+            msg(
+              '## topic に出てはいるが、論点にしなかったもの',
+              '## In Your Topic But Deliberately Not Used',
+              l,
+            ),
+          );
+          out.push('');
+          out.push(
+            `| ${inline('外した話題', 'Topic left out', l)} | ${inline('外す根拠にした topic 中の文', 'The sentence in your topic that decided it', l)} |`,
+          );
+          out.push('| --- | --- |');
+          for (const s of excludedSignals) {
+            out.push(`| **${cell(one(SIGNAL_TOPIC[s.def.id], l))}** | ${cell(quoteSentence(s.sentence, l))} |`);
+          }
+          out.push('');
+          out.push(
+            msg(
+              'この文は「その情報は無い / その話は取り下げた」と読んだので、以下の組み立てには一切使っていない。**読み違えているなら、その話題は topic に肯定形で書き直してもう一度呼ぶこと。**書かれていない数字を先に話させるより、外して開示するほうが安全という判断で外している。',
+              'These sentences read as "that information is absent" or "that topic was withdrawn", so none of them feed the build below. **If that is a misread, restate the topic affirmatively and call again.** They are dropped on purpose: putting a number that is not there at the front of a pitch is worse than saying it was left out.',
+              l,
+            ),
+          );
+          out.push('');
+        }
+
         // --- topic から拾った論点 ---
         out.push(msg('## この topic の何が論点か', '## What Is Actually At Stake Here', l));
         out.push('');
         if (signals.length === 0) {
           out.push(
-            msg(
-              'topic からは論点を 1 つも拾えなかった(金額・期日・過去の経緯・規模・現場影響・技術方式・リスク・未決事項のどれも書かれていない)。この状態で組める説明は一般論にしかならない。次の 1 問だけ自分に問うて topic に書き足すと、以降の出力が具体的になる — **「これを説明した結果、相手に何をしてほしいのか」**。',
-              'No signals could be read from the topic — no money, date, history, scale, impact on people, technology, risk, or open question appears in it. Anything built from this can only be generic. Answer one question and add it to the topic, and everything below sharpens: **what do you want this audience to do as a result?**',
-              l,
-            ),
+            excludedSignals.length > 0
+              ? msg(
+                  '使える論点は 1 つも残らなかった。topic に出ていた話題は、上の表のとおり全て「その情報は無い / 取り下げた」と読んで外している。この状態で組める説明は一般論にしかならない。次の 1 問だけ自分に問うて topic に書き足すと、以降の出力が具体的になる — **「これを説明した結果、相手に何をしてほしいのか」**。',
+                  'Nothing usable is left. Every topic that appeared was read as absent or withdrawn, as listed in the table above. Anything built from this can only be generic. Answer one question and add it to the topic, and everything below sharpens: **what do you want this audience to do as a result?**',
+                  l,
+                )
+              : msg(
+                  'topic からは論点を 1 つも拾えなかった(金額・期日・過去の経緯・規模・現場影響・技術方式・リスク・未決事項のどれも書かれていない)。この状態で組める説明は一般論にしかならない。次の 1 問だけ自分に問うて topic に書き足すと、以降の出力が具体的になる — **「これを説明した結果、相手に何をしてほしいのか」**。',
+                  'No signals could be read from the topic — no money, date, history, scale, impact on people, technology, risk, or open question appears in it. Anything built from this can only be generic. Answer one question and add it to the topic, and everything below sharpens: **what do you want this audience to do as a result?**',
+                  l,
+                ),
           );
           out.push('');
         } else {
           out.push(
-            `| ${inline('拾った論点', 'Signal read', l)} | ${inline('topic 中の記述', 'From your topic', l)} | ${inline('この相手にとっての意味', 'What it means to them', l)} | ${inline('だからこう話す', 'So say it this way', l)} |`,
+            `| ${inline('拾った論点', 'Signal read', l)} | ${inline('反応した語', 'Matched', l)} | ${inline('その語が出てきた文(topic 原文)', 'The sentence it came from (your words)', l)} | ${inline('この相手にとっての意味', 'What it means to them', l)} | ${inline('だからこう話す', 'So say it this way', l)} |`,
           );
-          out.push('| --- | --- | --- | --- |');
+          out.push('| --- | --- | --- | --- | --- |');
           for (const s of signals) {
             const per = s.def.per[a];
             out.push(
-              `| **${cell(one(s.def.label, l))}** | ${cell(s.evidence)} | ${cell(one(per.meaning, l))} | ${cell(one(per.say, l))} |`,
+              `| **${cell(one(s.def.label, l))}** | ${cell(s.evidence)} | ${cell(quoteSentence(s.sentence, l))} | ${cell(one(per.meaning, l))} | ${cell(one(per.say, l))} |`,
+            );
+          }
+          out.push('');
+          // 部分一致の語だけを見せると、否定が付いていたかどうかを読み手が確かめられない。
+          // 判定に使った単位(=文)をそのまま並べ、誤読をその場で正せるようにする。
+          out.push(
+            msg(
+              '3 列目は判定に使った文そのもの。**反応した語ではなく、この文を読んで判断が正しいか確かめること**(「投資額」の 3 文字だけでは、それが「投資額は 12 億円」なのか「投資額は書かれていない」なのか区別が付かない)。',
+              'The third column is the exact sentence the judgement was made on. **Check the judgement against that sentence, not against the matched word** — "investment" alone cannot tell you whether it was "investment of $12M" or "the investment is not stated".',
+              l,
+            ),
+          );
+          if (signals.some((s) => s.truncated)) {
+            out.push('');
+            out.push(
+              msg(
+                `*長い文は ${SENTENCE_MAX} 文字で切って末尾に「…」を付けている。切られている文は topic の原文で確かめること。*`,
+                `*Long sentences are cut at ${SENTENCE_MAX} characters and marked with "…". Check any cut sentence against your original topic.*`,
+                l,
+              ),
             );
           }
           out.push('');
           const lead = signals[0];
           out.push(
             msg(
-              `冒頭に置くのは **${flat(one(lead.def.label, 'ja'))}**(「${flat(lead.evidence)}」)。${flat(one(lead.def.per[a].say, 'ja'))}`,
-              `Open on **${flat(one(lead.def.label, 'en')).toLowerCase()}** ("${flat(lead.evidence)}"). ${flat(one(lead.def.per[a].say, 'en'))}`,
+              `冒頭に置くのは **${flat(one(lead.def.label, 'ja'))}** — 根拠にした文は「${flat(lead.sentence)}」。${flat(one(lead.def.per[a].say, 'ja'))}`,
+              `Open on **${flat(one(lead.def.label, 'en')).toLowerCase()}** — the sentence behind that call is "${flat(lead.sentence)}". ${flat(one(lead.def.per[a].say, 'en'))}`,
               l,
             ),
           );

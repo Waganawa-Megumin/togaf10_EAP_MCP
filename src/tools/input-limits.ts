@@ -74,19 +74,25 @@ export const HINTS = {
  * `description` にも書くので、クライアントは送る前に気づける)。
  */
 export function freeTextSchema(description: string, limit: number = FREE_TEXT_LIMIT) {
-  return z
-    .string()
-    .max(
-      HARD_CHAR_CAP,
-      `入力が長すぎます(上限 ${limit.toLocaleString('en-US')} 文字)。分割して渡してください。 / Input too long (limit ${limit.toLocaleString('en-US')} characters). Split it into parts.`,
-    )
-    .describe(
-      `${description} — ${msg(
-        `最大 ${limit.toLocaleString('en-US')} 文字`,
-        `at most ${limit.toLocaleString('en-US')} characters`,
-        'both',
-      )}`,
-    );
+  // **zod に上限を持たせない。** 理由は 2 つある。
+  //
+  // 1. 以前は `.max(HARD_CHAR_CAP)` を張っていたため、JSON Schema には
+  //    `maxLength: 1000000` が出るのにハンドラは 20,000 で断る、という食い違いがあった。
+  //    ツール一覧を読んで呼び出しを組み立てる側(= Claude)はスキーマを信じるので、
+  //    嘘の上限を広告してはいけない。
+  // 2. かといって `.max(limit)` にすると zod が先に弾き、**引数名を挙げた
+  //    lang 準拠のエラー**(どのツールに渡し直せばいいかの案内つき)が出せなくなる。
+  //    zod は呼び出し時の lang を知らないため、英語で呼ばれても日本語が混ざる。
+  //
+  // よって上限は説明文で正直に述べ、実際の判定はハンドラの `checkFreeText` が行う。
+  // ハンドラは最初に長さを見るので、巨大な文字列が処理に流れることはない。
+  return z.string().describe(
+    `${description} — ${msg(
+      `最大 ${limit.toLocaleString('en-US')} 文字`,
+      `at most ${limit.toLocaleString('en-US')} characters`,
+      'both',
+    )}`,
+  );
 }
 
 /** 検査したい 1 つのフィールド */

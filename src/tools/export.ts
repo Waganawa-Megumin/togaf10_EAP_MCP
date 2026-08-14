@@ -709,22 +709,16 @@ export function registerExportTools(server: McpServer): void {
     {
       title: 'Export the dashboard as a file',
       description:
-        '現在のエンゲージメントのダッシュボードを Markdown または自己完結の静的 HTML(印刷用 CSS 付き・外部参照なし)としてファイルに書き出し、絶対パス・サイズ・開き方を返す。 / Write the current engagement dashboard to a file as Markdown or as a self-contained static HTML page (print CSS, no external references), and return the absolute path, size, and how to open it.',
+        '現在の案件のダッシュボードを Markdown か自己完結の静的 HTML(印刷用 CSS 付き・外部参照なし)としてファイルに書き出し、絶対パス・サイズ・開き方を返す。 / Write the current engagement dashboard to a file as Markdown or a self-contained static HTML page (print CSS, no external references); returns the absolute path, size, and how to open it.',
       inputSchema: {
-        format: z
-          .enum(['markdown', 'html'])
-          .default('html')
-          .describe('出力形式 / Output format'),
+        format: z.enum(['markdown', 'html']).default('html').describe('出力形式 / Output format'),
         outputPath: z
           .string()
           .optional()
           .describe(
-            '出力先パス。省略時は <データディレクトリ>/reports/<案件名>-<日時>.<拡張子>。データディレクトリか作業ディレクトリの配下のみ許可 / Output path. Defaults to <dataDir>/reports/<name>-<timestamp>.<ext>. Only paths under the data directory or the working directory are allowed.',
+            '出力先。既定は <データディレクトリ>/reports/ 配下。データディレクトリか作業ディレクトリ配下のみ / Output path; defaults under <dataDir>/reports/. Data dir or cwd only.',
           ),
-        overwrite: z
-          .boolean()
-          .default(false)
-          .describe('既存ファイルを上書きする / Overwrite an existing file'),
+        overwrite: z.boolean().default(false).describe('既存ファイルを上書きする / Overwrite an existing file'),
         lang: langSchema,
       },
     },
@@ -786,25 +780,18 @@ export function registerExportTools(server: McpServer): void {
       description:
         '知識ベースの成果物の Markdown 雛形(節構成 + 記入の手引き)をファイルに書き出す。案件名は現在のエンゲージメントから自動で入る。 / Write the Markdown skeleton of a knowledge-base deliverable (sections plus guidance) to a file. The engagement name is filled in from the current engagement.',
       inputSchema: {
-        deliverable: z
-          .string()
-          .describe('成果物 ID または名称。例: "architecture-vision" / Deliverable id or name'),
+        deliverable: z.string().describe('成果物 ID または名称。例 "architecture-vision" / Deliverable id or name'),
         engagementName: z
           .string()
           .optional()
-          .describe(
-            '見出しに入れる案件名。省略時は現在のエンゲージメント名 / Engagement name for the title; defaults to the current engagement',
-          ),
+          .describe('見出しの案件名。既定は現在の案件 / Engagement name for the title'),
         outputPath: z
           .string()
           .optional()
           .describe(
-            '出力先パス。省略時は <データディレクトリ>/deliverables/<成果物 ID>-<日付>.md。データディレクトリか作業ディレクトリの配下のみ許可 / Output path. Defaults to <dataDir>/deliverables/<id>-<date>.md. Only paths under the data directory or the working directory are allowed.',
+            '出力先。既定は <データディレクトリ>/deliverables/ 配下。データディレクトリか作業ディレクトリ配下のみ / Output path; defaults under <dataDir>/deliverables/. Data dir or cwd only.',
           ),
-        overwrite: z
-          .boolean()
-          .default(false)
-          .describe('既存ファイルを上書きする / Overwrite an existing file'),
+        overwrite: z.boolean().default(false).describe('既存ファイルを上書きする / Overwrite an existing file'),
         lang: langSchema,
       },
     },
@@ -853,15 +840,9 @@ export function registerExportTools(server: McpServer): void {
     {
       title: 'List exported files',
       description:
-        'これまでに書き出したレポート・成果物ファイルを、パス・サイズ・更新日時付きで新しい順に一覧する。 / List previously exported reports and deliverables with path, size, and last-modified time, newest first.',
+        'これまでに書き出したレポート・成果物をパス・サイズ・更新日時付きで新しい順に一覧。 / List previously exported reports and deliverables with path, size, and mtime, newest first.',
       inputSchema: {
-        limit: z
-          .number()
-          .int()
-          .min(1)
-          .max(200)
-          .default(50)
-          .describe('最大件数 / Maximum number of files to list'),
+        limit: z.number().int().min(1).max(200).default(50).describe('最大件数 / Maximum files to list'),
         lang: langSchema,
       },
     },

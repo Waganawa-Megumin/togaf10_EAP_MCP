@@ -36,11 +36,16 @@ import {
 } from '../knowledge/index.js';
 import {
   SITUATION_AXIS_LABELS,
+  SITUATION_CONDITIONS,
   factAdvice,
+  matchConditionCombos,
   rankByRelevance,
   readSituation,
   situationAdvice,
+  type DetectedCondition,
   type SituationAxis,
+  type SituationCondition,
+  type SituationConditionId,
   type SituationContext,
   type SituationFact,
   type SituationReading,
@@ -303,6 +308,21 @@ function engagementContext(engagement: Engagement | null): SituationContext | un
   };
 }
 
+/**
+ * 「誰が読んだか」の表記。
+ *
+ * サーバーの読み取りと呼び出し側の読み取りを混ぜたまま見せると、
+ * 当たっている読みがどちらのものか利用者に判別できない。必ず分けて出す。
+ */
+const READ_BY_CALLER: Bilingual = {
+  ja: 'あなたが渡した読み取り',
+  en: 'the readings you passed',
+};
+const READ_BY_SERVER: Bilingual = {
+  ja: 'このサーバーが本文から拾った',
+  en: 'picked up from the text by this server',
+};
+
 /** 事実 1 件を表の 1 行にする */
 function factRow(fact: SituationFact, l: Lang): string {
   const quoted = l === 'en' ? `"${cell(fact.evidence)}"` : `「${cell(fact.evidence)}」`;
@@ -312,7 +332,316 @@ function factRow(fact: SituationFact, l: Lang): string {
   const source = fact.sourceLabel
     ? ` (${cell(text(fact.sourceLabel, l === 'both' ? 'ja' : l))})`
     : '';
-  return `| ${cell(text(fact.topic, l === 'both' ? 'ja' : l))} | ${cell(text(fact.label, l))} | ${evidence}${source} |`;
+  // 数値は常にサーバー側の走査で拾ったもの(readings では数値を受け取らない)
+  return `| ${cell(text(fact.topic, l === 'both' ? 'ja' : l))} | ${cell(text(fact.label, l))} | ${evidence}${source} | ${cell(text(READ_BY_SERVER, l === 'both' ? 'ja' : l))} |`;
+}
+
+// ---------------------------------------------------------------------------
+// readings — 呼び出し側(会話全体を読んでいる Claude)が渡す状況の読み取り
+// ---------------------------------------------------------------------------
+//
+// このサーバーの状況読み取りは正規表現。相談文に書かれた定型表現しか見えない。
+// 一方、このツールを呼ぶ側は会話全体・添付文書・10 通前の発言まで読んでいる。
+// 「予算は限られている」と 5 通前に言われていた、という事実は situation に
+// 書き写されない限りサーバーには永遠に届かない。
+//
+// そこで軸ごとの読み取りを引数で受け取る。渡された軸は呼び出し側の読み取りを採り、
+// 渡されなかった軸だけをサーバーの正規表現が埋める(=控え)。
+// 出力では必ず「どちらが読んだか」を出す。混ぜたまま見せると、当たっているのが
+// どちらの読みなのかを利用者が検証できない。
+
+/** 読み取りの根拠に許す長さ。documents 側の source と揃える */
+const EVIDENCE_LIMIT = 300;
+
+/** 軸ごとに選べる値。値は `SITUATION_CONDITIONS` の ID そのもの */
+const READING_CHOICES = {
+  budget: ['budget-ample', 'budget-tight', 'budget-none'],
+  time: ['deadline-urgent', 'deadline-fixed', 'deadline-none'],
+  sponsorship: ['sponsor-committed', 'sponsor-absent'],
+  capacity: ['team-dedicated', 'team-solo'],
+  assets: ['assets-available', 'assets-none'],
+  authority: ['authority-none'],
+  climate: ['field-resistance'],
+  regulation: ['regulated'],
+} satisfies Record<SituationAxis, readonly SituationConditionId[]>;
+
+type ReadingAxis = keyof typeof READING_CHOICES;
+
+/** 1 軸ぶんのスキーマ。選べる値はその軸の条件 ID に限る */
+function axisReadingSchema(axis: ReadingAxis, ja: string, en: string) {
+  const choices = READING_CHOICES[axis] as unknown as readonly [
+    SituationConditionId,
+    ...SituationConditionId[],
+  ];
+  return z
+    .object({
+      condition: z.enum(choices).describe(`${ja} / ${en}`),
+      evidence: freeTextSchema(
+        'そう読み取った根拠。会話中の発言・文書の該当箇所・ページ番号など、利用者が誤読を正せる形で / Why you read it that way — the remark, the passage, the page number. Written so the user can correct you.',
+        EVIDENCE_LIMIT,
+      ).min(1),
+    })
+    .optional();
+}
+
+const readingsSchema = z
+  .object({
+    budget: axisReadingSchema('budget', '予算', 'Budget'),
+    time: axisReadingSchema('time', '期限', 'Deadline'),
+    sponsorship: axisReadingSchema('sponsorship', '経営の関与', 'Executive sponsorship'),
+    capacity: axisReadingSchema('capacity', '体制', 'Staffing'),
+    assets: axisReadingSchema('assets', '既存資料', 'Existing material'),
+    authority: axisReadingSchema('authority', '決定権', 'Decision rights'),
+    climate: axisReadingSchema('climate', '現場の空気', 'Ground-level climate'),
+    regulation: axisReadingSchema('regulation', '規制', 'Regulation'),
+  })
+  .optional();
+
+type ReadingsInput = z.infer<typeof readingsSchema>;
+
+/** 呼び出し側から渡された読み取り 1 件 */
+interface GivenReading {
+  axis: SituationAxis;
+  condition: SituationCondition;
+  evidence: string;
+}
+
+const CONDITION_BY_ID = new Map(SITUATION_CONDITIONS.map((c) => [c.id, c]));
+
+/**
+ * 根拠が空白だけの軸を探す。
+ *
+ * zod の `.min(1)` は空文字は弾くが `"   "` は通す。以前はここを黙って落としていたので、
+ * 「readings を渡したのに、その軸だけ何事もなかったように推定に戻る」ことが起きた。
+ * 渡したものが消えたと分かる形で返す(黙って捨てない)。
+ */
+function blankEvidenceAxes(input: ReadingsInput): ReadingAxis[] {
+  if (!input) return [];
+  return (Object.keys(READING_CHOICES) as ReadingAxis[]).filter((axis) => {
+    const given = input[axis];
+    return Boolean(given) && given!.evidence.trim().length === 0;
+  });
+}
+
+/** 引数を、根拠つきの条件に変える(知らない ID は黙って落とす — 例外にはしない) */
+function collectReadings(input: ReadingsInput): GivenReading[] {
+  if (!input) return [];
+  const out: GivenReading[] = [];
+  for (const axis of Object.keys(READING_CHOICES) as ReadingAxis[]) {
+    const given = input[axis];
+    if (!given) continue;
+    const condition = CONDITION_BY_ID.get(given.condition);
+    if (!condition || condition.axis !== axis) continue;
+    const evidence = given.evidence.trim();
+    if (evidence.length === 0) continue;
+    out.push({ axis, condition, evidence });
+  }
+  return out;
+}
+
+/**
+ * 呼び出し側の読み取りで 1 軸を上書きした記録。
+ *
+ * 上書きは「サーバーが本文から読んだ結論を捨てる」こと。捨てたものを出さずに
+ * 結果だけ見せると、本文に「予算は潤沢」と書いてあるのに助言が「予算ゼロ前提」に
+ * 変わった理由が読み手に分からない。捨てた中身を必ず持ち回る。
+ */
+interface ReadingOverride {
+  axis: SituationAxis;
+  given: GivenReading;
+  /** 同じ軸でサーバーが本文から読んでいた条件(この呼び出しでは使わなかったもの) */
+  dropped: DetectedCondition[];
+  /** 同じ軸でサーバーが本文から読んだ数値。捨てていない(本文に書いてある事実) */
+  facts: SituationFact[];
+}
+
+/** 捨てた条件が、呼び出し側の読み取りと別の結論だったか */
+function overrideDisagrees(o: ReadingOverride): boolean {
+  return o.dropped.some((d) => d.condition.id !== o.given.condition.id);
+}
+
+/**
+ * 呼び出し側の読み取りを、サーバーが読んだ結果に重ねる。
+ *
+ * 同じ軸はサーバー側を捨てて呼び出し側を採る(会話全体を見ているほうが正しい)。
+ * 渡されなかった軸はサーバーの読み取りをそのまま残す(=従来どおりの動作)。
+ * 組み合わせ判定と「読み取れなかった軸」は、重ねたあとの条件で作り直す。
+ *
+ * 捨てた条件は `overrides` に入れて返す。呼び出し側の読み取りが本文と食い違って
+ * いても、片方を黙って消さずに両方見せられるようにするため。
+ */
+function applyReadings(
+  reading: SituationReading,
+  given: GivenReading[],
+): { reading: SituationReading; overrides: ReadingOverride[] } {
+  if (given.length === 0) return { reading, overrides: [] };
+  const overridden = new Set<SituationAxis>(given.map((g) => g.axis));
+  const kept = reading.conditions.filter((d) => !overridden.has(d.condition.axis));
+  const overrides: ReadingOverride[] = given.map((g) => ({
+    axis: g.axis,
+    given: g,
+    dropped: reading.conditions.filter((d) => d.condition.axis === g.axis),
+    // 数値は「本文にそう書いてある」という事実なので、上書きしても表から消さない。
+    facts: reading.facts.filter((f) => f.axis === g.axis),
+  }));
+  const fromCaller: DetectedCondition[] = given.map((g) => ({
+    condition: g.condition,
+    cues: [g.evidence],
+  }));
+  const order = SITUATION_CONDITIONS.map((c) => c.id);
+  const all = [...fromCaller, ...kept].sort(
+    (a, b) => order.indexOf(a.condition.id) - order.indexOf(b.condition.id),
+  );
+  const covered = new Set<SituationAxis>(all.map((d) => d.condition.axis));
+  for (const f of reading.facts) if (f.axis) covered.add(f.axis);
+  const unknownAxes = (Object.keys(SITUATION_AXIS_LABELS) as SituationAxis[]).filter(
+    (a) => !covered.has(a),
+  );
+  return {
+    reading: {
+      ...reading,
+      conditions: all,
+      combos: matchConditionCombos(all),
+      unknownAxes,
+    },
+    overrides,
+  };
+}
+
+/**
+ * 上書きした軸を表にする。
+ *
+ * 「あなたの読み取り」と「サーバーが本文から読んだもの」を同じ行に並べる。
+ * 片方だけを見せると、どちらが間違っているのかを利用者が判定できない。
+ */
+function renderOverrides(overrides: ReadingOverride[], l: Lang): string[] {
+  if (overrides.length === 0) return [];
+  const out: string[] = [];
+  const conflicts = overrides.filter(overrideDisagrees);
+  const withFacts = overrides.filter((o) => o.facts.length > 0);
+  out.push(
+    msg(
+      '### `readings` で受け取った軸を、本文の読みと突き合わせた結果',
+      '### Each `readings` Axis, Checked Against What the Text Says',
+      l,
+    ),
+  );
+  out.push('');
+  out.push(
+    msg(
+      '| 観点 | あなたの読み取り | このサーバーが本文から読んだもの | 本文の表現 | 扱い |',
+      '| Aspect | Your reading | What this server read from the text | Wording in the text | What was done |',
+      l === 'both' ? 'ja' : l,
+    ),
+  );
+  out.push('| --- | --- | --- | --- | --- |');
+  for (const o of overrides) {
+    const axisName = cell(text(SITUATION_AXIS_LABELS[o.axis], l === 'both' ? 'ja' : l));
+    // 読み取りの中身は上の表と同じく両言語で出す(both で日本語だけになると英語話者が読めない)
+    const mine = cell(text(o.given.condition.label, l));
+    const serverRead: string[] = [];
+    const serverCues: string[] = [];
+    for (const d of o.dropped) {
+      serverRead.push(text(d.condition.label, l));
+      serverCues.push(d.cues.slice(0, 3).join(', '));
+    }
+    for (const f of o.facts) {
+      serverRead.push(text(f.label, l));
+      serverCues.push(f.evidence);
+    }
+    const none = msg('(本文からは読み取れず)', '(nothing read from the text)', l === 'both' ? 'ja' : l);
+    const disagrees = overrideDisagrees(o);
+    const treatment = disagrees
+      ? msg(
+          '**食い違い。** あなたの読み取りを採用し、本文側の読みは助言に使っていない',
+          '**Disagreement.** Your reading was used; the text-side read was not used in the guidance',
+          l === 'both' ? 'ja' : l,
+        )
+      : o.dropped.length > 0
+        ? msg(
+            '同じ結論。根拠だけあなたのものに差し替えた',
+            'Same conclusion — only the evidence was replaced with yours',
+            l === 'both' ? 'ja' : l,
+          )
+        : o.facts.length > 0
+          ? msg(
+              '本文の数値はそのまま残している(下の助言で区別して出す)',
+              'The number in the text is kept as-is (the guidance below keeps it separate)',
+              l === 'both' ? 'ja' : l,
+            )
+          : msg(
+              '本文からは読めなかった軸を、あなたの読み取りで埋めた',
+              'Filled an axis the text did not state',
+              l === 'both' ? 'ja' : l,
+            );
+    // 条件と数値が同じ表現を根拠にしていることがある(「2026-09-18」など)。重複は畳む
+    const cues = uniq(serverCues.map((c) => cell(c)).filter((c) => c.length > 0));
+    out.push(
+      `| ${axisName} | ${mine} | ${serverRead.length > 0 ? cell(uniq(serverRead).join(' ; ')) : cell(none)} | ${cues.length > 0 ? cues.join(' ; ') : '—'} | ${cell(treatment)} |`,
+    );
+  }
+  out.push('');
+  if (conflicts.length > 0) {
+    const names = (target: 'ja' | 'en'): string =>
+      conflicts.map((o) => SITUATION_AXIS_LABELS[o.axis][target]).join(' / ');
+    out.push(
+      msg(
+        `**${cell(names('ja'))} は、あなたの読み取りと本文が食い違っています。** どちらかが古いか、どちらかが誤読です。以下の助言はあなたの読み取りのほうを採っています。本文のほうが正しいなら、その軸を \`readings\` から外してもう一度呼んでください(本文側の読みで出し直します)。situation の文面自体が古いなら、そちらを直してください。`,
+        `**Your reading and the text disagree on: ${cell(names('en'))}.** One of them is out of date, or one of them is a misread. The guidance below follows your reading. If the text is the correct one, drop that axis from \`readings\` and call again — you will get the text-side read instead. If the \`situation\` text itself is stale, fix that instead.`,
+        l,
+      ),
+    );
+    out.push('');
+  }
+  if (withFacts.length > 0) {
+    out.push(
+      msg(
+        '*本文に書かれた数値(金額・日付・人数)は、上書きしても消していません。数値は「そう書いてある」という事実で、条件の読み取りとは別物だからです。上書きした軸の数値から出た助言は、下の推奨アクションで別枠にしています。*',
+        '*Numbers stated in the text (amounts, dates, headcounts) are never removed by an override: a number is a fact about what the text says, which is a different thing from a reading of the situation. Advice derived from a number on an overridden axis is kept in a separate block under Recommended Actions.*',
+        l,
+      ),
+    );
+    out.push('');
+  }
+  return out;
+}
+
+/**
+ * 上書きした軸の数値から出た助言を、別枠で出す。
+ *
+ * 本文の「2026-09-18(残り 35 日)」と、呼び出し側の「期限は決まっていない」を
+ * 同じ見出しの下に並べると、逆算の話と「まず自分で期限を置け」の話が同時に出て、
+ * どちらの前提で動けばよいのか読み手が決められなくなる。
+ */
+function renderConflictNumbers(
+  advice: Bilingual[],
+  overrides: ReadingOverride[],
+  l: Lang,
+): string[] {
+  if (advice.length === 0) return [];
+  const axes = overrides.filter((o) => o.facts.length > 0);
+  const jaNames = axes.map((o) => SITUATION_AXIS_LABELS[o.axis].ja).join(' / ');
+  const enNames = axes.map((o) => SITUATION_AXIS_LABELS[o.axis].en).join(' / ');
+  const out: string[] = [];
+  out.push(
+    msg(
+      `**本文の数値から言えること(ただし ${cell(jaNames)} はあなたの読み取りで上書き済み)**`,
+      `**What the numbers in the text imply — but ${cell(enNames)} was overridden by your reading**`,
+      l,
+    ),
+  );
+  out.push('');
+  out.push(bullets(advice, l));
+  out.push('');
+  out.push(
+    msg(
+      '*この数値は本文に書かれているので消していませんが、同じ軸の読み取りをあなたが上書きしているため、上の推奨と前提が食い違います。数値のほうが古いなら situation から外し、読み取りのほうが古いなら `readings` から外して、もう一度呼んでください。*',
+      '*These numbers are in the text, so they are not removed — but you overrode the reading on the same axis, so they rest on a different premise than the recommendations above. If the number is stale, drop it from `situation`; if your reading is stale, drop that axis from `readings`. Then call again.*',
+      l,
+    ),
+  );
+  out.push('');
+  return out;
 }
 
 export function registerConsultTool(server: McpServer): void {
@@ -334,10 +663,13 @@ export function registerConsultTool(server: McpServer): void {
           '業界(任意)。対応業界なら見立てと質問に反映する / Industry, if relevant. Supported industries change the read and the questions.',
           IDENTIFIER_LIMIT,
         ).optional(),
+        readings: readingsSchema.describe(
+          'あなた(呼び出し側)が既に読み取れている状況(任意)。このサーバーの読み取りは situation の文字列に対する正規表現でしかなく、会話の前のほうで言われたこと・添付文書に書いてあることは見えません。**会話から読み取れているなら、ここに渡すほうが正確です。** 渡した軸はそのまま採用し、渡さなかった軸だけをサーバーが本文から推定します(控え)。各軸に condition と evidence(そう読んだ根拠)を付けてください。出力にはどちらが読んだのかを明記し、あなたの読み取りが situation の文面と食い違う場合は両方を並べて示します(片方を黙って捨てません)。 /What you have already read from the conversation (optional). This server only regex-matches the `situation` string, so anything said earlier in the conversation or written in an attached document is invisible to it. **If you can read it from the conversation, passing it here is more accurate.** Axes you pass are used as-is; axes you omit fall back to the server\'s own guess from the text. Give each axis a condition and the evidence you read it from. The output states which side read what, and where your reading contradicts the `situation` text it shows both — neither side is dropped silently.',
+        ),
         lang: langSchema,
       },
     },
-    async ({ situation, currentPhase, industry, lang }) => {
+    async ({ situation, currentPhase, industry, readings, lang }) => {
       try {
         const l = lang as Lang;
         // 助言系にも上限を効かせる。ここを通す前に走査すると、入力の長さがそのまま
@@ -347,10 +679,31 @@ export function registerConsultTool(server: McpServer): void {
             { field: 'situation', value: situation, hint: HINTS.situation },
             { field: 'currentPhase', value: currentPhase, limit: IDENTIFIER_LIMIT, hint: HINTS.identifier },
             { field: 'industry', value: industry, limit: IDENTIFIER_LIMIT, hint: HINTS.identifier },
+            ...(Object.keys(READING_CHOICES) as ReadingAxis[]).map((axis) => ({
+              field: `readings.${axis}.evidence`,
+              value: readings?.[axis]?.evidence,
+              limit: EVIDENCE_LIMIT,
+              hint: HINTS.identifier,
+            })),
           ],
           l,
         );
         if (tooLong) return tooLong;
+        // 空白だけの根拠は zod を通ってしまう。黙って推定に戻さず、消えたことを伝える。
+        const blank = blankEvidenceAxes(readings);
+        if (blank.length > 0) {
+          const jaNames = blank.map((a) => SITUATION_AXIS_LABELS[a].ja).join(' / ');
+          const enNames = blank.map((a) => SITUATION_AXIS_LABELS[a].en).join(' / ');
+          const fields = blank.map((a) => `readings.${a}.evidence`).join(', ');
+          return errorResult(
+            msg(
+              `${fields} が空白だけです(対象の軸: ${cell(jaNames)})。そう読み取った根拠を書いてください。根拠の無い読み取りは、利用者が誤読を正せないので受け取りません。何も実行していません。`,
+              `${fields} contains only whitespace (axes: ${cell(enNames)}). State why you read it that way. A reading with no evidence cannot be corrected by the user, so it is not accepted. Nothing was run.`,
+              l,
+            ),
+          );
+        }
+        const givenReadings = collectReadings(readings);
 
         const engagement = loadEngagement();
         const phaseHint = currentPhase ?? engagement?.currentPhaseId;
@@ -358,9 +711,22 @@ export function registerConsultTool(server: McpServer): void {
 
         // --- 1. 状況を読む(打ち消し・条件・数値・案件に登録済みの内容) ---
         const engagementInput = engagementContext(engagement);
-        const reading = readSituation(situation, engagementInput);
+        // 呼び出し側(会話全体を読んでいる Claude)の読み取りを上書きで重ねる。
+        // readings を渡さない従来の呼び方では、この行は素通りする。
+        const { reading, overrides } = applyReadings(
+          readSituation(situation, engagementInput),
+          givenReadings,
+        );
+        const givenAxes = new Set<SituationAxis>(givenReadings.map((g) => g.axis));
         const facts = reading.facts;
         const numberAdvice = factAdvice(facts);
+        // 上書きした軸の数値から出た助言は別枠にする。
+        // 「残り 35 日」と「期限が決まっていない」を同じ見出しの下に並べると、
+        // どちらの前提で動けばよいのか読み手が決められない。
+        const overriddenFacts = overrides.flatMap((o) => o.facts);
+        const overriddenAdvice = new Set(factAdvice(overriddenFacts, numberAdvice.length).map((a) => a.ja));
+        const plainNumberAdvice = numberAdvice.filter((a) => !overriddenAdvice.has(a.ja));
+        const conflictNumberAdvice = numberAdvice.filter((a) => overriddenAdvice.has(a.ja));
         const searchText = reading.positiveText.length >= 3 ? reading.positiveText : situation;
         const matches = matchConsultRules(searchText, resolvedPhase?.id);
         const excluded: RuleMatch[] =
@@ -404,6 +770,18 @@ export function registerConsultTool(server: McpServer): void {
             ),
           );
         }
+        if (givenReadings.length > 0) {
+          // both のときに日英どちらも日本語の軸名になっていた。軸名は言語ごとに引く。
+          const axisNames = (target: 'ja' | 'en'): string =>
+            givenReadings.map((g) => SITUATION_AXIS_LABELS[g.axis][target]).join(' / ');
+          context.push(
+            msg(
+              `readings で受け取った読み取り: ${axisNames('ja')}(この軸は推定していません)`,
+              `Readings supplied by the caller: ${axisNames('en')} (not guessed here)`,
+              l,
+            ),
+          );
+        }
         if (engagement) {
           context.push(
             engagementInput
@@ -427,23 +805,25 @@ export function registerConsultTool(server: McpServer): void {
         if (reading.conditions.length > 0 || facts.length > 0) {
           out.push(
             msg(
-              '| 観点 | 読み取り | 根拠にした表現 |',
-              '| Aspect | Read | Wording it came from |',
+              '| 観点 | 読み取り | 根拠にした表現 | 誰が読んだか |',
+              '| Aspect | Read | Wording it came from | Read by |',
               l === 'both' ? 'ja' : l,
             ),
           );
-          out.push('| --- | --- | --- |');
+          out.push('| --- | --- | --- | --- |');
           // 数値から読んだものを先に出す。金額・日付・人数は形容詞より具体的に効く
           for (const f of facts) out.push(factRow(f, l));
           for (const d of reading.conditions) {
             const axis = SITUATION_AXIS_LABELS[d.condition.axis];
+            const byCaller = givenAxes.has(d.condition.axis);
             const source = d.sourceLabel
               ? ` (${cell(text(d.sourceLabel, l === 'both' ? 'ja' : l))})`
               : d.from === 'number'
                 ? msg(' (上の数値から)', ' (derived from the number above)', l === 'both' ? 'ja' : l)
                 : '';
+            const readBy = byCaller ? READ_BY_CALLER : READ_BY_SERVER;
             out.push(
-              `| ${cell(text(axis, l === 'both' ? 'ja' : l))} | ${cell(text(d.condition.label, l))} | ${cell(d.cues.slice(0, 3).join(', '))}${source} |`,
+              `| ${cell(text(axis, l === 'both' ? 'ja' : l))} | ${cell(text(d.condition.label, l))} | ${cell(d.cues.slice(0, 3).join(', '))}${source} | ${cell(text(readBy, l === 'both' ? 'ja' : l))} |`,
             );
           }
           out.push('');
@@ -460,6 +840,17 @@ export function registerConsultTool(server: McpServer): void {
               );
             }
             out.push('');
+          }
+          if (givenReadings.length > 0) {
+            out.push(
+              msg(
+                `**${READ_BY_CALLER.ja}**の行は \`readings\` で受け取った値をそのまま採用しています(その軸ではサーバー側の本文推定を使っていません)。残りの軸だけを、このサーバーが situation の文字列から推定しました。`,
+                `Rows marked **${READ_BY_CALLER.en}** are taken verbatim from \`readings\`; on those axes the server's own text matching was not used at all. Only the remaining axes were guessed from the \`situation\` string.`,
+                l,
+              ),
+            );
+            out.push('');
+            out.push(...renderOverrides(overrides, l));
           }
           out.push(
             msg(
@@ -485,8 +876,8 @@ export function registerConsultTool(server: McpServer): void {
           out.push('');
           out.push(
             msg(
-              `*こちらでは読み取れなかった観点: ${cell(jaNames)}。書かれているのにここに並んでいる場合は、こちらの読み落としです — 表現を変えて書き足していただければ助言が変わります。*`,
-              `*Aspects I could not pick up: ${cell(enNames)}. If you did state any of them, that is a miss on my side — restate it in other words and the guidance changes.*`,
+              `*こちらでは読み取れなかった観点: ${cell(jaNames)}。書かれているのにここに並んでいる場合は、こちらの読み落としです — 表現を変えて書き足すか、\`readings\` 引数に読み取り結果を直接渡していただければ、推定に頼らず確実に反映します。*`,
+              `*Aspects I could not pick up: ${cell(enNames)}. If you did state any of them, that is a miss on my side — restate it in other words, or pass the reading directly in the \`readings\` argument so nothing has to be guessed.*`,
               l,
             ),
           );
@@ -567,7 +958,7 @@ export function registerConsultTool(server: McpServer): void {
             out.push(bullets(base.steps, l));
             out.push('');
           }
-          if (numberAdvice.length > 0) {
+          if (plainNumberAdvice.length > 0) {
             out.push(
               msg(
                 '### 読み取った数値から言えること',
@@ -576,9 +967,10 @@ export function registerConsultTool(server: McpServer): void {
               ),
             );
             out.push('');
-            out.push(bullets(numberAdvice, l));
+            out.push(bullets(plainNumberAdvice, l));
             out.push('');
           }
+          out.push(...renderConflictNumbers(conflictNumberAdvice, overrides, l));
           if (advice.actions.length > 0) {
             out.push(
               msg(
@@ -741,7 +1133,7 @@ export function registerConsultTool(server: McpServer): void {
         // --- 8. 推奨アクション ---
         out.push(msg('## 推奨アクション', '## Recommended Actions', l));
         out.push('');
-        if (numberAdvice.length > 0) {
+        if (plainNumberAdvice.length > 0) {
           out.push(
             msg(
               '**書かれていた数値に対して(金額・日付・人数から直接言えること)**',
@@ -750,9 +1142,10 @@ export function registerConsultTool(server: McpServer): void {
             ),
           );
           out.push('');
-          out.push(bullets(numberAdvice, l));
+          out.push(bullets(plainNumberAdvice, l));
           out.push('');
         }
+        out.push(...renderConflictNumbers(conflictNumberAdvice, overrides, l));
         if (advice.actions.length > 0) {
           out.push(
             msg(
@@ -834,7 +1227,9 @@ export function registerConsultTool(server: McpServer): void {
         // --- 10. 次の一手 ---
         out.push(msg('## 次の一手', '## Next Step', l));
         out.push('');
-        const firstAction = numberAdvice[0] ?? advice.actions[0] ?? ruleActions[0];
+        // 上書きした軸の数値から出た助言は「今日やること 1 つ」に選ばない。
+        // 前提が食い違っているものを、確認の余地なく最優先で出さない。
+        const firstAction = plainNumberAdvice[0] ?? advice.actions[0] ?? ruleActions[0];
         if (firstAction) {
           out.push(
             msg(

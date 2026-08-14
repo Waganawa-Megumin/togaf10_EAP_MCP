@@ -188,16 +188,13 @@ export function registerFrameworkTools(server: McpServer): void {
     {
       title: 'List adjacent frameworks',
       description:
-        'TOGAF と併用する周辺フレームワーク(ArchiMate / BIZBOK / C4 / Wardley / BPMN / ITIL / NIST CSF など)を分類別に一覧する。 / List the frameworks worth pairing with TOGAF, grouped by category.',
+        'TOGAF と併用する周辺フレームワーク(ArchiMate / BIZBOK / C4 / Wardley / BPMN / ITIL / NIST CSF など)を分類別に一覧。 / List the frameworks worth pairing with TOGAF, grouped by category.',
       inputSchema: {
         category: z
           .enum(['modeling', 'method', 'business-architecture', 'delivery', 'operations', 'governance', 'domain'])
           .optional()
           .describe('分類で絞り込む / Filter by category'),
-        phase: z
-          .string()
-          .optional()
-          .describe('ADM フェーズ ID で絞り込む。例: "b", "d" / Filter by ADM phase id'),
+        phase: z.string().optional().describe('ADM フェーズ ID で絞り込む / Filter by ADM phase id'),
         lang: langSchema,
       },
     },
@@ -286,10 +283,7 @@ export function registerFrameworkTools(server: McpServer): void {
       description:
         'フレームワーク 1 件の概要・TOGAF より得意なこと・限界・ADM との組み合わせ方・入手性を返す。 / Return summary, strengths over TOGAF, honest limits, how to combine it with the ADM, and availability.',
       inputSchema: {
-        framework: z
-          .string()
-          .min(1)
-          .describe('フレームワーク ID または名称。例: "archimate", "BIZBOK", "c4-model"'),
+        framework: z.string().min(1).describe('フレームワーク ID または名称。例 "BIZBOK" / Framework id or name'),
         lang: langSchema,
       },
     },
@@ -361,16 +355,10 @@ export function registerFrameworkTools(server: McpServer): void {
     {
       title: 'Recommend frameworks for a need',
       description:
-        'やりたいことを自由記述で渡すと、TOGAF のどこを使い、どの周辺フレームワークを併用すべきかを優先順位付きで返す。該当が無ければ「TOGAF だけで足りる」と正直に返す。 / Given a free-text need, return which part of TOGAF to use and which adjacent frameworks to pair with it, ranked. Says so plainly when TOGAF alone is enough.',
+        'やりたいこと(自由記述)から、TOGAF のどこを使い、どの周辺フレームワークを併用すべきかを優先順位付きで返す。TOGAF だけで足りるときはそう返す。 / From a free-text need, return which part of TOGAF to use and which adjacent frameworks to pair with it, ranked. Says so when TOGAF alone is enough.',
       inputSchema: {
-        need: z
-          .string()
-          .min(1)
-          .describe('やりたいこと・困っていること。例: "業務プロセスを部門横断で可視化したい"'),
-        phase: z
-          .string()
-          .optional()
-          .describe('現在の ADM フェーズ ID(分かっていれば) / Current ADM phase id, if known'),
+        need: z.string().min(1).describe('やりたいこと・困っていること / The need, in free text'),
+        phase: z.string().optional().describe('現在の ADM フェーズ ID / Current ADM phase id, if known'),
         limit: z.number().int().min(1).max(10).default(4).describe('最大提示件数 / Maximum recommendations'),
         lang: langSchema,
       },
@@ -503,9 +491,9 @@ export function registerFrameworkTools(server: McpServer): void {
     {
       title: 'Compare a framework with TOGAF',
       description:
-        '指定したフレームワークと TOGAF の棲み分けを、目的・粒度・成果物・学習コスト・併用時の注意の 5 観点で表にして返す。 / Return a side-by-side table of TOGAF versus the named framework across purpose, granularity, artifacts, learning cost, and what to watch when combining them.',
+        '指定フレームワークと TOGAF の棲み分けを、目的・粒度・成果物・学習コスト・併用時の注意の 5 観点の表で返す。 / A side-by-side table of TOGAF versus the named framework: purpose, granularity, artifacts, learning cost, and what to watch when combining them.',
       inputSchema: {
-        framework: z.string().min(1).describe('フレームワーク ID または名称。例: "archimate", "safe"'),
+        framework: z.string().min(1).describe('フレームワーク ID または名称。例 "safe" / Framework id or name'),
         lang: langSchema,
       },
     },

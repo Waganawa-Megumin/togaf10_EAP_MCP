@@ -23,12 +23,18 @@ import {
 } from '../knowledge/index.js';
 import { loadEngagement } from '../engagement/store.js';
 import {
+  CONFIDENCE_DEFINITIONS,
+  hasProvenance,
+  isConfidence,
   summarizeProgress,
+  summarizeProvenance,
   type Assessment,
   type AssessmentFactor,
   type AssessmentKind,
   type DeliverableProgress,
   type Engagement,
+  type Provenance,
+  type ProvenanceConfidence,
 } from '../engagement/model.js';
 import { DELIVERABLE_STATUS_LABEL, L, PHASE_STATUS_LABEL, RISK_LEVEL_LABEL } from '../dashboard/labels.js';
 import { errorResult, langSchema, msg, textResult } from './common.js';
@@ -546,6 +552,17 @@ const HL = {
   achievement: { ja: '到達度', en: 'Progress to target' },
   verdict: { ja: '判定', en: 'Verdict' },
   assessedAt: { ja: '評価日', en: 'Assessed' },
+  provenance: { ja: '出典と確度', en: 'Sources and confidence' },
+  metric: { ja: '指標', en: 'Measure' },
+  share: { ja: '割合', en: 'Share' },
+  withSource: { ja: '出典あり', en: 'With a source' },
+  withoutSource: { ja: '出典なし', en: 'Without a source' },
+  confidenceUnset: { ja: '確度未設定', en: 'Confidence not set' },
+  provenanceBreakdown: { ja: '出典なしの内訳', en: 'Where the sources are missing' },
+  provenanceEmpty: {
+    ja: '出典を持ちうる項目(リスク・決定事項・アクション・ステークホルダー・成果物・移行状態・作業パッケージ・評価)が 1 件も登録されていないため、この観点は判断できない。出典 0 件は管理が良いことを意味しない。',
+    en: 'Nothing that can carry a source — risks, decisions, actions, stakeholders, deliverables, transitions, work packages, assessments — is recorded, so this dimension cannot be judged. Zero sources is not a sign of good practice here.',
+  },
 } satisfies Record<string, Bilingual>;
 
 /** ローカル日付を YYYY-MM-DD で返す */
@@ -879,6 +896,263 @@ function assessmentFindings(engagement: Engagement, base: Date): Finding[] {
       recommendation: {
         ja: '`tailor_adm` で作る成果物を絞り、まず 1 案件で回して型を作る。成熟度は手続きを増やすことではなく、回した回数で上がる。',
         en: 'Cut the deliverable list with `tailor_adm` and prove the shape on one engagement first. Maturity rises with repetitions, not with added procedure.',
+      },
+    });
+  }
+
+  return findings;
+}
+
+// ---------------------------------------------------------------------------
+// 出典と確度の点検 / Provenance checks
+//
+// 実際の案件では、p.31 の「101,800 名」と p.17 の「12 万人」の食い違いを人が手で
+// 照合して見つけていた。**照合は機械の仕事**であり、その前提が「どの項目がどの資料の
+// どこから来たか」を持っていること。ここでは持っているかどうかを数え、
+// 持っていない項目を名指しする(直させるのではなく、確認させる)。
+// ---------------------------------------------------------------------------
+
+/** 台帳の種別ラベル(`summarizeProvenance` の kind と 1 対 1) */
+const KIND_LABEL: Record<string, Bilingual> = {
+  risk: { ja: 'リスク', en: 'risk' },
+  decision: { ja: '決定事項', en: 'decision' },
+  action: { ja: 'アクション', en: 'action' },
+  stakeholder: { ja: 'ステークホルダー', en: 'stakeholder' },
+  deliverable: { ja: '成果物', en: 'deliverable' },
+  transition: { ja: '移行状態', en: 'transition state' },
+  workPackage: { ja: '作業パッケージ', en: 'work package' },
+  assessment: { ja: '評価', en: 'assessment' },
+};
+
+function kindLabel(kind: string, lang: 'ja' | 'en'): string {
+  return KIND_LABEL[kind]?.[lang] ?? kind;
+}
+
+/** 出典の観点から見た台帳の 1 項目 */
+interface ProvenanceItem {
+  kind: string;
+  /** 見出し(パイプ escape 済み) */
+  label: string;
+  source?: string;
+  confidence?: ProvenanceConfidence;
+  /**
+   * すでに意思決定に効いている項目か。
+   * 出典の無い項目でも、まだ誰も使っていないものと、承認済みの決定に化けているものでは
+   * 意味がまるで違う。ここが true の項目を優先して確認させる。
+   */
+  loadBearing: boolean;
+}
+
+/**
+ * 出典を持ちうる項目を 1 列に並べる。
+ * 種別と順序は `summarizeProvenance`(model.ts)と揃えてある。
+ */
+function provenanceItems(engagement: Engagement): ProvenanceItem[] {
+  const items: ProvenanceItem[] = [];
+  const push = (kind: string, entity: unknown, label: unknown, loadBearing: boolean): void => {
+    if (!entity || typeof entity !== 'object') return;
+    const p = entity as Provenance;
+    items.push({
+      kind,
+      label: cell(typeof label === 'string' && label.trim().length > 0 ? label : '(無題 / untitled)'),
+      source: typeof p.source === 'string' ? p.source : undefined,
+      confidence: isConfidence(p.confidence) ? p.confidence : undefined,
+      loadBearing,
+    });
+  };
+  for (const r of engagement.risks ?? []) {
+    push(
+      'risk',
+      r,
+      r?.title,
+      (r?.level === 'critical' || r?.level === 'high') && (r?.status === 'open' || r?.status === 'mitigating'),
+    );
+  }
+  for (const d of engagement.decisions ?? []) push('decision', d, d?.title, d?.status === 'accepted');
+  for (const a of engagement.actions ?? []) push('action', a, a?.title, a?.status !== 'done');
+  for (const s of engagement.stakeholders ?? []) push('stakeholder', s, s?.name, s?.influence === 'high');
+  for (const d of engagement.deliverables ?? []) {
+    push('deliverable', d, d?.name, d ? APPROVED_STATUSES.has(d.status) : false);
+  }
+  // 移行状態と評価は、存在する時点で計画や着手可否の判断に使われている
+  for (const t of engagement.transitions ?? []) push('transition', t, t?.name, true);
+  for (const w of engagement.workPackages ?? []) {
+    push('workPackage', w, w?.name, w?.status === 'planned' || w?.status === 'in_progress' || w?.status === 'delivered');
+  }
+  for (const a of engagement.assessments ?? []) push('assessment', a, a?.title, true);
+  return items;
+}
+
+/** 出典の付き具合を読み解いた結果 */
+interface ProvenanceView {
+  /** 出典を持ちうる項目の総数 */
+  total: number;
+  withSource: number;
+  withoutSource: number;
+  /** 出典が付いている割合 (%)。total が 0 のときは 0 */
+  coverage: number;
+  byConfidence: Record<ProvenanceConfidence | 'unset', number>;
+  items: ProvenanceItem[];
+  /** 出典が無い項目 */
+  missing: ProvenanceItem[];
+  /** 出典が無く、かつ既に意思決定に効いている項目 */
+  missingLoadBearing: ProvenanceItem[];
+  /** 種別ごとの「出典なし」件数(多い順) */
+  missingByKind: { kind: string; count: number }[];
+  /** 確度が inferred のまま残っている項目 */
+  inferred: ProvenanceItem[];
+  /** inferred のまま意思決定に効いている項目 */
+  inferredLoadBearing: ProvenanceItem[];
+  /** 確度が unknown(出所不明)の項目 */
+  unknownOrigin: ProvenanceItem[];
+  /** 出典はあるが確度が入っていない項目 */
+  sourcedWithoutConfidence: ProvenanceItem[];
+}
+
+/** 一覧を「種別: 見出し」の形の文字列にする */
+function itemNames(items: ProvenanceItem[], lang: 'ja' | 'en'): string[] {
+  return items.map((i) => `${kindLabel(i.kind, lang)}: ${i.label}`);
+}
+
+/** 「まずこの 1 件から」を指すための先頭 1 件(空なら —) */
+function firstName(items: ProvenanceItem[], lang: 'ja' | 'en'): string {
+  return items.length > 0 ? `${kindLabel(items[0].kind, lang)}: ${items[0].label}` : '—';
+}
+
+function viewProvenance(engagement: Engagement): ProvenanceView {
+  // 件数の権威は model.ts 側に置く(表・図・点検で数字がずれないようにするため)
+  const summary = summarizeProvenance(engagement);
+  const items = provenanceItems(engagement);
+  const missing = items.filter((i) => !hasProvenance(i));
+  const counts = new Map<string, number>();
+  for (const m of missing) counts.set(m.kind, (counts.get(m.kind) ?? 0) + 1);
+  const inferred = items.filter((i) => i.confidence === 'inferred');
+  return {
+    total: summary.total,
+    withSource: summary.withSource,
+    withoutSource: summary.withoutSource,
+    coverage: summary.total > 0 ? Math.round((summary.withSource / summary.total) * 100) : 0,
+    byConfidence: summary.byConfidence,
+    items,
+    missing,
+    missingLoadBearing: missing.filter((i) => i.loadBearing),
+    missingByKind: [...counts.entries()]
+      .map(([kind, count]) => ({ kind, count }))
+      .sort((a, b) => b.count - a.count || a.kind.localeCompare(b.kind)),
+    inferred,
+    inferredLoadBearing: inferred.filter((i) => i.loadBearing),
+    unknownOrigin: items.filter((i) => i.confidence === 'unknown'),
+    sourcedWithoutConfidence: items.filter((i) => hasProvenance(i) && i.confidence === undefined),
+  };
+}
+
+/** 「出典なし」の内訳を 1 行にする(リスク 3 件 / 決定事項 1 件) */
+function describeMissingByKind(view: ProvenanceView, lang: 'ja' | 'en'): string {
+  if (view.missingByKind.length === 0) return lang === 'ja' ? 'なし' : 'none';
+  return view.missingByKind
+    .map((m) => (lang === 'ja' ? `${kindLabel(m.kind, 'ja')} ${m.count} 件` : `${countEn(m.count, kindLabel(m.kind, 'en'), `${kindLabel(m.kind, 'en')}s`)}`))
+    .join(lang === 'ja' ? ' / ' : ', ');
+}
+
+/**
+ * 出典に関する指摘を集める。
+ *
+ * **データが無いことを根拠に褒めない。** 出典 0 件の案件は「出典管理が良好」ではなく、
+ * 出典が 1 件も無い案件として扱う。台帳自体が空(total = 0)の場合はここでは何も言わない
+ * ——空の台帳は既に他の指摘が扱っているので、二重に鳴らさない。
+ */
+function provenanceFindings(view: ProvenanceView): Finding[] {
+  const findings: Finding[] = [];
+  if (view.total === 0) return findings;
+
+  const loadNoteJa = '意思決定に効いている項目(対応中の高リスク・承認済みの決定・未完了のアクション・影響力の高い関係者・承認済み成果物・計画済み以上の作業パッケージ・移行状態・評価)';
+  const loadNoteEn = 'entries that already carry weight — live high risks, accepted decisions, open actions, high-influence stakeholders, approved deliverables, planned-or-later work packages, transition states, assessments';
+
+  if (view.withSource === 0) {
+    findings.push({
+      severity: 'warning',
+      code: 'no-provenance-recorded',
+      title: {
+        ja: '出典が記録されている項目が 1 件も無い',
+        en: 'Not one entry records where it came from',
+      },
+      detail: {
+        ja: `台帳の ${view.total} 件すべてに出典が無い(内訳: ${describeMissingByKind(view, 'ja')})。どれが資料に書いてあったことで、どれがこちら側の解釈なのかを、後から区別できない。「その数字はどこに書いてありますか」と聞かれて答えられない項目が ${view.total} 件あるという意味。`,
+        en: `All ${view.total} entries in the ledger carry no source (${describeMissingByKind(view, 'en')}). Nothing separates what a document actually said from what was read into it. Put plainly: ${view.total} entries have no answer to "where does that figure come from?".`,
+      },
+      recommendation: {
+        ja: `全部を埋めようとしないこと。${loadNoteJa}から順に、原文の該当箇所を開いて確認してください。確認できたものは source に「文書名 p.5」「2026-08-14 ヒアリング(情シス部長)」の形で、資料に書かれていない項目は confidence を inferred にして推測であることを残す(記録の入り口は種別ごとに違う: リスク・決定事項・アクション・関係者・成果物は \`update_engagement\`、移行状態は \`add_transition_state\`、作業パッケージは \`add_work_package\`、評価は \`assess_readiness\` / \`assess_maturity\`。いずれも既存の id を渡せば出典だけを後から足せる)。次の一手: いま最も重い 3 件を選び、その 3 件だけ原文と突き合わせる。`,
+        en: `Do not try to fill them all. Start with ${loadNoteEn}, and open the original passage to check each one. Record what you can point at in source as "doc p.5" or "2026-08-14 interview (Head of IT)"; where the document does not say it, set confidence to inferred so the guess stays visible (the entry point differs by kind: \`update_engagement\` for risks, decisions, actions, stakeholders and deliverables; \`add_transition_state\`; \`add_work_package\`; \`assess_readiness\` / \`assess_maturity\` — each accepts an existing id, so a source can be added afterwards). Next step: pick the three heaviest entries and check only those against the source.`,
+      },
+    });
+  } else if (view.withoutSource > 0) {
+    const heavy = view.missingLoadBearing.length;
+    findings.push({
+      severity: heavy > 0 || view.coverage < 50 ? 'warning' : 'info',
+      code: 'entries-without-provenance',
+      title: { ja: '出典の付いていない項目が残っている', en: 'Entries are still missing a source' },
+      detail: {
+        ja: `全 ${view.total} 件のうち出典があるのは ${view.withSource} 件(${view.coverage}%)、残り ${view.withoutSource} 件に出典が無い。内訳: ${describeMissingByKind(view, 'ja')}。${heavy > 0 ? `うち ${heavy} 件は既に意思決定に効いている: ${joinNames(itemNames(view.missingLoadBearing, 'ja'), 5, 'ja')}。` : `該当: ${joinNames(itemNames(view.missing, 'ja'), 5, 'ja')}。`}出典の無い項目は、後から真偽を確かめられないため、消す判断も残す判断もできなくなる。`,
+        en: `${view.withSource} of ${view.total} entries carry a source (${view.coverage}%); ${view.withoutSource} do not — ${describeMissingByKind(view, 'en')}. ${heavy > 0 ? `${heavy} of them already carry weight: ${joinNames(itemNames(view.missingLoadBearing, 'en'), 5, 'en')}.` : `Affected: ${joinNames(itemNames(view.missing, 'en'), 5, 'en')}.`} An entry with no source can never be verified later, so it can be neither safely kept nor safely deleted.`,
+      },
+      recommendation: {
+        ja: `${heavy > 0 ? '重い側から' : '上から'}順に、その記述が資料のどこから来たのかを確認してください。原文を指させるものは source に出典を、指させないものは confidence を inferred か unknown にして、推測であることを台帳に残す。次の一手: 「${firstName(heavy > 0 ? view.missingLoadBearing : view.missing, 'ja')}」の出典を 1 件だけ確認するところから始める。`,
+        en: `Work ${heavy > 0 ? 'from the heaviest entries' : 'from the top'} and confirm where each statement came from. Where the passage can be pointed at, record it in source; where it cannot, set confidence to inferred or unknown so the guess stays on the record. Next step: confirm the source for exactly one entry — "${firstName(heavy > 0 ? view.missingLoadBearing : view.missing, 'en')}".`,
+      },
+    });
+  }
+
+  if (view.inferred.length > 0) {
+    const heavy = view.inferredLoadBearing.length;
+    findings.push({
+      severity: heavy > 0 ? 'warning' : 'info',
+      code: 'inferred-entries-unconfirmed',
+      title: {
+        ja: '推測(inferred)のまま残っている項目がある',
+        en: 'Entries are still marked as inferred',
+      },
+      detail: {
+        ja: `確度が inferred の項目が ${view.inferred.length} 件${heavy > 0 ? `、うち ${heavy} 件は既に意思決定に効いている: ${joinNames(itemNames(view.inferredLoadBearing, 'ja'), 5, 'ja')}` : `: ${joinNames(itemNames(view.inferred, 'ja'), 5, 'ja')}`}。inferred は「資料には書かれていないが、書かれていることから導いた」という意味であり、相手に確認するまで事実ではない。推測のまま合意の根拠に使うと、後で覆るのは合意のほう。`,
+        en: `${countEn(view.inferred.length, 'entry is', 'entries are')} marked inferred${heavy > 0 ? `, and ${heavy} of them already carry weight: ${joinNames(itemNames(view.inferredLoadBearing, 'en'), 5, 'en')}` : `: ${joinNames(itemNames(view.inferred, 'en'), 5, 'en')}`}. Inferred means derived from what the source says, not stated by it — it is not a fact until the client confirms it. Build an agreement on one and it is the agreement that gets overturned later.`,
+      },
+      recommendation: {
+        ja: '各項目を「そう書いてある」「そうは書いていない」で仕分けしてください。書いてあるなら confidence を stated にして出典を指す。書いていないなら、確認する相手と場をその場で決める(決められないなら、確認できていないこと自体をリスクとして起票する)。次の一手: 次の打ち合わせの冒頭 5 分で、この一覧をそのまま読み上げて確認を取る。',
+        en: 'Sort each one into "the source says this" or "it does not". Where it does, move confidence to stated and point at the passage. Where it does not, decide there and then who confirms it and when — and if that cannot be decided, register the lack of confirmation itself as a risk. Next step: read this list out in the first five minutes of the next meeting and get each line confirmed.',
+      },
+    });
+  }
+
+  if (view.unknownOrigin.length > 0) {
+    findings.push({
+      severity: 'warning',
+      code: 'unknown-origin-entries',
+      title: { ja: '出所不明(unknown)のまま残っている項目がある', en: 'Entries are marked as untraceable' },
+      detail: {
+        ja: `確度が unknown の項目が ${view.unknownOrigin.length} 件: ${joinNames(itemNames(view.unknownOrigin, 'ja'), 5, 'ja')}。出所が辿れない項目は真偽を確かめられないので、残す判断も消す判断もできない。放置すると、誰も根拠を知らないまま前提として使われ続ける。`,
+        en: `${countEn(view.unknownOrigin.length, 'entry is', 'entries are')} marked unknown: ${joinNames(itemNames(view.unknownOrigin, 'en'), 5, 'en')}. An entry whose origin cannot be traced cannot be verified, so it can be neither kept nor dropped with confidence — and left alone it quietly becomes a premise nobody can justify.`,
+      },
+      recommendation: {
+        ja: 'この一覧を持って、書いた本人か案件の古株に「これはどこから来たか」を確認してください。出所が分かれば source に書いて confidence を上げ、分からなければその場で削除する。次の一手: 1 件ずつ「残す / 消す」を決め、決めた結果を決定事項として記録する。',
+        en: 'Take this list to whoever wrote it, or to the longest-serving person on the engagement, and ask where each line came from. If the origin turns up, record it in source and raise the confidence; if it does not, delete the entry there and then. Next step: rule keep-or-delete on each one and record the ruling as a decision.',
+      },
+    });
+  }
+
+  if (view.sourcedWithoutConfidence.length > 0) {
+    findings.push({
+      severity: 'info',
+      code: 'source-without-confidence',
+      title: {
+        ja: '出典はあるが「記載あり」か「推測」かが区別されていない',
+        en: 'Sources are recorded but not marked stated or inferred',
+      },
+      detail: {
+        ja: `出典が書かれている ${view.withSource} 件のうち ${view.sourcedWithoutConfidence.length} 件で確度が未設定: ${joinNames(itemNames(view.sourcedWithoutConfidence, 'ja'), 5, 'ja')}。出典が付いていても、その資料に「そう書いてある」のか「そこから導いた」のかが区別されていないと、読み手は結局その 1 件ずつを原文で確かめ直すことになる。`,
+        en: `${view.sourcedWithoutConfidence.length} of the ${view.withSource} entries that do carry a source leave confidence unset: ${joinNames(itemNames(view.sourcedWithoutConfidence, 'en'), 5, 'en')}. A source without that distinction still forces the reader back to the original passage for every single line, because nothing says whether the document stated it or someone derived it.`,
+      },
+      recommendation: {
+        ja: `各項目の confidence に ${CONFIDENCE_DEFINITIONS.stated.marker} stated(原文を指させる)/ ${CONFIDENCE_DEFINITIONS.inferred.marker} inferred(導いた)/ ${CONFIDENCE_DEFINITIONS.unknown.marker} unknown(辿れない)のいずれかを入れてください。次の一手: 会議で数字を出す予定の項目だけ先に stated かどうかを確認する。`,
+        en: `Set confidence on each entry to ${CONFIDENCE_DEFINITIONS.stated.marker} stated (the passage can be pointed at), ${CONFIDENCE_DEFINITIONS.inferred.marker} inferred (it was derived), or ${CONFIDENCE_DEFINITIONS.unknown.marker} unknown (it cannot be traced). Next step: check only the entries whose figures you plan to quote in a meeting.`,
       },
     });
   }
@@ -1324,6 +1598,10 @@ function collectFindings(engagement: Engagement, today: string, base: Date): Fin
     });
   }
 
+  // --- 出典と確度 ---
+  // 台帳の中身の良し悪しではなく、「その中身がどこから来たか辿れるか」を見る。
+  findings.push(...provenanceFindings(viewProvenance(engagement)));
+
   // --- 鮮度 ---
   const stale = daysSince(engagement.updatedAt, base);
   if (stale >= 30) {
@@ -1546,7 +1824,32 @@ function collectGoodPoints(engagement: Engagement, today: string, base: Date): G
     });
   }
 
-  // 観点は 8 個しかなく、1 観点 1 行なので全件出しても長くならない。
+  // --- 出典: 「出典が 0 件」を静けさと取り違えないこと ---
+  // 褒めるのは、出典を持ちうる項目が実在し、その**全件**に出典が付いている場合だけ。
+  // 一部だけ付いている状態は指摘側で扱うので、ここでは褒めない。
+  const prov = viewProvenance(engagement);
+  if (prov.total === 0) {
+    unknowns.push({
+      ja: `記録が辿れるかは判断できない — 出典を持ちうる項目(リスク・決定事項・アクション・ステークホルダー・成果物・移行状態・作業パッケージ・評価)が 0 件。出典 0 件は出典管理が良いという意味ではなく、台帳が空という意味。`,
+      en: 'Whether the record can be traced cannot be judged: there are no entries that could carry a source — no risks, decisions, actions, stakeholders, deliverables, transitions, work packages, or assessments. Zero sources here means an empty ledger, not clean sourcing.',
+    });
+  } else if (prov.withoutSource === 0) {
+    const stated = prov.byConfidence.stated;
+    const unset = prov.sourcedWithoutConfidence.length;
+    goods.push(
+      unset === 0
+        ? {
+            ja: `台帳の全 ${prov.total} 件に出典が記録され、確度も全件に入っている(${CONFIDENCE_DEFINITIONS.stated.marker} 記載あり ${stated} / ${CONFIDENCE_DEFINITIONS.inferred.marker} 推測 ${prov.byConfidence.inferred} / ${CONFIDENCE_DEFINITIONS.unknown.marker} 出所不明 ${prov.byConfidence.unknown})。どの記述がどこから来たかを 1 件ずつ辿れる。`,
+            en: `All ${prov.total} entries carry a source and a confidence (${CONFIDENCE_DEFINITIONS.stated.marker} stated ${stated}, ${CONFIDENCE_DEFINITIONS.inferred.marker} inferred ${prov.byConfidence.inferred}, ${CONFIDENCE_DEFINITIONS.unknown.marker} unknown ${prov.byConfidence.unknown}) — every statement can be traced back one by one.`,
+          }
+        : {
+            ja: `台帳の全 ${prov.total} 件に出典が記録されている(確度未設定が ${unset} 件残るため、「記載あり」と「推測」の区別まではまだ付いていない)。`,
+            en: `All ${prov.total} entries carry a source — though ${unset} still leave confidence unset, so stated and inferred are not yet told apart.`,
+          },
+    );
+  }
+
+  // 観点は 9 個しかなく、1 観点 1 行なので全件出しても長くならない。
   // 件数で切ると監査結果が静かに欠落する(良好な点は消え、判断保留は過少報告になる)。
   return { goods, unknowns };
 }
@@ -1603,6 +1906,54 @@ function renderAssessmentSnapshot(engagement: Engagement, base: Date, lang: Lang
   return out;
 }
 
+/**
+ * 出典の付き具合を 1 つの表にする。
+ *
+ * 指摘とは別に数字そのものを目に入れるための節。
+ * 出典を持ちうる項目が 0 件のときは、割合を出さずに「判断できない」と書く
+ * (0 / 0 を 100% と読ませないため)。
+ */
+function renderProvenanceSnapshot(view: ProvenanceView, lang: Lang): string[] {
+  const out: string[] = [];
+  out.push(`## ${text(HL.provenance, lang)}`);
+  out.push('');
+  if (view.total === 0) {
+    out.push(text(HL.provenanceEmpty, lang === 'both' ? 'ja' : lang));
+    if (lang === 'both') {
+      out.push('');
+      out.push(HL.provenanceEmpty.en);
+    }
+    out.push('');
+    return out;
+  }
+
+  const pct = (n: number): string => `${Math.round((n / view.total) * 100)}%`;
+  out.push(`| ${text(HL.metric, lang)} | ${text(HL.count, lang)} | ${text(HL.share, lang)} |`);
+  out.push('| --- | ---: | ---: |');
+  out.push(`| ${text(HL.withSource, lang)} | ${view.withSource} / ${view.total} | ${pct(view.withSource)} |`);
+  out.push(`| ${text(HL.withoutSource, lang)} | ${view.withoutSource} / ${view.total} | ${pct(view.withoutSource)} |`);
+  for (const level of ['stated', 'inferred', 'unknown'] as ProvenanceConfidence[]) {
+    const def = CONFIDENCE_DEFINITIONS[level];
+    const n = view.byConfidence[level];
+    // ja のときだけ英語の値を添える(en / both のラベルには既に値そのものが入っている)
+    const label = `${def.marker} ${text(def.label, lang)}${lang === 'ja' ? ` (${level})` : ''}`;
+    out.push(`| ${label} | ${n} | ${pct(n)} |`);
+  }
+  out.push(`| ${text(HL.confidenceUnset, lang)} | ${view.byConfidence.unset} | ${pct(view.byConfidence.unset)} |`);
+  out.push('');
+  if (view.withoutSource > 0) {
+    // `msg` は both で改行を挟むため、箇条書きが割れないようここでは自前で並べる
+    out.push(
+      `- **${text(HL.provenanceBreakdown, lang)}**: ${
+        lang === 'en' ? describeMissingByKind(view, 'en') : describeMissingByKind(view, 'ja')
+      }`,
+    );
+    if (lang === 'both') out.push(`  - ${describeMissingByKind(view, 'en')}`);
+    out.push('');
+  }
+  return out;
+}
+
 /** 健全性チェックの結果を Markdown に整形する */
 function renderHealth(
   engagement: Engagement,
@@ -1635,6 +1986,8 @@ function renderHealth(
   out.push('');
 
   out.push(...renderAssessmentSnapshot(engagement, base, lang));
+  const prov = viewProvenance(engagement);
+  out.push(...renderProvenanceSnapshot(prov, lang));
 
   if (findings.length === 0) {
     out.push(`## ${text(L.findings, lang)}`);
@@ -1747,6 +2100,34 @@ function renderHealth(
         lang,
       ),
     );
+  }
+  // 出典は「直せ」ではなく「確認せよ」の話なので、次の一手の中で 1 行だけ添える。
+  // 0 件の区分は挙げない(「推測 0 件」と書くと、確認すべき対象がぼやける)。
+  if (prov.total > 0) {
+    const provJa: string[] = [];
+    const provEn: string[] = [];
+    if (prov.withoutSource > 0) {
+      provJa.push(`出典なし ${prov.withoutSource} 件`);
+      provEn.push(`${prov.withoutSource} with no source`);
+    }
+    if (prov.inferred.length > 0) {
+      provJa.push(`推測 ${prov.inferred.length} 件`);
+      provEn.push(`${prov.inferred.length} marked inferred`);
+    }
+    if (prov.unknownOrigin.length > 0) {
+      provJa.push(`出所不明 ${prov.unknownOrigin.length} 件`);
+      provEn.push(`${prov.unknownOrigin.length} untraceable`);
+    }
+    if (provJa.length > 0) {
+      out.push('');
+      out.push(
+        msg(
+          `出典の確認は別枠で 1 回にまとめる。次の打ち合わせで、${provJa.join('・')}のうち、その場で数字や固有名詞を出す予定のものだけを読み上げて確認する(全件を一度に埋めようとしない)。`,
+          `Handle the sourcing in one dedicated pass. At the next meeting, out of the ${provEn.join(', ')}, read out and confirm only the entries whose figures or names you actually plan to quote. Do not try to close them all at once.`,
+          lang,
+        ),
+      );
+    }
   }
   out.push('');
   out.push(
@@ -1882,7 +2263,7 @@ export function registerReviewTools(server: McpServer): void {
     {
       title: 'Audit the current engagement for red flags',
       description:
-        '現在のエンゲージメントを監査し、実務上の危険信号(スポンサー不在、担当のいない高リスク、期限超過アクション、承認されていない要成果物、記録の欠落など)を重大度付きで指摘する。各指摘には具体的な推奨アクションを添え、良好な点も併せて返す。 / Audit the current engagement and report practical red flags — missing sponsor, unowned high risks, overdue actions, unapproved key deliverables, empty registers — with a severity, a concrete recommendation for each, and what is working well.',
+        '現在のエンゲージメントを監査し、実務上の危険信号(スポンサー不在、担当のいない高リスク、期限超過アクション、承認されていない要成果物、記録の欠落など)を重大度付きで指摘する。出典の付き具合(出典なしの件数と内訳、推測・出所不明のまま残っている項目)も数え、確認すべき項目を名指しする。各指摘には具体的な推奨アクションを添え、良好な点も併せて返す。 / Audit the current engagement and report practical red flags — missing sponsor, unowned high risks, overdue actions, unapproved key deliverables, empty registers — with a severity and a concrete recommendation for each. It also counts how much of the ledger can be traced to a source, names the entries left as inferred or untraceable, and reports what is working well.',
       inputSchema: {
         asOf: z
           .string()

@@ -3853,7 +3853,7 @@ export function registerArchiMateTools(server: McpServer): void {
     {
       title: 'List ArchiMate layers',
       description:
-        'ArchiMate の 7 層(戦略 / ビジネス / アプリケーション / テクノロジー / 物理 / 動機 / 実装移行)を、「何を表す層か」「対応する ADM フェーズ」「代表要素」「その層でいちばん多い失敗」付きで一覧する。 / List the seven ArchiMate layers with what each one represents, the ADM phases it belongs to, its representative elements, and the mistake most often made in it.',
+        'ArchiMate の 7 層を「何を表すか」「対応する ADM フェーズ」「代表要素」「その層で最も多い失敗」付きで一覧。 / List the seven ArchiMate layers with what each represents, its ADM phases, representative elements, and the mistake most often made in it.',
       inputSchema: { lang: langSchema },
     },
     async ({ lang }) => {
@@ -3963,11 +3963,9 @@ export function registerArchiMateTools(server: McpServer): void {
     {
       title: 'Map an ADM phase to ArchiMate',
       description:
-        'ADM フェーズを 1 つ指定すると、その段階で「何を、どの層の、どの要素で描くか」を図の名前つきで返す。成果物(Architecture Definition Document など)を ArchiMate でどう表現するかの指針、この段階では描かないもの、今週の一手も併せて返す。 / Given one ADM phase, return what to draw, in which layer, with which elements, under which view name — plus how to express the phase deliverables in ArchiMate, what not to draw yet, and what to do this week.',
+        'ADM フェーズ 1 つについて「何を、どの層の、どの要素で描くか」を図の名前つきで返す。成果物の ArchiMate 表現、この段階では描かないもの、今週の一手も返す。 / For one ADM phase: what to draw, in which layer, with which elements, under which view name — plus how to express its deliverables in ArchiMate, what not to draw yet, and this week\'s move.',
       inputSchema: {
-        phase: z
-          .string()
-          .describe('ADM フェーズ ID / コード。例: "a", "Phase B", "preliminary", "requirements-management"'),
+        phase: z.string().describe('ADM フェーズ ID / コード。例 "a" "preliminary" / Phase id or code'),
         lang: langSchema,
       },
     },
@@ -4068,15 +4066,11 @@ export function registerArchiMateTools(server: McpServer): void {
     {
       title: 'Validate an ArchiMate relationship',
       description:
-        '要素と要素の間に引いた関係が意味的に妥当かを判定する。判定は ok / questionable / likely-wrong の 3 値で、必ず理由と代替案を返す。仕様の許可表ではなく「その線を引くと図が何を主張することになるか」という意味論の観点で見る。 / Judge whether a relationship drawn between two elements makes sense. Returns one of ok, questionable, or likely-wrong, always with the reasoning and concrete alternatives — judged on what the link asserts, not on a permitted-relationship table.',
+        '要素間に引いた関係が意味的に妥当かを ok / questionable / likely-wrong で判定し、理由と代替案を返す。仕様の許可表ではなく「その線が何を主張することになるか」で見る。 / Judge whether a relationship between two elements makes sense: ok, questionable, or likely-wrong, always with reasoning and alternatives — judged on what the link asserts, not on a permitted-relationship table.',
       inputSchema: {
-        source: z
-          .string()
-          .describe('始点の要素名または ID。例: "Application Component", "業務プロセス", "node"'),
+        source: z.string().describe('始点の要素名または ID。例 "業務プロセス" / Source element name or id'),
         target: z.string().describe('終点の要素名または ID / Target element name or id'),
-        relationship: z
-          .string()
-          .describe('関係の名前。例: "realization", "serving", "assignment", "アクセス", "triggering"'),
+        relationship: z.string().describe('関係名。例 "realization" "アクセス" / Relationship name'),
         lang: langSchema,
       },
     },
@@ -4215,16 +4209,10 @@ export function registerArchiMateTools(server: McpServer): void {
     {
       title: 'Suggest an ArchiMate view for a concern',
       description:
-        'ステークホルダーの関心事を自由記述で渡すと、それに答えるには「どの層のどの要素をどう並べた図」を描けばよいかを提案する。並べ方の指示、使う関係、完成の判定基準、そして最も重要な「この図に描かないもの」を返す。 / Describe a stakeholder concern in free text and get the view that answers it: which layers, which elements, how to lay them out, which relationships to use, when it is done — and, most importantly, what must stay off the page.',
+        'ステークホルダーの関心事(自由記述)に答える図を提案する。どの層のどの要素をどう並べるか、使う関係、完成の判定基準、そして「この図に描かないもの」を返す。 / From a free-text stakeholder concern, propose the view that answers it: which layers and elements, how to lay them out, which relationships, when it is done — and what must stay off the page.',
       inputSchema: {
-        concern: z
-          .string()
-          .min(3)
-          .describe('関心事の自由記述(日本語/英語どちらでも可) / The stakeholder concern, in free text'),
-        audience: z
-          .string()
-          .optional()
-          .describe('誰に見せるか(任意)。例: "経営層", "業務部門", "開発チーム", "監査", "ベンダー"'),
+        concern: z.string().min(3).describe('関心事の自由記述(日英可) / The stakeholder concern, free text'),
+        audience: z.string().optional().describe('誰に見せるか。例 "経営層" / Audience for the view'),
         lang: langSchema,
       },
     },
@@ -4399,7 +4387,7 @@ export function registerArchiMateTools(server: McpServer): void {
     {
       title: 'ArchiMate vs TOGAF',
       description:
-        'TOGAF と ArchiMate の関係を整理して返す。手法と記述言語という役割の違い、どちらをいつ使うか、併用したときのよくある失敗、そして「最小限の組み合わせ」を返す。 / Lay out how TOGAF and ArchiMate relate: a method versus a description language, when to reach for which, how combining them usually goes wrong, and the minimum combination that works.',
+        'TOGAF と ArchiMate の棲み分け。手法と記述言語という役割の違い、どちらをいつ使うか、併用時のよくある失敗、最小限の組み合わせ。 / How TOGAF and ArchiMate relate: method versus description language, when to reach for which, how combining them goes wrong, and the minimum combination that works.',
       inputSchema: { lang: langSchema },
     },
     async ({ lang }) => {

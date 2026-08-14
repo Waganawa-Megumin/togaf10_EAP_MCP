@@ -18,6 +18,7 @@ import {
   PRIORITIES,
   WORK_PACKAGE_STATUSES,
   capCell,
+  checkProvenance,
   makeId,
   now,
   type Engagement,
@@ -31,9 +32,11 @@ import {
   ID_HINT,
   PHASE_HINT,
   QUARTER_HINT,
+  applyProvenance,
   checkText,
   checkTextList,
   limitErrorResult,
+  provenanceFields,
   runChecks,
   unexpectedErrorResult,
 } from './engagement.js';
@@ -566,26 +569,26 @@ export function registerRoadmapTools(server: McpServer): void {
     {
       title: 'Add or update a transition architecture',
       description:
-        '移行アーキテクチャ(中間状態)を追加または更新する。id を渡すと更新、省略すると新規追加。「そこで止めても事業が回るか(standalone)」と「暫定の仕組みの廃棄計画」を必ず確認し、危うい場合は警告を返す。 / Add or update a transition architecture (intermediate state). Pass an id to update, omit it to add. The tool insists on whether the business can run if delivery stops there, and on a disposal plan for any interim mechanism, warning when either is missing.',
+        '移行アーキテクチャ(中間状態)を案件に保存する。id を渡すと更新、省略で新規。「そこで止めても事業が回るか」と「暫定の仕組みの廃棄計画」が欠けていれば警告する。 / Save a transition architecture (intermediate state) to the engagement. Pass an id to update, omit it to add. Warns when standalone viability or an interim-mechanism disposal plan is missing.',
       inputSchema: {
-        id: z
-          .string()
-          .optional()
-          .describe('既存の移行状態 ID。省略すると新規追加 / Existing transition id; omit to add a new one'),
+        id: z.string().optional().describe('既存の移行状態 ID。省略で新規 / Existing transition id; omit to add'),
         name: z.string().min(1).describe('移行状態の名前 / Transition state name'),
-        order: z.number().int().optional().describe('ロードマップ上の並び順(省略時は末尾) / Order on the roadmap; appended when omitted'),
-        targetQuarter: z.string().optional().describe('到達目標時期。四半期表記 YYYY-Qn / Target timing as YYYY-Qn'),
+        order: z.number().int().optional().describe('並び順(省略時は末尾) / Order on the roadmap'),
+        targetQuarter: z.string().optional().describe('到達目標時期 YYYY-Qn / Target quarter'),
         capabilities: z
           .array(z.string())
           .optional()
-          .describe('その状態で実現している能力 / Capabilities available once this state is reached'),
+          .describe('その状態で実現している能力 / Capabilities available at this state'),
         standalone: z
           .boolean()
           .optional()
           .describe('ここで止めても事業が回るか / Whether the business can run if delivery stops here'),
-        interim: z.string().optional().describe('暫定的な仕組み(二重運用・暫定連携など) / Interim mechanism such as dual running'),
-        disposalPlan: z.string().optional().describe('暫定の仕組みの廃棄計画と期限 / Disposal plan and deadline for the interim mechanism'),
+        interim: z.string().optional().describe('暫定的な仕組み(二重運用など) / Interim mechanism such as dual running'),
+        disposalPlan: z.string().optional().describe('暫定の仕組みの廃棄計画と期限 / Disposal plan and deadline'),
         note: z.string().optional(),
+        // 出典と確度。移行状態も health の出典集計に数えられる側なので、
+        // 記録する手段がここに無いと、利用者は消せない指摘を出され続ける。
+        ...provenanceFields(),
         lang: langSchema,
       },
     },
@@ -601,6 +604,7 @@ export function registerRoadmapTools(server: McpServer): void {
           () => checkText('interim', input.interim, 'text', l),
           () => checkText('disposalPlan', input.disposalPlan, 'text', l),
           () => checkText('note', input.note, 'text', l),
+          () => checkProvenance('', { source: input.source, confidence: input.confidence }, l),
         ]);
         if (problem) return limitErrorResult(problem, l);
 
@@ -656,6 +660,7 @@ export function registerRoadmapTools(server: McpServer): void {
         if (input.interim !== undefined) transition.interim = input.interim;
         if (input.disposalPlan !== undefined) transition.disposalPlan = input.disposalPlan;
         if (input.note !== undefined) transition.note = input.note;
+        applyProvenance(transition, { source: input.source, confidence: input.confidence }, 'transition');
         transition.updatedAt = timestamp;
 
         // --- 中間状態としての妥当性 ---
@@ -743,7 +748,7 @@ export function registerRoadmapTools(server: McpServer): void {
     {
       title: 'Add or update a work package',
       description:
-        '作業パッケージ(ギャップを束ねた実行単位)を追加または更新する。id を渡すと更新、省略すると新規追加。依存先 ID が存在しない場合と循環依存はエラー。便益に責任者がいない場合は警告する。 / Add or update a work package. Pass an id to update, omit it to add. Unknown dependency ids and dependency cycles are rejected; a benefit without a named owner raises a warning.',
+        '作業パッケージ(ギャップを束ねた実行単位)を案件に保存する。id を渡すと更新、省略で新規。未知の依存先 ID と循環依存はエラー、責任者のいない便益は警告。 / Save a work package to the engagement. Pass an id to update, omit it to add. Unknown dependency ids and cycles are rejected; a benefit without an owner warns.',
       inputSchema: {
         id: z.string().optional().describe('既存の作業パッケージ ID / Existing work package id'),
         name: z.string().min(1).describe('作業パッケージ名 / Work package name'),
@@ -754,12 +759,15 @@ export function registerRoadmapTools(server: McpServer): void {
         owner: z.string().optional(),
         startQuarter: z.string().optional().describe('開始四半期 YYYY-Qn / Start quarter'),
         endQuarter: z.string().optional().describe('終了四半期 YYYY-Qn / End quarter'),
-        dependsOn: z.array(z.string()).optional().describe('先行する作業パッケージ ID / Ids of prerequisite work packages'),
+        dependsOn: z.array(z.string()).optional().describe('先行する作業パッケージ ID / Prerequisite work package ids'),
         businessValue: z.enum(PRIORITIES).optional().describe('事業価値 / Business value'),
         effort: z.enum(PRIORITIES).optional().describe('規模・工数 / Effort'),
         costEstimate: z.string().optional().describe('概算コスト / Rough cost estimate'),
         benefit: z.string().optional().describe('実現する便益 / Benefit delivered'),
-        benefitOwner: z.string().optional().describe('便益の刈り取り責任者 / Person accountable for realizing the benefit'),
+        benefitOwner: z.string().optional().describe('便益の刈り取り責任者 / Benefit owner'),
+        // 出典と確度。作業パッケージも health の出典集計に数えられる側なので、
+        // 記録する手段がここに無いと、利用者は消せない指摘を出され続ける。
+        ...provenanceFields(),
         lang: langSchema,
       },
     },
@@ -780,6 +788,7 @@ export function registerRoadmapTools(server: McpServer): void {
           () => checkText('costEstimate', input.costEstimate, 'title', l),
           () => checkText('benefit', input.benefit, 'text', l),
           () => checkText('benefitOwner', input.benefitOwner, 'title', l),
+          () => checkProvenance('', { source: input.source, confidence: input.confidence }, l),
         ]);
         if (problem) return limitErrorResult(problem, l);
 
@@ -880,6 +889,7 @@ export function registerRoadmapTools(server: McpServer): void {
             target.phaseId = phaseId;
           }
         }
+        applyProvenance(target, { source: input.source, confidence: input.confidence }, 'workPackage');
         target.updatedAt = timestamp;
 
         const candidate = created ? [...e.workPackages, target] : e.workPackages;
@@ -1046,7 +1056,7 @@ export function registerRoadmapTools(server: McpServer): void {
     {
       title: 'Get the roadmap',
       description:
-        '四半期を横軸にしたテキストのタイムライン、移行状態ごとの作業パッケージ、依存関係、各段階で実現する便益を Markdown で返す。四半期表記(YYYY-Qn)として解釈できない時期は末尾に寄せる。 / Return the roadmap as Markdown: a text timeline with quarters across the top, work packages grouped by transition state, the dependency list, and the benefits realized at each step. Timings that are not valid quarters (YYYY-Qn) sort last.',
+        '四半期を横軸にしたタイムライン、移行状態ごとの作業パッケージ、依存関係、各段階の便益を Markdown で返す。YYYY-Qn として読めない時期は末尾に寄せる。 / Return the roadmap as Markdown: quarter timeline, work packages by transition state, dependencies, benefits per step. Timings that are not YYYY-Qn sort last.',
       inputSchema: {
         includeCancelled: z
           .boolean()
@@ -1331,7 +1341,7 @@ export function registerRoadmapTools(server: McpServer): void {
     {
       title: 'Prioritize work packages',
       description:
-        '作業パッケージを事業価値 × 規模の 4 象限(まず着手すべき / 計画的に / 余力があれば / 見送り検討)に分類し、依存関係により先行が必要なものには注記を付けて返す。 / Sort work packages into four quadrants of business value against effort (start here, plan properly, if capacity allows, consider dropping), annotating anything that cannot start until a prerequisite is delivered.',
+        '作業パッケージを事業価値 × 規模の 4 象限に分類し、先行依存で着手できないものに注記を付けて返す。 / Sort work packages into four quadrants of business value against effort, flagging anything blocked by a prerequisite.',
       inputSchema: {
         includeDelivered: z
           .boolean()
@@ -1488,13 +1498,10 @@ export function registerRoadmapTools(server: McpServer): void {
     {
       title: 'Remove a roadmap item',
       description:
-        '移行状態または作業パッケージを削除する。confirm=false(既定)のときは削除せず、影響範囲だけを返す。移行状態を消すと、それを参照する作業パッケージの割当が外れる。 / Remove a transition state or a work package. With confirm=false (the default) nothing is deleted and only the impact is reported. Deleting a transition state detaches the work packages that referenced it.',
+        '移行状態または作業パッケージを保存データから削除する。confirm=false(既定)なら削除せず影響範囲だけ返す。移行状態を消すと参照していた作業パッケージの割当が外れる。 / Delete a transition state or work package from the saved engagement. With confirm=false (default) nothing is deleted and only the impact is reported. Deleting a transition state detaches its work packages.',
       inputSchema: {
-        id: z.string().min(1).describe('削除する移行状態または作業パッケージの ID / Id of the transition state or work package'),
-        confirm: z
-          .boolean()
-          .default(false)
-          .describe('true で実際に削除する / Pass true to actually delete'),
+        id: z.string().min(1).describe('移行状態または作業パッケージの ID / Transition state or work package id'),
+        confirm: z.boolean().default(false).describe('true で実際に削除する / Pass true to actually delete'),
         lang: langSchema,
       },
     },

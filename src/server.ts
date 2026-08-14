@@ -27,6 +27,7 @@ import { registerDocumentTools } from './tools/documents.js';
 import { registerLlmTools } from './tools/llm.js';
 import { registerSourceTools } from './tools/sources.js';
 import { registerIntakeTools } from './tools/intake.js';
+import { registerInspectTools } from './tools/inspect.js';
 
 export const SERVER_NAME = 'togaf10-eap-mcp';
 export const SERVER_VERSION = '0.2.0';
@@ -143,6 +144,8 @@ export function createServer(): McpServer {
   registerEngagementListTools(server);
   // 分析・レビュー・ロードマップ
   registerAnalysisTools(server);
+  // Claude が構造化した項目の機械的な突き合わせ(矛盾・表記ゆれ・数値/単位の食い違い)
+  registerInspectTools(server);
   registerReviewTools(server);
   registerRoadmapTools(server);
   // 図・ダッシュボード・書き出し

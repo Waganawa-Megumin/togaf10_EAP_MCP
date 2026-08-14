@@ -74,10 +74,10 @@ export function registerArchiMateReferenceTools(server: McpServer): void {
     {
       title: 'List ArchiMate elements',
       description:
-        'ArchiMate の要素を層ごとに一覧する。層を指定するとその層だけに絞り込む。要素の詳細は get_archimate_element。 / List ArchiMate elements grouped by layer; pass a layer to narrow it down. Use get_archimate_element for the detail.',
+        'ArchiMate の要素を層ごとに一覧。詳細は get_archimate_element。 / List ArchiMate elements grouped by layer; use get_archimate_element for the detail.',
       inputSchema: {
         layer: freeTextSchema(
-          '層 ID(motivation / strategy / business / application / technology / physical / implementation)',
+          '層 ID(motivation / strategy / business / application / technology / physical / implementation) / Layer id',
           IDENTIFIER_LIMIT,
         ).optional(),
         lang: langSchema,
@@ -160,12 +160,9 @@ export function registerArchiMateReferenceTools(server: McpServer): void {
     {
       title: 'Get an ArchiMate element',
       description:
-        'ArchiMate 要素 1 件の「何を表すか」「実務での使い方」「混同されやすい要素との違い」を返す。名称・キーワードでも引ける。 / Return what one ArchiMate element represents, how to use it in practice, and which elements it is commonly confused with. Accepts ids, names, and keywords.',
+        'ArchiMate 要素 1 件の「何を表すか」「実務での使い方」「混同されやすい要素との違い」。ID・名称・キーワードで引ける。 / What one ArchiMate element represents, how to use it in practice, and what it is confused with. Accepts ids, names, keywords.',
       inputSchema: {
-        element: freeTextSchema(
-          '要素 ID または名称(例: "business-process", "Application Component", "能力")',
-          IDENTIFIER_LIMIT,
-        ),
+        element: freeTextSchema('要素 ID または名称。例 "business-process" / Element id or name', IDENTIFIER_LIMIT),
         lang: langSchema,
       },
     },
@@ -228,7 +225,7 @@ export function registerArchiMateReferenceTools(server: McpServer): void {
     {
       title: 'List ArchiMate relationships',
       description:
-        'ArchiMate の関係の種類を「何を意味するか」「使いどころと間違えやすい点」付きで一覧する。個別の妥当性判定は validate_archimate_relationship。 / List the ArchiMate relationship types with what each one means and where people get them wrong. For a specific judgement use validate_archimate_relationship.',
+        'ArchiMate の関係の種類を意味と間違えやすい点つきで一覧。個別の妥当性判定は validate_archimate_relationship。 / List the ArchiMate relationship types with what each means and where people get them wrong. For a specific judgement use validate_archimate_relationship.',
       inputSchema: { lang: langSchema },
     },
     async ({ lang }) => {

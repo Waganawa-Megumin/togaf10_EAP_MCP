@@ -6,7 +6,7 @@
 
 import { randomBytes } from 'node:crypto';
 
-import { ADM_PHASES, type Bilingual, type Lang } from '../knowledge/index.js';
+import { ADM_PHASES, text, type Bilingual, type Lang } from '../knowledge/index.js';
 
 export const PHASE_STATUSES = ['not_started', 'in_progress', 'completed', 'skipped'] as const;
 export type PhaseStatus = (typeof PHASE_STATUSES)[number];
@@ -38,6 +38,345 @@ export type WorkPackageStatus = (typeof WORK_PACKAGE_STATUSES)[number];
 export const ASSESSMENT_KINDS = ['maturity', 'readiness'] as const;
 export type AssessmentKind = (typeof ASSESSMENT_KINDS)[number];
 
+// ---------------------------------------------------------------------------
+// 出典と確度 / Provenance and confidence
+// ---------------------------------------------------------------------------
+
+/**
+ * どこから来た事実かの確度 / How the entry came to be known.
+ *
+ * これが無いと、**文書から読み取った事実と、こちらの推測が台帳の中で同じ顔をする**。
+ * 実際の案件では、書き手が `role` の末尾に「(p.5)」と手で足して凌いでいた。
+ * 手で足した出典は表の整形で消えるし、機械で数えられない。だから型に入れる。
+ *
+ * 3 値の意味は**ここだけ**で定義する(表・図・点検が同じ定義を使うため)。
+ */
+export const CONFIDENCE_LEVELS = ['stated', 'inferred', 'unknown'] as const;
+export type ProvenanceConfidence = (typeof CONFIDENCE_LEVELS)[number];
+
+/** 確度 1 値の表示・意味 / Display and meaning of one confidence level. */
+export interface ConfidenceDefinition {
+  value: ProvenanceConfidence;
+  /** 表の見出しやセルに出す短いラベル */
+  label: Bilingual;
+  /** 「どういうときにこれを選ぶか」 */
+  meaning: Bilingual;
+  /** 一覧で目を引かせるための印(絵文字は使わない) */
+  marker: string;
+}
+
+export const CONFIDENCE_DEFINITIONS: Record<ProvenanceConfidence, ConfidenceDefinition> = {
+  stated: {
+    value: 'stated',
+    label: { ja: '記載あり', en: 'stated' },
+    meaning: {
+      ja: '出典にそう書いてある。原文を指させる(ページ・行・発言者)。数字や固有名詞はここに入っていなければ会議で使えない。',
+      en: 'The source says so and the passage can be pointed at (page, line, speaker). Figures and proper nouns are unusable in a meeting unless they sit here.',
+    },
+    marker: '●',
+  },
+  inferred: {
+    value: 'inferred',
+    label: { ja: '推測', en: 'inferred' },
+    meaning: {
+      ja: '書かれてはいないが、書かれていることから導いた。導いた根拠を source に書く。相手に確認するまで確定させない。',
+      en: 'Not written down, but derived from what is. Record what it was derived from in source, and treat it as unconfirmed until the client agrees.',
+    },
+    marker: '△',
+  },
+  unknown: {
+    value: 'unknown',
+    label: { ja: '出所不明', en: 'unknown' },
+    meaning: {
+      ja: '出所が辿れない。後から消す判断ができないので、放置せず出典を足すか消すかを決める。',
+      en: 'The origin cannot be traced. It can never be safely deleted later, so either attach a source or remove the entry.',
+    },
+    marker: '×',
+  },
+};
+
+/**
+ * 出典と確度 / Where an entry came from.
+ *
+ * 台帳に載る項目すべてが任意で持つ。**任意である**ことが重要で、
+ * この欄が無い保存済み JSON も今までどおり読める。
+ */
+export interface Provenance {
+  /** 出典の短い呼び名。例: `csr2026.pdf p.5` / `2026-08-14 ヒアリング(情シス部長)` */
+  source?: string;
+  /** 記載あり / 推測 / 出所不明 */
+  confidence?: ProvenanceConfidence;
+}
+
+/** `Provenance` を任意で持つ入力(ツールの引数など) */
+export interface ProvenanceInput {
+  source?: unknown;
+  confidence?: unknown;
+}
+
+/** 確度のラベルを引く(未指定・未知の値は「未設定」) */
+export function confidenceLabel(value: ProvenanceConfidence | undefined | null, lang: Lang = 'both'): string {
+  const found = value ? CONFIDENCE_DEFINITIONS[value] : undefined;
+  if (!found) return text({ ja: '未設定', en: 'not set' }, lang);
+  return text(found.label, lang);
+}
+
+/** 確度の意味(「どういうときにこれを選ぶか」)を引く */
+export function confidenceMeaning(value: ProvenanceConfidence | undefined | null, lang: Lang = 'both'): string {
+  const found = value ? CONFIDENCE_DEFINITIONS[value] : undefined;
+  if (!found) {
+    return text(
+      {
+        ja: '確度が未設定です。出典を辿れるなら stated、導いたものなら inferred、辿れないなら unknown を入れてください。',
+        en: 'Confidence is not set. Use stated when the source can be pointed at, inferred when it was derived, unknown when it cannot be traced.',
+      },
+      lang,
+    );
+  }
+  return text(found.meaning, lang);
+}
+
+/** 出典が付いているか(空白だけの source は付いていない扱い) */
+export function hasProvenance(entity: Provenance | null | undefined): boolean {
+  if (!entity || typeof entity !== 'object') return false;
+  return typeof entity.source === 'string' && entity.source.trim().length > 0;
+}
+
+/**
+ * 出典を表示用に短く整える。改行と連続空白を畳み、長ければ切る。
+ *
+ * **パイプはエスケープしない。** Markdown の表に入れるときは、
+ * 各ファイルが持つ `cell()` 相当を通すか、`provenanceCell` を使うこと。
+ */
+export function shortSource(value: string | undefined | null, max = 40): string {
+  if (typeof value !== 'string') return '';
+  const flat = value.replace(/\s+/g, ' ').trim();
+  if (flat.length === 0) return '';
+  const limit = Number.isFinite(max) && max > 1 ? Math.floor(max) : 40;
+  return flat.length > limit ? `${flat.slice(0, limit - 1)}…` : flat;
+}
+
+/**
+ * 表の 1 セルに入れる出典表示を作る(パイプはエスケープ済み。そのまま行に置ける)。
+ * 出典も確度も無ければ `—`。
+ */
+export function provenanceCell(entity: Provenance | null | undefined, lang: Lang = 'both', max = 40): string {
+  const src = shortSource(entity?.source, max).replace(/\|/g, '\\|');
+  const conf = entity?.confidence ? CONFIDENCE_DEFINITIONS[entity.confidence] : undefined;
+  if (!src && !conf) return '—';
+  if (!conf) return src;
+  const marked = `${conf.marker} ${text(conf.label, lang === 'both' ? 'ja' : lang)}`;
+  if (src) return `${marked} ${src}`;
+  // 確度だけが入っていて出典が空の行。とくに `● 記載あり` を単独で出すと
+  // 「原文を指させる = 確認済み」に読めてしまうが、指す先が無い。
+  // どこにも辿れないことを、印と同じセルの中で言い切る。
+  return `${marked}(${text({ ja: '出典なし', en: 'no source' }, lang === 'both' ? 'ja' : lang)})`;
+}
+
+/**
+ * 「出典が 1 文字も書かれていない」行の印。
+ *
+ * `CONFIDENCE_DEFINITIONS.unknown.marker`(`×` 出所不明 = 出典は書いたが辿れない)とは**別物**。
+ * 書き忘れと「書いたが辿れない」を同じ見た目にすると、埋めるべき行が見分けられなくなる。
+ */
+export const NO_SOURCE_MARK = '?';
+
+export const NO_SOURCE_LABEL: Bilingual = { ja: '出所未記入', en: 'no source' };
+
+/**
+ * 表の出典セル 1 つ。**空欄は返さない。**
+ *
+ * `provenanceCell` は何も無いときに `—` を返すが、表の中では
+ * 「未記入」と「そもそも欄が無い」の区別が付かず読み飛ばされる。
+ * 出典列を出す表はこちらを使い、直後に凡例を置くこと。
+ */
+export function sourceCell(entity: Provenance | null | undefined, lang: Lang = 'both', max = 40): string {
+  if (!hasProvenance(entity) && !entity?.confidence) {
+    return `${NO_SOURCE_MARK} ${text(NO_SOURCE_LABEL, lang)}`;
+  }
+  return provenanceCell(entity, lang, max);
+}
+
+/**
+ * 不正な値のエラー(長さではなく**値そのもの**が許されない場合)。
+ *
+ * `EngagementInputError` とは別の型にしてある。あちらは「長すぎる」専用で、
+ * 受け手が `limit` / `actual` を文面に埋める前提になっているため。
+ * `detail` は日英を分けて持たせてあり、呼び出し側が `lang` に合わせて出せる。
+ */
+export class EngagementValueError extends Error {
+  readonly field: string;
+  readonly allowed: readonly string[];
+  readonly detail: Bilingual;
+
+  constructor(field: string, allowed: readonly string[], detail: Bilingual) {
+    super(`${detail.ja} / ${detail.en}`);
+    this.name = 'EngagementValueError';
+    this.field = field;
+    this.allowed = allowed;
+    this.detail = detail;
+  }
+}
+
+/** `field` に接頭辞を付ける(`risks[0]` → `risks[0].source`) */
+function provenanceField(field: string, key: 'source' | 'confidence'): string {
+  return field && field.length > 0 ? `${field}.${key}` : key;
+}
+
+/**
+ * 出典・確度の入力を検査する。問題があれば投げる。
+ *
+ * - `source` が文字列でない → `EngagementValueError`
+ * - `source` が長すぎる → `EngagementInputError`(長さ系と同じ扱いにする)
+ * - `confidence` が 3 値以外 → `EngagementValueError`
+ *
+ * 空文字・空白だけの値は「未指定」として通す(正規化で落ちる)。
+ */
+export function assertProvenance(field: string, input: ProvenanceInput | null | undefined): void {
+  if (!input || typeof input !== 'object') return;
+  const { source, confidence } = input;
+  if (source !== undefined && source !== null) {
+    if (typeof source !== 'string') {
+      throw new EngagementValueError(provenanceField(field, 'source'), [], {
+        ja: `${provenanceField(field, 'source')} は文字列で渡してください(例: "csr2026.pdf p.5")。`,
+        en: `${provenanceField(field, 'source')} must be a string (for example "csr2026.pdf p.5").`,
+      });
+    }
+    assertTextLimit(provenanceField(field, 'source'), source, 'source');
+  }
+  if (confidence !== undefined && confidence !== null) {
+    if (typeof confidence !== 'string') {
+      throw new EngagementValueError(provenanceField(field, 'confidence'), CONFIDENCE_LEVELS, {
+        ja: `${provenanceField(field, 'confidence')} は ${CONFIDENCE_LEVELS.join(' / ')} のいずれかです。`,
+        en: `${provenanceField(field, 'confidence')} must be one of ${CONFIDENCE_LEVELS.join(' / ')}.`,
+      });
+    }
+    // 大文字小文字は問わない(`STATED` は通す。正規化で小文字に揃える)
+    const trimmed = confidence.trim();
+    if (trimmed.length > 0 && !isConfidence(trimmed.toLowerCase())) {
+      throw new EngagementValueError(provenanceField(field, 'confidence'), CONFIDENCE_LEVELS, {
+        ja:
+          `${provenanceField(field, 'confidence')} に "${shortSource(trimmed, 40)}" は使えません。` +
+          `${CONFIDENCE_LEVELS.join(' / ')} のいずれかを渡してください(記載あり / 推測 / 出所不明)。`,
+        en:
+          `${provenanceField(field, 'confidence')} does not accept "${shortSource(trimmed, 40)}". ` +
+          `Pass one of ${CONFIDENCE_LEVELS.join(' / ')} (stated in the source / inferred / origin unknown).`,
+      });
+    }
+  }
+}
+
+/** 3 値のどれかか */
+export function isConfidence(value: unknown): value is ProvenanceConfidence {
+  return typeof value === 'string' && (CONFIDENCE_LEVELS as readonly string[]).includes(value);
+}
+
+/**
+ * 出典・確度を検査し、保存できる形に整える(**厳格**。不正な値は投げる)。
+ *
+ * - 前後の空白を落とし、改行と連続空白を 1 つに畳む
+ * - 空文字・空白だけは `undefined`(欄ごと無かったことにする)
+ * - `confidence` は小文字化して 3 値に合わせる
+ */
+export function normalizeProvenance(input: ProvenanceInput | null | undefined, field = ''): Provenance {
+  if (!input || typeof input !== 'object') return {};
+  assertProvenance(field, input);
+  const out: Provenance = {};
+  if (typeof input.source === 'string') {
+    const flat = input.source.replace(/\s+/g, ' ').trim();
+    if (flat.length > 0) out.source = flat;
+  }
+  if (typeof input.confidence === 'string') {
+    const value = input.confidence.trim().toLowerCase();
+    if (isConfidence(value)) out.confidence = value;
+  }
+  return out;
+}
+
+/**
+ * 保存済みデータの出典・確度を読める形に直す(**寛容**。決して投げない)。
+ *
+ * 読み込み経路で使う。手で編集された JSON に `confidence: "high"` のような
+ * 値が入っていても、そこで読み込み全体を落とすわけにはいかないため、
+ * 読めない値は黙って落とす(欄が無いのと同じ状態にする)。
+ */
+export function sanitizeProvenance(input: ProvenanceInput | null | undefined): Provenance {
+  if (!input || typeof input !== 'object') return {};
+  const out: Provenance = {};
+  if (typeof input.source === 'string') {
+    const flat = input.source.replace(/\s+/g, ' ').trim();
+    if (flat.length > 0) out.source = flat.slice(0, TEXT_LIMITS.source.limit);
+  }
+  if (typeof input.confidence === 'string') {
+    const value = input.confidence.trim().toLowerCase();
+    if (isConfidence(value)) out.confidence = value;
+  }
+  return out;
+}
+
+/**
+ * 既存の項目に出典・確度の部分更新を当てる。
+ *
+ * - 引数を渡さなければ(`undefined`)今の値を保つ
+ * - 空文字・空白だけを渡すと**消す**(間違って付けた出典を外せるようにする)
+ * - 不正な値は投げる(`normalizeProvenance` と同じ)
+ */
+export function mergeProvenance(
+  current: Provenance | null | undefined,
+  patch: ProvenanceInput | null | undefined,
+  field = '',
+): Provenance {
+  const base: Provenance = {};
+  if (current && typeof current === 'object') {
+    if (typeof current.source === 'string' && current.source.trim().length > 0) base.source = current.source;
+    if (isConfidence(current.confidence)) base.confidence = current.confidence;
+  }
+  if (!patch || typeof patch !== 'object') return base;
+  assertProvenance(field, patch);
+  const next: Provenance = { ...base };
+  if (patch.source !== undefined && patch.source !== null) {
+    const flat = typeof patch.source === 'string' ? patch.source.replace(/\s+/g, ' ').trim() : '';
+    if (flat.length > 0) next.source = flat;
+    else delete next.source;
+  }
+  if (patch.confidence !== undefined && patch.confidence !== null) {
+    const value = typeof patch.confidence === 'string' ? patch.confidence.trim().toLowerCase() : '';
+    if (isConfidence(value)) next.confidence = value;
+    else delete next.confidence;
+  }
+  return next;
+}
+
+/**
+ * 出典・確度の入力を検査して、利用者に見せる文面を返す(問題が無ければ null)。
+ *
+ * ツール側は例外を投げてはならない決まりなので、**投げない入口**を用意しておく。
+ * `checkText` と同じ使い勝手で `runChecks` に並べられる。
+ */
+export function checkProvenance(
+  field: string,
+  input: ProvenanceInput | null | undefined,
+  lang: Lang = 'both',
+): string | null {
+  try {
+    assertProvenance(field, input);
+    return null;
+  } catch (error) {
+    if (error instanceof EngagementValueError) return text(error.detail, lang);
+    if (error instanceof EngagementInputError) {
+      const { hint } = TEXT_LIMITS.source;
+      return text(
+        {
+          ja: `入力が長すぎます: ${error.field} は ${error.limit} 文字までです(受け取った長さ: ${error.actual} 文字)。${hint.ja}`,
+          en: `Input too long: ${error.field} accepts at most ${error.limit} characters (received ${error.actual}). ${hint.en}`,
+        },
+        lang,
+      );
+    }
+    throw error;
+  }
+}
+
 export interface PhaseProgress {
   phaseId: string;
   status: PhaseStatus;
@@ -45,7 +384,7 @@ export interface PhaseProgress {
   updatedAt: string;
 }
 
-export interface Risk {
+export interface Risk extends Provenance {
   id: string;
   title: string;
   description?: string;
@@ -61,7 +400,7 @@ export interface Risk {
   updatedAt: string;
 }
 
-export interface Decision {
+export interface Decision extends Provenance {
   id: string;
   title: string;
   /** 背景・検討した選択肢 */
@@ -77,7 +416,7 @@ export interface Decision {
   updatedAt: string;
 }
 
-export interface Action {
+export interface Action extends Provenance {
   id: string;
   title: string;
   owner?: string;
@@ -91,7 +430,7 @@ export interface Action {
   updatedAt: string;
 }
 
-export interface Stakeholder {
+export interface Stakeholder extends Provenance {
   id: string;
   name: string;
   role?: string;
@@ -106,7 +445,7 @@ export interface Stakeholder {
   updatedAt: string;
 }
 
-export interface DeliverableProgress {
+export interface DeliverableProgress extends Provenance {
   id: string;
   /** 知識ベースの成果物 ID(任意) */
   deliverableId?: string;
@@ -125,7 +464,7 @@ export interface DeliverableProgress {
  * 移行アーキテクチャ(中間状態)。
  * `standalone` は「ここで止めても事業が回るか」— フェーズ E の必須確認事項。
  */
-export interface TransitionState {
+export interface TransitionState extends Provenance {
   id: string;
   name: string;
   /** ロードマップ上の並び順 */
@@ -146,7 +485,7 @@ export interface TransitionState {
 }
 
 /** 作業パッケージ(ギャップを束ねた実行単位) */
-export interface WorkPackage {
+export interface WorkPackage extends Provenance {
   id: string;
   name: string;
   description?: string;
@@ -172,7 +511,7 @@ export interface WorkPackage {
 }
 
 /** 評価因子(現在水準 / 目標水準) */
-export interface AssessmentFactor {
+export interface AssessmentFactor extends Provenance {
   name: string;
   current: number;
   target: number;
@@ -180,7 +519,7 @@ export interface AssessmentFactor {
 }
 
 /** 成熟度評価 / 変革準備度評価の記録 */
-export interface Assessment {
+export interface Assessment extends Provenance {
   id: string;
   kind: AssessmentKind;
   title: string;
@@ -514,6 +853,17 @@ export const TEXT_LIMITS = {
       en: 'Record concerns as short separate entries and put the long background into approach.',
     },
   },
+  /**
+   * 出典の呼び名。表の 1 セルに入る長さに抑える。
+   * 上限は `title` と揃えてある(取り込み側の `source` 引数と同じ長さで通るように)。
+   */
+  source: {
+    limit: 300,
+    hint: {
+      ja: 'source は出典の短い呼び名です(例: "報告書.pdf p.12-18"、"2026-08-14 ヒアリング(情シス部長)")。引用や本文は note / description に書いてください。',
+      en: 'source is a short label for the origin (for example "report.pdf p.12-18" or "2026-08-14 interview (Head of IT)"). Put quotations and body text into note or description.',
+    },
+  },
   /** 自由記述(説明・背景・対策・メモなど) */
   text: {
     limit: 4000,
@@ -760,6 +1110,100 @@ export function summarizeProgress(engagement: Engagement): ProgressSummary {
   };
 }
 
+/**
+ * 保存済みの一覧から、出典・確度だけを読める形に直す。
+ *
+ * 他の欄には一切触らない(知らない欄も落とさない)。`source` / `confidence` の
+ * どちらも持たない項目はそのまま返すので、**この欄が無い既存データは
+ * オブジェクトの同一性まで含めて今までどおり**。
+ */
+function sanitizeProvenanceList<T>(value: unknown): T[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return item as T;
+    const record = item as Record<string, unknown>;
+    if (!('source' in record) && !('confidence' in record)) return item as T;
+    const cleaned = sanitizeProvenance(record as ProvenanceInput);
+    const next: Record<string, unknown> = { ...record };
+    if (cleaned.source === undefined) delete next.source;
+    else next.source = cleaned.source;
+    if (cleaned.confidence === undefined) delete next.confidence;
+    else next.confidence = cleaned.confidence;
+    return next as T;
+  });
+}
+
+/** 評価は因子側にも出典が付くので、1 段深く見る */
+function sanitizeAssessments(value: unknown): Assessment[] {
+  return sanitizeProvenanceList<Assessment>(value).map((assessment) => {
+    if (!assessment || typeof assessment !== 'object') return assessment;
+    if (!Array.isArray(assessment.factors)) return assessment;
+    return { ...assessment, factors: sanitizeProvenanceList<AssessmentFactor>(assessment.factors) };
+  });
+}
+
+/** 出典の付き具合の集計 / How much of the ledger can be traced back to a source. */
+export interface ProvenanceSummary {
+  /** 出典を持ちうる項目の総数 */
+  total: number;
+  /** 出典が書かれている件数 */
+  withSource: number;
+  /** 出典が無い件数 */
+  withoutSource: number;
+  /** 確度ごとの件数(`unset` は確度未設定) */
+  byConfidence: Record<ProvenanceConfidence | 'unset', number>;
+  /** 出典が無い項目(種別・ID・見出し)。表示側で `capRows` に通すこと */
+  missing: { kind: string; id: string; label: string }[];
+}
+
+/** 項目の見出しに使える文字列を拾う(title → name → id の順) */
+function entityLabel(item: { title?: unknown; name?: unknown; id?: unknown }): string {
+  if (typeof item.title === 'string' && item.title.trim().length > 0) return item.title;
+  if (typeof item.name === 'string' && item.name.trim().length > 0) return item.name;
+  return typeof item.id === 'string' ? item.id : '';
+}
+
+/**
+ * 案件全体で「出典が辿れる項目がどれだけあるか」を数える。
+ *
+ * 人が目で照合していたことを機械にやらせるための土台。
+ * 出典が無い項目は後から真偽を確かめられないので、件数ではなく**一覧で**返す。
+ */
+export function summarizeProvenance(engagement: Engagement): ProvenanceSummary {
+  const byConfidence: Record<ProvenanceConfidence | 'unset', number> = {
+    stated: 0,
+    inferred: 0,
+    unknown: 0,
+    unset: 0,
+  };
+  const missing: { kind: string; id: string; label: string }[] = [];
+  let total = 0;
+  let withSource = 0;
+  const groups: [string, unknown[]][] = [
+    ['risk', engagement.risks],
+    ['decision', engagement.decisions],
+    ['action', engagement.actions],
+    ['stakeholder', engagement.stakeholders],
+    ['deliverable', engagement.deliverables],
+    ['transition', engagement.transitions],
+    ['workPackage', engagement.workPackages],
+    ['assessment', engagement.assessments],
+  ];
+  for (const [kind, list] of groups) {
+    if (!Array.isArray(list)) continue;
+    for (const raw of list) {
+      if (!raw || typeof raw !== 'object') continue;
+      const item = raw as Provenance & { id?: unknown; title?: unknown; name?: unknown };
+      total += 1;
+      if (hasProvenance(item)) withSource += 1;
+      else missing.push({ kind, id: typeof item.id === 'string' ? item.id : '', label: entityLabel(item) });
+      if (isConfidence(item.confidence)) byConfidence[item.confidence] += 1;
+      else byConfidence.unset += 1;
+    }
+  }
+  return { total, withSource, withoutSource: total - withSource, byConfidence, missing };
+}
+
 /** 未読み込みの古い JSON でも壊れないように欠損フィールドを補う */
 export function normalizeEngagement(raw: unknown): Engagement | null {
   if (!raw || typeof raw !== 'object') return null;
@@ -786,14 +1230,16 @@ export function normalizeEngagement(raw: unknown): Engagement | null {
     createdAt: typeof e.createdAt === 'string' ? e.createdAt : timestamp,
     updatedAt: timestamp,
     phases,
-    risks: Array.isArray(e.risks) ? e.risks : [],
-    decisions: Array.isArray(e.decisions) ? e.decisions : [],
-    actions: Array.isArray(e.actions) ? e.actions : [],
-    stakeholders: Array.isArray(e.stakeholders) ? e.stakeholders : [],
-    deliverables: Array.isArray(e.deliverables) ? e.deliverables : [],
-    transitions: Array.isArray(e.transitions) ? e.transitions : [],
-    workPackages: Array.isArray(e.workPackages) ? e.workPackages : [],
-    assessments: Array.isArray(e.assessments) ? e.assessments : [],
+    // 出典・確度だけは読み込み時に整える(手で編集された JSON に読めない値が
+    // 入っていても、そこで案件全体が読めなくなることは無いようにする)
+    risks: sanitizeProvenanceList<Risk>(e.risks),
+    decisions: sanitizeProvenanceList<Decision>(e.decisions),
+    actions: sanitizeProvenanceList<Action>(e.actions),
+    stakeholders: sanitizeProvenanceList<Stakeholder>(e.stakeholders),
+    deliverables: sanitizeProvenanceList<DeliverableProgress>(e.deliverables),
+    transitions: sanitizeProvenanceList<TransitionState>(e.transitions),
+    workPackages: sanitizeProvenanceList<WorkPackage>(e.workPackages),
+    assessments: sanitizeAssessments(e.assessments),
     notes: Array.isArray(e.notes) ? e.notes : [],
   };
   // 読み込みは必ずここを通る。保存済みの ID を採番表に取り込むのはこの 1 か所。
