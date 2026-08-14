@@ -8,8 +8,18 @@
 </h1>
 <p align="center">
   <a href="./docs/GETTING-STARTED.md">はじめかた / Getting Started</a> ·
+  <a href="./docs/EXAMPLES.md">実際の出力例 / Examples</a> ·
   <a href="./docs/ARCHITECTURE.md">アーキテクチャ / Architecture</a> ·
   <a href="#ツール一覧--tools">ツール一覧 / Tools</a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/Waganawa-Megumin/togaf10_EAP_MCP/actions/workflows/ci.yml"><img src="https://github.com/Waganawa-Megumin/togaf10_EAP_MCP/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <img src="https://img.shields.io/badge/node-%3E%3D18-3c873a" alt="Node >= 18">
+  <img src="https://img.shields.io/badge/MCP-stdio-6b5bd6" alt="MCP over stdio">
+  <img src="https://img.shields.io/badge/TypeScript-ESM_strict-3178c6" alt="TypeScript, ESM, strict">
+  <a href="./LICENSE.md"><img src="https://img.shields.io/badge/license-personal_use_only-8a5a44" alt="License: personal use only"></a>
+  <a href="./LICENSE.md"><img src="https://img.shields.io/badge/AI_training-prohibited-a33b32" alt="AI training prohibited"></a>
 </p>
 
 TOGAF® Standard, 10th Edition(Enterprise Architecture Practitioner 体系)をベースにした、**アーキテクト支援・コンサルティング MCP サーバー**です(非公式)。
@@ -25,6 +35,7 @@ Claude Code / Claude Desktop などの MCP クライアントから、ADM フェ
 | これを読む | こんな人向け |
 | --- | --- |
 | 🍵 **[はじめかた / Getting Started](./docs/GETTING-STARTED.md)** | **TOGAF を知らない人。**入れ方(Claude に頼むだけの方法つき)と、最初に何と言えばいいかの例文集 |
+| 📄 **[実際の出力例 / Examples](./docs/EXAMPLES.md)** | 「で、実際どんなものが返るの?」に答えるページ。**加工していない実出力**をそのまま貼ってあります |
 | 🏗 **[アーキテクチャ / Architecture](./docs/ARCHITECTURE.md)** | 中身が気になる人。全体像の図、各層の責務、設計判断とその理由 |
 | 📋 [ツール一覧](#ツール一覧--tools) | 何ができるか具体的に知りたい人 |
 
@@ -54,13 +65,13 @@ TOGAF の実務上の問題は「分厚い・抽象的・文書中心で、結�
 - 🧭 **迷ったら `start_here`** — 状況に応じて「次にやるべき 3 つ」を根拠付きで返す。`next_best_action` / `tailor_adm`(自社版 ADM の設計)
 - 📚 **バイリンガル知識ベース** — ADM 全 10 フェーズ、技法 11、成果物 21(全件テンプレート付き)、用語 35、周辺フレームワーク 22、ArchiMate 全 7 層・要素 58・関係 11、SABSA 6 層。すべて日英併記の独自要約
 - 🏭 **業界別の能力セット 7** — 銀行 / 保険 / 製造 / 医療 / 小売・EC / 公共 / 通信。事業の説明文から業界を推定し、業界固有の能力を汎用能力に混ぜた**レベル 1 能力マップの草案**を返す(`draft_capability_map`)
-- 📊 **図を返す** — 能力マップ、バリューストリーム、アプリ連携図、ADM サイクル、ロードマップのガント、C4 コンテキスト図を Mermaid で生成
+- 📊 **図を返す** — 能力マップ、バリューストリーム、アプリ連携図、ADM サイクル、ロードマップのガント、C4 コンテキスト図を Mermaid で生成([実物を見る](#図はそのまま貼れば絵になる--diagrams-paste-straight-into-github))
 - 🔐 **セキュリティ EA** — SABSA の 6 層 × 6 問いを ADM に対応付け。脅威モデルの出発点、セキュリティ要件チェックリスト、案件のセキュリティ点検
 - 📥 **既存ドキュメントの取り込み** — 報告書・台帳・指摘一覧(txt/md/csv/json/html)からリスク・ステークホルダー・要件・アクションを**出典行番号付き**で抽出し、案件に取り込む。ファイルパス(`path`)でも、**本文の貼り付け(`text`)でも**受け取る
 - 🏗 **ArchiMate 連携** — ADM フェーズ ↔ ArchiMate 要素の対応、関係の妥当性判定、**Archi 取り込み用の CSV / Open Exchange XML 書き出し**。名前を解決できない関係が混じっていても書き出しは止まらず、**解決できた分を出力して落ちた関係を警告に列挙**する
 - 📋 **複数案件の管理** — フェーズ進捗・リスク・決定・アクション・ステークホルダー・成果物・ロードマップ・評価を JSON で永続化。案件の切替に対応
 - 🔎 **分析とレビュー** — ギャップ分析、リスク行列、ステークホルダー 4 象限、成熟度/変革準備度評価、適合性レビュー用チェックリスト、案件の健全性監査
-- 📈 **デュアルダッシュボード** — 会話内で使える Markdown 版と、SSE でライブ更新されるブラウザ版(四半期ロードマップ図・ヒートマップ・印刷用 CSS・ダークモード)
+- 📈 **デュアルダッシュボード** — 会話内で使える Markdown 版と、SSE でライブ更新されるブラウザ版(四半期ロードマップ図・ヒートマップ・印刷用 CSS・ダークモード)([画面を見る](#ダッシュボードはブラウザでライブ更新--live-browser-dashboard))
 - 🧾 **知識の鮮度を明示** — 依拠している版と最終確認日を返し、正確な原文が要る場面は一次情報へ送る(`about_knowledge` / `check_official_source`)
 - 🤖 **Claude API は任意** — このサーバーはすでに LLM の中で動くため通常は不要。大量文書用に `ANTHROPIC_API_KEY` がある場合だけ有効化される
 
@@ -68,7 +79,110 @@ TOGAF の実務上の問題は「分厚い・抽象的・文書中心で、結�
 
 ---
 
-## 2. まず試す / Try it
+## 2. 実際に返ってくるもの / What it actually returns
+
+以下はすべて**加工していない実出力**です(コマンドを添えてあるので手元で再現できます)。
+
+> Everything below is unedited real output; the commands are included so you can reproduce it.
+
+### 同じ相談でも、状況が違えば返るものが違う / Same topic, different answer
+
+`consult` に**同じトピック**(基幹システムの刷新)を、**違う制約**で渡した 2 回の実出力から、各節の先頭項目だけを並べたものです。
+
+```bash
+node scripts/mcp-cli.mjs call consult '{"situation":"基幹システムの刷新をやりたい。予算は潤沢で経営も本気。18か月の期限がある","lang":"ja"}' --quiet
+node scripts/mcp-cli.mjs call consult '{"situation":"基幹システムの刷新をやりたい。予算はゼロ、経営は無関心、担当は自分ひとり","lang":"ja"}' --quiet
+```
+
+| 観点 | 予算も支持もある | 予算も支持も無い |
+| --- | --- | --- |
+| 見立ての枕 | 金はあるが時間が無い | 金も人も無い |
+| 推奨技法の 1 位 | 移行計画技法 | ビジネス変革準備度評価 |
+| **今日やること** | 並行できる作業(現状調査、データの棚卸し、移行方式の比較検証)に先に人を投入する。ただし決定そのものは外に出さない。 | 対象を 1 業務・1 データに固定し、そこだけを「現状 / あるべき / 差分」の 3 段で 1 枚にまとめる。全社を描こうとした時点で予算も時間も足りなくなる。 |
+| **最初の確認質問** | この予算はいつまで有効で、使い切れなかった分は翌期に繰り越せますか? | 次に予算を検討する場はいつで、そこに載せるには何がいつまでに要りますか? |
+
+**推奨技法の順位が入れ替わり、今日やることと最初に聞く質問が別物になります。** キーワードに反応して同じ一般論を返すのではなく、制約を読んで結論を変えます(「やらない」と書けばその話題を外します)。
+
+> Same topic, different constraints — the first recommended technique swaps, and the first action and first question become different things.
+
+### 図はそのまま貼れば絵になる / Diagrams paste straight into GitHub
+
+図を返すツールは **Mermaid のコード**を返します。GitHub は ```` ```mermaid ```` フェンスをそのまま描画するので、返ってきたコードを README や Issue に貼るだけで図になります。下は `diagram_capability_map` の実出力を貼っただけの状態です。
+
+```mermaid
+flowchart LR
+  subgraph c1["引合い・見積"]
+    direction TB
+    c2["引合い受付"]
+    c3["概算見積作成"]
+    c4["原価積算"]
+  end
+  subgraph c5["受注管理"]
+    direction TB
+    c6["受注登録"]
+    c7["納期回答"]
+  end
+  subgraph c8["生産計画"]
+    direction TB
+    c9["負荷山積み"]
+  end
+  classDef heatLow fill:#d4efdf,stroke:#1e8449,color:#145a32;
+  classDef heatMid fill:#fdebd0,stroke:#ca6f1e,color:#7e5109;
+  classDef heatHigh fill:#fadbd8,stroke:#c0392b,color:#7b241c;
+  class c6 heatLow;
+  class c2,c9 heatMid;
+  class c3,c4,c7 heatHigh;
+  style c1 fill:#fadbd8,stroke:#c0392b,color:#7b241c;
+  style c5 fill:#fdebd0,stroke:#ca6f1e,color:#7e5109;
+  style c8 fill:#fdebd0,stroke:#ca6f1e,color:#7e5109;
+```
+
+凡例は 高(投資の焦点)/ 中(改善余地あり)/ 低(現状で足りている)。**赤が投資すべき能力**です。図で終わらず、「次はこの能力を支えるアプリケーションとデータを洗い出せ」まで一緒に返ります。
+
+### ダッシュボードはブラウザでライブ更新 / Live browser dashboard
+
+`open_dashboard` が `127.0.0.1` にローカル HTTP サーバーを立て、案件を更新するたびに **SSE で画面が更新されます**。表示言語は `lang` 引数(`ja` / `en` / `both`、既定は `both`)で切り替えられます。
+
+下は**ダッシュボードの上半分**(ページ先頭からロードマップのタイムライン直下まで)です。ヘッダーの「ライブ更新中 / Live」表示、目次、進捗サマリ(ADM 55% = 4/10 完了、リスク 9・アクション 10 など)、概要 / スコープ、ADM 10 フェーズの進捗、四半期ロードマップが写っています。**中身はデモ用の架空案件**(架空の製造業の基幹刷新。企業名・人名はすべて架空)です。
+
+<p align="center">
+  <img src="./pic/screenshots/dashboard-overview.png" alt="ダッシュボード上半分: ライブ更新中の表示、目次、進捗サマリ、ADM 10 フェーズ進捗、四半期ロードマップ / Dashboard, top half" width="900">
+</p>
+
+四半期ロードマップの拡大(この 1 枚だけ `lang=ja` で撮影)。横棒が作業パッケージ、縦線が移行アーキテクチャで、**単独では事業が回らない移行状態(T2)は赤**で出ます。
+
+<p align="center">
+  <img src="./pic/screenshots/dashboard-roadmap.png" alt="四半期ロードマップ: 作業パッケージのバーと移行アーキテクチャの縦線、単独稼働できない T2 は赤 / Quarterly roadmap" width="900">
+</p>
+
+ダークモードにも追従します(`prefers-color-scheme` + 手動切替)。印刷用 CSS 付きで、外部 CDN は参照しません。
+
+<p align="center">
+  <img src="./pic/screenshots/dashboard-dark.png" alt="同じ範囲のダークモード表示 / The same view in dark mode" width="900">
+</p>
+
+<details>
+<summary>もう 2 枚(リスクマトリクス / ステークホルダー 4 象限)</summary>
+
+ページの下のほうにある 2 つのマトリクスです。上の 1 枚目には入りきらないため単独で切り出しています。
+
+<p align="center">
+  <img src="./pic/screenshots/dashboard-risk-matrix.png" alt="リスクマトリクス: レベル × 対応状況 / Risk matrix" width="900">
+</p>
+
+<p align="center">
+  <img src="./pic/screenshots/dashboard-stakeholder-matrix.png" alt="ステークホルダー 4 象限: 影響力 × 関心度 / Stakeholder quadrants" width="900">
+</p>
+
+</details>
+
+撮影条件と撮り直しの手順は [pic/screenshots/README.md](./pic/screenshots/README.md) にあります。すべて headless chromium で実際の `open_dashboard` と同じサーバーから撮ったもので、合成やモックは含みません。
+
+**→ 続きは [実際の出力例 / Real Output Examples](./docs/EXAMPLES.md)。**`stakeholder_matrix` が**根拠の語まで示して利害の対立を検出する**ところ、`ingest_document` が**出典行番号付きで**報告書を案件の素材に変えるところ、Archi に取り込める XML の中身まで、実出力を貼ってあります。
+
+---
+
+## 3. まず試す / Try it
 
 ### インストール
 
@@ -114,9 +228,11 @@ claude mcp add togaf-eap -- node /path/to/togaf10_EAP_MCP/dist/index.js
 
 **→ 例文はもっとあります: [はじめかた / 最初の一言](./docs/GETTING-STARTED.md#3-最初の一言)**
 
+**→ 実際に返ってきた出力をそのまま貼ったページがあります: [実際の出力例 / Real Output Examples](./docs/EXAMPLES.md)**
+
 ---
 
-## 3. 詳しく / Reference
+## 4. 詳しく / Reference
 
 ### ツール一覧 / Tools
 
@@ -275,9 +391,13 @@ PDF / Word / Excel など、テキストでない形式は**クライアント�
 
 ```bash
 npm run build   # TypeScript ビルド
-npm test        # vitest ユニットテスト
-npm run smoke   # stdio JSON-RPC スモークテスト
+npm test        # vitest ユニットテスト(168 件)
+npm run smoke   # stdio JSON-RPC スモークテスト(103 チェック)
 ```
+
+GitHub Actions([`.github/workflows/ci.yml`](./.github/workflows/ci.yml))が push / PR ごとに **Node 20 と 22** で ビルド → `npx tsc --noEmit` → vitest → スモークテストを回します(`engines` は `>=18`)。シークレットは使いません。
+
+> CI runs build → type check → unit tests → stdio smoke test on Node 20 and 22, with no secrets.
 
 手でツールを叩いて出力を確認するには、同梱の CLI を使います。
 
@@ -288,6 +408,21 @@ node scripts/mcp-cli.mjs call <tool> '<JSON>' --data-dir /tmp/scratch --quiet
 ```
 
 設計判断・層の責務・拡張のしかたは [アーキテクチャ](./docs/ARCHITECTURE.md) にまとめてあります。
+
+---
+
+## 5. 報告・変更履歴・セキュリティ / Reporting, changelog, security
+
+| 用件 | 行き先 |
+| --- | --- |
+| 動かない・出力がおかしい | [バグ報告](https://github.com/Waganawa-Megumin/togaf10_EAP_MCP/issues/new?template=bug_report.yml) |
+| 使い方が分からない | [使い方の質問](https://github.com/Waganawa-Megumin/togaf10_EAP_MCP/issues/new?template=question.yml) |
+| 何が変わったか知りたい | [変更履歴 / Changelog](./CHANGELOG.md) |
+| 何がディスクに残るのか・脆弱性の報告 | [セキュリティ / Security](./SECURITY.md) |
+
+Issue に**ツールの出力を貼るときは、案件名・社名・実在の関係者名を伏せてください**(テンプレート側にも確認欄があります)。このサーバーは案件情報を暗号化せずに `~/.togaf-eap/` へ JSON で保存し(`TOGAF_EAP_DATA_DIR` で変更可)、**既定ではネットワークに一切出ません**(`ANTHROPIC_API_KEY` を設定したときだけ Claude API を使います)。詳細は [SECURITY.md](./SECURITY.md)。
+
+> Bug reports and usage questions go through the issue templates; please mask engagement, company, and stakeholder names before pasting tool output. Engagement state is stored unencrypted as JSON under `~/.togaf-eap/`, and the server makes no network calls unless `ANTHROPIC_API_KEY` is set.
 
 ---
 
