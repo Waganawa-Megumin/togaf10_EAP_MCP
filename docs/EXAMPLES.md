@@ -58,7 +58,7 @@ The README explains what the server does. This page answers the next question: *
 
 MCP サーバーを入れたはいいが、ツールが 84 個あって何から触ればいいか分からない。TOGAF の本は開いたが、結局いま何をすればいいのか書いていない。
 
-*You installed the server, there are 84 tools, and you have no idea which one to touch first.*
+*You installed the server, there are 87 tools, and you have no idea which one to touch first.*
 
 ### こう聞く / What you say
 
@@ -95,7 +95,7 @@ node scripts/mcp-cli.mjs call start_here '{"lang":"ja"}' --quiet
 
 **ここが要点** — 84 個のツールから 4 個に絞られ、しかも「決まった状態」(=完了条件)が書かれています。解説ではなく行動が返る、というのがこのサーバーの方針です。
 
-*The point: 84 tools collapse into 4, each with a definition of done. The server returns actions, not explanations.*
+*The point: 87 tools collapse into 4, each with a definition of done. The server returns actions, not explanations.*
 
 ---
 
@@ -1190,7 +1190,7 @@ node scripts/mcp-cli.mjs call start_here '{"lang":"ja"}' --data-dir $DD --quiet
 
 | コマンド | 用途 |
 | --- | --- |
-| `tools` | ツール名と説明の一覧(84 件) |
+| `tools` | ツール名と説明の一覧(87 件) |
 | `schema <tool>` | 引数の JSON Schema。**このページの引数はすべてここで裏を取っています** |
 | `call <tool> '<json>'` | ツール呼び出し |
 | `call <tool> --file args.json` | 引数を JSON ファイルから渡す |
@@ -1226,7 +1226,7 @@ node scripts/mcp-cli.mjs call start_here '{"lang":"ja"}' --data-dir $DD --quiet
 
 ## 次に読むもの / Where to go next
 
-- [README](../README.md) — 全体像とツール 84 件の一覧
+- [README](../README.md) — 全体像とツール 87 件の一覧
 - [はじめかた / GETTING-STARTED](./GETTING-STARTED.md) — 導入手順と最初の一言の例文
 - [アーキテクチャ / ARCHITECTURE](./ARCHITECTURE.md) — 設計判断と拡張のしかた
 

@@ -36,6 +36,9 @@ import {
  */
 const LOCAL = {
   contents: { ja: '目次', en: 'Contents' },
+  // Start 画面へ戻る導線。これが無いと Start→ダッシュボードの一方通行になり、
+  // Start 画面を閉じた利用者は URL を覚えていない限り戻れない。
+  startScreen: { ja: '相談を渡す', en: 'Hand over material' },
   themeAuto: { ja: 'テーマ: 自動', en: 'Theme: Auto' },
   themeLight: { ja: 'テーマ: ライト', en: 'Theme: Light' },
   themeDark: { ja: 'テーマ: ダーク', en: 'Theme: Dark' },
@@ -177,6 +180,9 @@ h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: .01em; }
 .meta { color: var(--muted); font-size: 13px; }
 .meta span + span::before { content: "·"; margin: 0 8px; }
 .controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.startLink { font: inherit; padding: 5px 11px; border: 1px solid var(--line); border-radius: 7px;
+  background: var(--panel); color: var(--fg); text-decoration: none; }
+.startLink:hover { border-color: var(--accent); color: var(--accent); }
 .pill {
   display: inline-flex; align-items: center; gap: 6px;
   font-size: 12px; padding: 3px 10px; border-radius: 999px;
@@ -375,6 +381,7 @@ footer { margin-top: 24px; color: var(--muted); font-size: 12px; text-align: cen
     </div>
     <div class="controls">
       <span class="pill"><span class="dot" id="dot"></span><span id="conn"></span></span>
+      <a class="startLink" href="/start" id="startLink"></a>
       <button id="themeBtn" type="button"></button>
       <button onclick="window.print()" id="printBtn" type="button"></button>
     </div>
@@ -399,6 +406,7 @@ footer { margin-top: 24px; color: var(--muted); font-size: 12px; text-align: cen
   var navItems = [];
 
   document.getElementById('printBtn').textContent = S.print;
+  document.getElementById('startLink').textContent = S.startScreen;
   document.getElementById('conn').textContent = S.live;
 
   function esc(v) {

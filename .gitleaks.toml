@@ -1,0 +1,31 @@
+# gitleaks の設定 / gitleaks configuration.
+#
+# 既定のルールをそのまま使い、**作り物と分かっている文字列だけ**を対象外にする。
+# ファイル単位で除外しないのは、そのファイルに後から本物が入っても気づけなくなるため。
+# 例外を増やすときは必ず理由を書くこと。理由が書けないものは、たいてい本物の漏洩。
+#
+# Uses the default ruleset and allowlists only the specific fixture strings —
+# not the file — so a real secret landing in the same file is still caught.
+# Never add an entry without a reason; one you cannot justify is usually real.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "秘密情報を伏せる処理そのものを検証するための作り物 / Fixtures that prove secret redaction works"
+
+regexes = [
+  # tests/intake.test.ts — Start 画面が預かった本文から資格情報を伏せることの検証。
+  # 伏せ字が働かなくなったらこれらのテストが落ちる。
+  #
+  # 1) key=value 形式の伏せ字が効くかの入力。
+  #    gitleaks は「検出した秘密そのもの」と照合するので、値の側を書く。
+  '''hunter2000''',
+  '''abcdef123456''',
+  # 2) 正規表現の計算量が爆発しないことの回帰テスト。閉じていない PEM ヘッダを
+  #    5 万回繰り返すだけで鍵の中身は無い(実測 13 秒 → 10ms)
+  '''BEGIN PRIVATE KEY-----'\.repeat''',
+  # 3) base64 で 14 文字。実際の RSA 秘密鍵は 1,600 文字以上あり、鍵として成立しない断片
+  '''MIIEowIBAAKCAQ''',
+  '''DEK-Info: AES-128-CBC,9A2B''',
+]

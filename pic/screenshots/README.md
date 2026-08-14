@@ -9,7 +9,7 @@ README で使う **HTML ダッシュボードの実画面**です。すべて he
 | ファイル | 何が写っているか | 寸法 (px) | サイズ | 言語 | テーマ |
 | --- | --- | --- | --- | --- | --- |
 | `dashboard-overview.png` | ヘッダー(ライブ更新中の表示)・目次・進捗サマリ・概要/スコープ・ADM 10 フェーズ進捗・四半期ロードマップのタイムライン | 1596 × 2591 | 233 KB | 日英併記 (`both`) | ライト |
-| `dashboard-dark.png` | 上と同じ範囲をダークモードで(`prefers-color-scheme: dark` を emulate) | 1596 × 2591 | 233 KB | 日英併記 (`both`) | ダーク |
+| `dashboard-dark.png` | 上と同じ範囲をダークモードで(`prefers-color-scheme: dark` を emulate) | 1596 × 2591 | 232 KB | 日英併記 (`both`) | ダーク |
 | `dashboard-roadmap.png` | 四半期ロードマップの拡大。作業パッケージのバー・移行アーキテクチャの縦線(単独稼働できない T2 は赤) | 1557 × 592 | 124 KB | 日本語 (`ja`) | ライト |
 | `dashboard-risk-matrix.png` | リスクマトリクス(レベル × 対応状況) | 1512 × 430 | 40 KB | 日英併記 (`both`) | ライト |
 | `dashboard-stakeholder-matrix.png` | ステークホルダー 4 象限(影響力 × 関心度) | 1512 × 463 | 82 KB | 日英併記 (`both`) | ライト |
@@ -108,5 +108,5 @@ All names in the demo data — company and people — are **fictional**; the cli
 visible `(架空の企業 / fictional company)` marker. No credentials and no local absolute paths
 appear in any image.
 
-To regenerate, follow the four commands under 「撮り直す手順」 above. Playwright and Pillow are
+To regenerate, follow the five steps under 「撮り直す手順」 above. Playwright and Pillow are
 not project dependencies; install them separately.

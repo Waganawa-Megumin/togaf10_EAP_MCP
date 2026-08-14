@@ -301,5 +301,6 @@ cd /path/to/togaf10_EAP_MCP && node dist/index.js < /dev/null
 ## 次に読むもの
 
 - [実際の出力例](./EXAMPLES.md) — 各ツールが実際に何を返すか(貼り付けそのまま)
+- [Start 画面](./START-SCREEN.md) — PDF や画像を渡すのが面倒なときの、任意の入口
 - [アーキテクチャ解説](./ARCHITECTURE.md) — このサーバーがどう作られているか、なぜそう作ったか
-- [README](../README.md) — ツール 84 件の一覧、設定、ライセンス
+- [README](../README.md) — ツール 87 件の一覧、設定、ライセンス

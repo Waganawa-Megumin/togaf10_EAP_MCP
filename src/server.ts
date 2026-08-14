@@ -26,6 +26,7 @@ import { registerSecurityTools } from './tools/security.js';
 import { registerDocumentTools } from './tools/documents.js';
 import { registerLlmTools } from './tools/llm.js';
 import { registerSourceTools } from './tools/sources.js';
+import { registerIntakeTools } from './tools/intake.js';
 
 export const SERVER_NAME = 'togaf10-eap-mcp';
 export const SERVER_VERSION = '0.2.0';
@@ -147,6 +148,8 @@ export function createServer(): McpServer {
   // 図・ダッシュボード・書き出し
   registerDiagramTools(server);
   registerDashboardTools(server);
+  // Start 画面(ブラウザで預かる)と、その預かりものを Claude が受け取る経路
+  registerIntakeTools(server);
   registerExportTools(server);
   registerArchiMateExportTools(server);
   // 既存ドキュメントの取り込みと、任意の Claude API 連携

@@ -36,6 +36,7 @@ Claude Code / Claude Desktop などの MCP クライアントから、ADM フェ
 | --- | --- |
 | 🍵 **[はじめかた / Getting Started](./docs/GETTING-STARTED.md)** | **TOGAF を知らない人。**入れ方(Claude に頼むだけの方法つき)と、最初に何と言えばいいかの例文集 |
 | 📄 **[実際の出力例 / Examples](./docs/EXAMPLES.md)** | 「で、実際どんなものが返るの?」に答えるページ。**加工していない実出力**をそのまま貼ってあります |
+| 🖥 **[Start 画面 / Start screen](./docs/START-SCREEN.md)** | **PDF や画像を渡すのが面倒な人。**ブラウザに投げて Claude に読ませる、任意の入口(使わなくても全機能が使えます) |
 | 🏗 **[アーキテクチャ / Architecture](./docs/ARCHITECTURE.md)** | 中身が気になる人。全体像の図、各層の責務、設計判断とその理由 |
 | 📋 [ツール一覧](#ツール一覧--tools) | 何ができるか具体的に知りたい人 |
 
@@ -244,9 +245,9 @@ claude mcp add togaf-eap -- node /path/to/togaf10_EAP_MCP/dist/index.js
 
 ### ツール一覧 / Tools
 
-**ツール 84 件 + MCP prompts 8 + resources 8。** 下の表で全 84 件を網羅しています(`node scripts/mcp-cli.mjs tools` で実物を確認できます)。
+**ツール 87 件 + MCP prompts 8 + resources 8。** 下の表で全 87 件を網羅しています(`node scripts/mcp-cli.mjs tools` で実物を確認できます)。
 
-> **84 tools, 8 MCP prompts, 8 resources.** The catalog below is complete, but its descriptions are in Japanese only. Every tool description shipped by the server itself is bilingual, so `node scripts/mcp-cli.mjs tools --quiet` prints the same 84 tools with an English description for each — that listing is the English reader's reference, and it is also what your MCP client shows you.
+> **87 tools, 8 MCP prompts, 8 resources.** The catalog below is complete, but its descriptions are in Japanese only. Every tool description shipped by the server itself is bilingual, so `node scripts/mcp-cli.mjs tools --quiet` prints the same 87 tools with an English description for each — that listing is the English reader's reference, and it is also what your MCP client shows you.
 
 > **引数の綴りは厳密です。** 全ツールの入力スキーマは `.strict()`(JSON Schema の `additionalProperties: false`)で、**未知のキーは黙って無視されずエラーになります**。`{"phaseId": "B"}` のように綴りが違えば `Unrecognized key(s) in object: 'phaseId'` が返るので、間違ったまま「効いていない」状態に気付かないことはありません。引数名に迷ったら `node scripts/mcp-cli.mjs schema <tool>` で確認してください。
 >
@@ -342,6 +343,7 @@ claude mcp add togaf-eap -- node /path/to/togaf10_EAP_MCP/dist/index.js
 | `add_transition_state` / `add_work_package` / `get_roadmap` / `prioritize_work_packages` / `remove_roadmap_item` | 移行アーキテクチャと作業パッケージ(価値 × 規模で 4 象限に分類) |
 | `get_dashboard` / `open_dashboard` | Markdown ダッシュボード / ブラウザのライブダッシュボード(`TOGAF_EAP_NO_BROWSER` を設定するとブラウザを起動せず URL だけ返す) |
 | `export_report` / `export_deliverable` / `list_exports` | 配布・印刷用のファイル書き出し |
+| `open_start` / `check_intake` / `mark_intake_done` | **[Start 画面](./docs/START-SCREEN.md)** — 相談と資料(PDF・画像・Office・テキスト)をブラウザから預け、Claude が受け取る。画面は預かるだけで、読むのは Claude 側 |
 
 #### 任意: Claude API
 

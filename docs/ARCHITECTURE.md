@@ -258,7 +258,7 @@ sequenceDiagram
 6. `tests/` に vitest を足し、`scripts/mcp-cli.mjs` で実際に呼んで出力を目視する
 
 ```bash
-node scripts/mcp-cli.mjs tools --quiet          # ツール一覧(現在 84 件)
+node scripts/mcp-cli.mjs tools --quiet          # ツール一覧(現在 87 件)
 node scripts/mcp-cli.mjs schema <tool>          # 入力スキーマ
 node scripts/mcp-cli.mjs call <tool> '<JSON>' --data-dir /tmp/scratch --quiet
 
@@ -276,4 +276,4 @@ npm run smoke   # dist を子プロセスで起動して stdio JSON-RPC を通�
 
 - [はじめかた / Getting Started](./GETTING-STARTED.md) — 入れ方と、最初に何と言えばいいか
 - [実際の出力例 / Examples](./EXAMPLES.md) — ここで説明した整形が実際にどう出るか
-- [README](../README.md) — ツール 84 件の一覧、設定、ライセンス
+- [README](../README.md) — ツール 87 件の一覧、設定、ライセンス

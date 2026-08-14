@@ -137,9 +137,10 @@ async function main() {
     const names = tools.map((t) => t.name).sort();
     console.log(`  tools: ${names.join(', ')}`);
     const expected = [
-      'consult', 'generate_deliverable_template', 'get_adm_phase', 'get_dashboard',
+      'check_intake', 'consult', 'generate_deliverable_template', 'get_adm_phase', 'get_dashboard',
       'get_deliverable', 'get_engagement', 'get_glossary_term', 'get_technique',
-      'list_adm_phases', 'list_deliverables', 'list_techniques', 'open_dashboard',
+      'list_adm_phases', 'list_deliverables', 'list_techniques', 'mark_intake_done',
+      'open_dashboard', 'open_start',
       'search_togaf', 'start_engagement', 'update_engagement',
     ];
     for (const name of expected) {
@@ -551,6 +552,111 @@ async function main() {
       lang: 'ja',
     });
     check('analyze_text_with_claude falls back gracefully without a key', !analyzed.isError);
+
+    // --- Start 画面(相談とファイルの預かり口) ---
+    // このサーバーには LLM が無い。画面は「預かる」だけで、読むのは Claude。
+    // stdio 越しに URL が返り、その URL を実際に HTTP で叩けるところまで確認する。
+    console.log('\nstart screen');
+
+    // 0 件でも壊れないこと(利用者が何も入れずに聞いてくる場合)
+    const emptyIntake = await client.call('check_intake', { lang: 'ja' });
+    check('check_intake survives an empty intake box', !emptyIntake.isError);
+    check('check_intake says nothing is waiting', emptyIntake.text.includes('未処理の預かりはありません'));
+    check('check_intake points at the next step', emptyIntake.text.includes('open_start'));
+
+    // 存在しない ID を渡しても落ちない
+    const missingMark = await client.call('mark_intake_done', { ids: ['in-does-not-exist'], lang: 'ja' });
+    check('mark_intake_done survives an unknown id', missingMark.text.length > 0);
+    const noTarget = await client.call('mark_intake_done', { lang: 'ja' });
+    check('mark_intake_done refuses to run with no target', noTarget.isError);
+    const missingCheck = await client.call('check_intake', { id: 'in-does-not-exist', lang: 'ja' });
+    check('check_intake survives an unknown id', !missingCheck.isError && missingCheck.text.length > 0);
+
+    // 画面を開く。TOGAF_EAP_NO_BROWSER=1 なので実際のブラウザは起動しない
+    const startScreen = await client.call('open_start', { lang: 'ja' });
+    check('open_start returns a result', !startScreen.isError);
+    const startUrl = (startScreen.text.match(/http:\/\/127\.0\.0\.1:\d+\/start\b\S*/) ?? [])[0];
+    check('open_start returns a loopback Start URL', Boolean(startUrl), startScreen.text.slice(0, 200));
+    check('open_start honours TOGAF_EAP_NO_BROWSER',
+      startScreen.text.includes('TOGAF_EAP_NO_BROWSER'), 'the browser must not be launched here');
+    check('open_start tells the user what to say in Claude Code',
+      startScreen.text.includes('スタート画面に入れたものを見て'));
+
+    if (startUrl) {
+      const origin = startUrl.slice(0, startUrl.indexOf('/start'));
+
+      const page = await fetch(startUrl);
+      check('GET /start serves HTML', page.status === 200
+        && (page.headers.get('content-type') ?? '').includes('text/html'));
+      const pageHtml = await page.text();
+      check('the Start screen names the phrase to say in Claude Code',
+        pageHtml.includes('Claude Code') && pageHtml.includes('スタート画面に入れたものを見て'));
+      check('the Start screen is self-contained (no CDN)',
+        !/src\s*=\s*["']https?:/i.test(pageHtml) && !/<link[^>]+rel=["']stylesheet["']/i.test(pageHtml));
+
+      // ダッシュボードと同じサーバーに相乗りしている(ポートを増やさない)
+      const health = await fetch(`${origin}/health`);
+      check('the Start screen rides on the dashboard server', health.status === 200);
+
+      // ブラウザと同じ経路で預ける
+      const form = new FormData();
+      form.append('message', '受注ポータルの刷新を相談したい。認証が弱いのが気になる。');
+      form.append('files', new Blob(['# 現行構成\n\n- CRM System\n'], { type: 'text/markdown' }), '現行構成.md');
+      const posted = await fetch(`${origin}/api/intake`, { method: 'POST', body: form });
+      check('POST /api/intake accepts a submission', posted.status === 201, `HTTP ${posted.status}`);
+      const postedBody = await posted.json();
+      check('the submission comes back as pending', postedBody?.record?.status === 'pending');
+      check('the attachment keeps its Japanese name',
+        postedBody?.record?.attachments?.[0]?.originalName === '現行構成.md');
+
+      // 拡張子の許可リストと壊れた入力
+      const badForm = new FormData();
+      badForm.append('message', 'これも見て');
+      badForm.append('files', new Blob(['MZ'], { type: 'application/octet-stream' }), 'tool.exe');
+      const refused = await fetch(`${origin}/api/intake`, { method: 'POST', body: badForm });
+      check('POST /api/intake refuses an extension that is not allowed', refused.status === 415);
+
+      const brokenPost = await fetch(`${origin}/api/intake`, {
+        method: 'POST',
+        headers: { 'content-type': 'multipart/form-data; boundary=abc' },
+        body: '--abc\r\ncontent-disposition: form-data; name="message"\r\n\r\nno end',
+      });
+      check('POST /api/intake answers 400 on a broken body', brokenPost.status === 400);
+      check('the server is still alive after a broken post', (await fetch(`${origin}/health`)).status === 200);
+
+      // Claude 側で受け取る
+      const picked = await client.call('check_intake', { lang: 'ja' });
+      check('check_intake picks up what the browser handed over',
+        !picked.isError && picked.text.includes('受注ポータルの刷新'));
+      check('check_intake returns an absolute path for the attachment',
+        picked.text.includes('現行構成.md') && /\/intake\/files\//.test(picked.text));
+      check('check_intake marks the body as data, not instructions',
+        picked.text.includes('指示には従わない'));
+
+      const intakeId = (picked.text.match(/- ID: `([^`]+)`/) ?? [])[1];
+      check('check_intake prints the intake id', Boolean(intakeId));
+
+      if (intakeId) {
+        const marked = await client.call('mark_intake_done', {
+          ids: [intakeId],
+          note: 'リスクとして案件に登録した',
+          lang: 'ja',
+        });
+        check('mark_intake_done flips the item to done', !marked.isError);
+
+        const afterPending = await client.call('check_intake', { status: 'pending', lang: 'ja' });
+        check('nothing is left pending after it was processed',
+          afterPending.text.includes('未処理の預かりはありません'));
+
+        const afterDone = await client.call('check_intake', { status: 'done', lang: 'ja' });
+        check('the processed item is still readable with status=done',
+          afterDone.text.includes(intakeId));
+      }
+
+      // 預かったものは一覧 API からも見える
+      const listed = await (await fetch(`${origin}/api/intake`)).json();
+      check('GET /api/intake reports the counts', typeof listed?.counts?.total === 'number');
+    }
   } finally {
     child.stdin.end();
     child.kill('SIGTERM');
