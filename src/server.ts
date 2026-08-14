@@ -53,6 +53,40 @@ An unofficial TOGAF-based consulting server. Start with \`consult\` for situatio
  * 各ツール側は生シェイプのまま書けるので、型推論(引数の型付け)は一切変わらない。
  */
 function strictifyToolSchemas(server: McpServer): void {
+  /**
+   * 入れ子の中まで strict にする。
+   *
+   * トップレベルだけを `.strict()` にしても、`risks[0].levle` のような
+   * **配列要素の中の綴り違いは黙って捨てられる**。critical のリスクが medium で
+   * 保存され、しかも「更新しました」と返るため利用者は気づけない。
+   *
+   * zod のスキーマは複数のツールで共有されているので、その場で書き換えて全体に効かせる。
+   * 循環参照に備えて訪問済みを記録する。
+   */
+  const deepStrict = (node: unknown, seen: Set<unknown>): void => {
+    if (!node || typeof node !== 'object' || seen.has(node)) return;
+    seen.add(node);
+    const def = (node as { _def?: Record<string, unknown> })._def;
+    if (!def) return;
+
+    if (def.typeName === 'ZodObject') {
+      def.unknownKeys = 'strict';
+      const shape = typeof def.shape === 'function' ? (def.shape as () => unknown)() : def.shape;
+      if (shape && typeof shape === 'object') {
+        for (const child of Object.values(shape)) deepStrict(child, seen);
+      }
+      return;
+    }
+    // 配列・任意・既定値・null 許容・union・intersection・record などを辿る
+    for (const key of ['type', 'innerType', 'schema', 'valueType', 'keyType', 'left', 'right']) {
+      deepStrict(def[key], seen);
+    }
+    for (const key of ['options', 'items']) {
+      const list = def[key];
+      if (Array.isArray(list)) for (const child of list) deepStrict(child, seen);
+    }
+  };
+
   type ToolConfig = { inputSchema?: unknown } & Record<string, unknown>;
   const original = server.registerTool.bind(server) as (
     name: string,
@@ -73,9 +107,12 @@ function strictifyToolSchemas(server: McpServer): void {
       !('_def' in (shape as object)) &&
       !('_zod' in (shape as object));
     if (isRawShape) {
+      const seen = new Set<unknown>();
+      for (const child of Object.values(shape as z.ZodRawShape)) deepStrict(child, seen);
       const strict = z.object(shape as z.ZodRawShape).strict();
       return original(name, { ...config, inputSchema: strict }, cb);
     }
+    if (shape) deepStrict(shape, new Set());
     return original(name, config, cb);
   };
 }

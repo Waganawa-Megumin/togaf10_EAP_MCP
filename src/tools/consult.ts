@@ -216,10 +216,12 @@ function industrySection(
       lines.push(bullets(notes, l));
       lines.push('');
     }
+    // 案内先は実在するツールに限る。存在しないツール名を書くと、
+    // 前提知識の無い利用者はそこで必ず止まる(レッドチームで 4 ペルソナが独立に報告)。
     lines.push(
       msg(
-        `能力の一覧が要るなら \`get_industry_capability_set\` に \`${set.id}\` を渡してください。`,
-        `Pass \`${set.id}\` to \`get_industry_capability_set\` for the full capability list.`,
+        `この業界の能力を一覧で見るなら \`draft_capability_map\` に \`industry: "${set.id}"\` と事業の説明を渡してください。`,
+        `For the full capability list, call \`draft_capability_map\` with \`industry: "${set.id}"\` and a description of the business.`,
         l,
       ),
     );
