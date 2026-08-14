@@ -26,6 +26,8 @@ import {
   type KnowledgeKind,
   type Lang,
 } from '../knowledge/index.js';
+// 打ち消された節から論点を拾わないため(consult 側と同じ節分割を使う)
+import { splitSituationClauses } from '../knowledge/consulting.js';
 import {
   summarizeProgress,
   type Assessment,
@@ -3150,25 +3152,73 @@ const SIGNAL_DEFS: SignalDef[] = [
   },
 ];
 
+/**
+ * 「その情報は無い」と言っている文の目印。
+ *
+ * `splitSituationClauses` が持つ打ち消し語彙は「レガシー刷新はやらないと決まった」型
+ * (話題そのものの取り下げ)で、「投資額はこの資料には書かれていない」型を含まない。
+ * 後者を拾えないと、**書かれていない数字を「まず金額の桁を言え」と勧める**ことになる。
+ *
+ * ここは explain_for 固有ではないので、いずれ consulting.ts の語彙に寄せてよい。
+ */
+const ABSENT_RE =
+  /(?:読み取れ(?:ない|ません)|読み取れなかった|書かれて(?:いない|いません)|記載(?:が|は)?(?:ない|ありません|無い)|記述(?:が|は)?(?:ない|ありません)|不明|未定|わから(?:ない|ず)|判断できない|特定できない|公開されて(?:いない|いません)|not (?:stated|disclosed|available|specified|documented)|no (?:figure|number|amount|target)|cannot be (?:read|determined)|unknown|undisclosed)/i;
+
 interface DetectedSignal {
   def: SignalDef;
   /** topic から実際に拾った文字列 */
   evidence: string;
 }
 
-/** topic から論点を拾う(拾えなかった論点は出さない) */
-function detectSignals(topic: string): DetectedSignal[] {
-  const out: DetectedSignal[] = [];
-  for (const def of SIGNAL_DEFS) {
-    for (const pattern of def.patterns) {
-      const m = pattern.exec(topic);
-      if (m && m[0].trim().length > 0) {
-        out.push({ def, evidence: clip(m[0], 24) });
-        break;
+/**
+ * topic から論点を拾う(拾えなかった論点は出さない)。
+ *
+ * **打ち消された節からは拾わない。** 文全体を正規表現で走査していたころは、
+ * 「投資額は…読み取れない」と書かれた topic から「金額が書かれている」を拾い、
+ * 存在しない数字を「冒頭に置くのはこれ」として出力の最も目立つ場所に据えていた。
+ * 相手が経営層のときに架空の金額を先に話させるので、実害が大きい。
+ */
+function detectSignals(topic: string): { signals: DetectedSignal[]; excluded: DetectedSignal[] } {
+  // 文単位で見る。読点で切ると「投資額は」と「読み取れない」が別の節になり、
+  // 打ち消しが主語に届かない。
+  const sentences = topic
+    .split(/(?<=[。．.!?！?])\s*|\n+/)
+    .map((x) => x.trim())
+    .filter((x) => x.length > 0);
+  const usable = (sentences.length > 0 ? sentences : [topic]).map((text) => {
+    // 「やらないと決まった」型の打ち消し(consult と同じ語彙)
+    const clauses = splitSituationClauses(text);
+    const decided = clauses.some((c) => c.negated || c.hedged);
+    return { text, negated: decided || ABSENT_RE.test(text) };
+  });
+  const positive = usable.filter((c) => !c.negated);
+  const dropped = usable.filter((c) => c.negated);
+
+  const pick = (texts: string[]): DetectedSignal[] => {
+    const out: DetectedSignal[] = [];
+    for (const def of SIGNAL_DEFS) {
+      let hit: DetectedSignal | undefined;
+      for (const text of texts) {
+        for (const pattern of def.patterns) {
+          pattern.lastIndex = 0;
+          const m = pattern.exec(text);
+          if (m && m[0].trim().length > 0) {
+            hit = { def, evidence: clip(m[0], 24) };
+            break;
+          }
+        }
+        if (hit) break;
       }
+      if (hit) out.push(hit);
     }
-  }
-  return out;
+    return out;
+  };
+
+  const signals = pick(positive.map((c) => c.text));
+  const kept = new Set(signals.map((s) => s.def.id));
+  // 打ち消された節にしか出てこなかった論点。「拾わなかった」と伝えるために残す。
+  const excluded = pick(dropped.map((c) => c.text)).filter((s) => !kept.has(s.def.id));
+  return { signals, excluded };
 }
 
 /** 話の重さ。同じ相手でも、重い話と軽い話では組み立てが違う */
@@ -4399,7 +4449,7 @@ export function registerGuideTools(server: McpServer): void {
         const profile = AUDIENCES[a];
         // 4 択をそのまま渡されたときは、生の enum 値ではなく型の名称で呼ぶ
         const whoLabel = who.exact ? one(profile.name, l) : who.label;
-        const signals = detectSignals(rawTopic);
+        const { signals, excluded: excludedSignals } = detectSignals(rawTopic);
         const weight = topicWeight(rawTopic, signals);
         const engagement = loadEngagement();
         const hits = searchKnowledge(rawTopic, { limit: 3 });
