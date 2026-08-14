@@ -36,14 +36,31 @@ import {
 } from '../knowledge/index.js';
 import {
   SITUATION_AXIS_LABELS,
+  factAdvice,
   rankByRelevance,
   readSituation,
   situationAdvice,
   type SituationAxis,
+  type SituationContext,
+  type SituationFact,
   type SituationReading,
 } from '../knowledge/consulting.js';
 import { loadEngagement } from '../engagement/store.js';
+import type { Engagement } from '../engagement/model.js';
 import { errorResult, langSchema, msg, textResult } from './common.js';
+import {
+  checkFreeText,
+  echoInput,
+  freeTextSchema,
+  HINTS,
+  IDENTIFIER_LIMIT,
+} from './input-limits.js';
+
+/**
+ * 案件から状況として読み込むテキストの上限。
+ * 案件の説明が長くても、相談文の読み取りを押し流さないようにする。
+ */
+const CONTEXT_MAX = 4_000;
 
 function uniq<T>(values: T[]): T[] {
   return Array.from(new Set(values));
@@ -245,6 +262,59 @@ function industrySection(
   return { lines, questions };
 }
 
+/**
+ * 案件に登録済みの情報を「状況」として読めるテキストにまとめる。
+ *
+ * これまで consult は `currentPhaseId` しか見ておらず、案件の description / scope /
+ * リスク / アクションの期限を一度も読んでいなかった。案件側に
+ * 「9 月 18 日の経営会議」「予算は 5 億円が上限」と書いてあっても助言に出てこない、
+ * という報告の直接の原因がこれ。
+ *
+ * ルールの一致(見立て)には混ぜない。今聞かれていることが案件の説明で薄まると、
+ * 相談に対する答えではなくなる。条件・数値・並べ替えにだけ効かせる。
+ */
+function engagementContext(engagement: Engagement | null): SituationContext | undefined {
+  if (!engagement) return undefined;
+  const parts: string[] = [];
+  if (engagement.description) parts.push(engagement.description);
+  if (engagement.scope) parts.push(engagement.scope);
+  for (const r of engagement.risks
+    .filter((risk) => risk.status === 'open' || risk.status === 'mitigating')
+    .slice(0, 5)) {
+    parts.push(r.description ? `${r.title}: ${r.description}` : r.title);
+  }
+  const dated = engagement.actions
+    .filter(
+      (a): a is typeof a & { due: string } =>
+        a.status !== 'done' && typeof a.due === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(a.due),
+    )
+    .sort((a, b) => (a.due < b.due ? -1 : 1))
+    .slice(0, 5);
+  // 「due」は期日の手がかりとして日英どちらの読み取りにも効く語なので、そのまま添える
+  for (const a of dated) parts.push(`${a.title} (due ${a.due})`);
+  const text = parts.join('。').slice(0, CONTEXT_MAX);
+  if (text.trim().length < 3) return undefined;
+  return {
+    text,
+    label: {
+      ja: `案件「${engagement.name}」に登録済みの内容`,
+      en: `recorded on engagement "${engagement.name}"`,
+    },
+  };
+}
+
+/** 事実 1 件を表の 1 行にする */
+function factRow(fact: SituationFact, l: Lang): string {
+  const quoted = l === 'en' ? `"${cell(fact.evidence)}"` : `「${cell(fact.evidence)}」`;
+  const evidence = [quoted, cell(quoteClause(fact.clause, 40))]
+    .filter((v) => v.length > 0)
+    .join(' — ');
+  const source = fact.sourceLabel
+    ? ` (${cell(text(fact.sourceLabel, l === 'both' ? 'ja' : l))})`
+    : '';
+  return `| ${cell(text(fact.topic, l === 'both' ? 'ja' : l))} | ${cell(text(fact.label, l))} | ${evidence}${source} |`;
+}
+
 export function registerConsultTool(server: McpServer): void {
   server.registerTool(
     'consult',
@@ -253,32 +323,44 @@ export function registerConsultTool(server: McpServer): void {
       description:
         'アーキテクチャ上の状況を自由記述で渡すと、TOGAF ADM の観点で「見立て・着目すべきフェーズ・推奨技法・作るべき成果物・推奨アクション・ステークホルダーへの確認質問」を返す。予算・期限・経営の関与・体制などの条件を本文から読み取り、助言の中身を条件に合わせて変える。「やらないことに決まった」話題は見立てから外す。 / Describe a situation in free text and get a TOGAF-based read: diagnosis, relevant ADM phases, techniques, deliverables, actions, and questions to ask. Constraints stated in the text — budget, deadline, executive engagement, staffing — change what is recommended, and topics you say are off the table are excluded.',
       inputSchema: {
-        situation: z
-          .string()
-          .min(3)
-          .describe(
-            '状況の自由記述(日本語/英語どちらでも可)。予算・期限・体制・経営の関与など、制約も一緒に書くほど助言が具体的になる / Free-text description of the situation. The more constraints you state — budget, deadline, staffing, executive engagement — the more specific the guidance.',
-          ),
-        currentPhase: z
-          .string()
-          .optional()
-          .describe('現在の ADM フェーズ ID(任意) / Current ADM phase id, if any'),
-        industry: z
-          .string()
-          .optional()
-          .describe('業界(任意)。対応業界なら見立てと質問に反映する / Industry, if relevant. Supported industries change the read and the questions.'),
+        situation: freeTextSchema(
+          '状況の自由記述(日本語/英語どちらでも可)。予算・期限・体制・経営の関与など、制約も一緒に書くほど助言が具体的になる / Free-text description of the situation. The more constraints you state — budget, deadline, staffing, executive engagement — the more specific the guidance.',
+        ).min(3),
+        currentPhase: freeTextSchema(
+          '現在の ADM フェーズ ID(任意) / Current ADM phase id, if any',
+          IDENTIFIER_LIMIT,
+        ).optional(),
+        industry: freeTextSchema(
+          '業界(任意)。対応業界なら見立てと質問に反映する / Industry, if relevant. Supported industries change the read and the questions.',
+          IDENTIFIER_LIMIT,
+        ).optional(),
         lang: langSchema,
       },
     },
     async ({ situation, currentPhase, industry, lang }) => {
       try {
         const l = lang as Lang;
+        // 助言系にも上限を効かせる。ここを通す前に走査すると、入力の長さがそのまま
+        // 応答の長さになる(実測: 30 万字 → 99 万バイト)。
+        const tooLong = checkFreeText(
+          [
+            { field: 'situation', value: situation, hint: HINTS.situation },
+            { field: 'currentPhase', value: currentPhase, limit: IDENTIFIER_LIMIT, hint: HINTS.identifier },
+            { field: 'industry', value: industry, limit: IDENTIFIER_LIMIT, hint: HINTS.identifier },
+          ],
+          l,
+        );
+        if (tooLong) return tooLong;
+
         const engagement = loadEngagement();
         const phaseHint = currentPhase ?? engagement?.currentPhaseId;
         const resolvedPhase = phaseHint ? findPhase(phaseHint) : undefined;
 
-        // --- 1. 状況を読む(打ち消し・条件・内容語) ---
-        const reading = readSituation(situation);
+        // --- 1. 状況を読む(打ち消し・条件・数値・案件に登録済みの内容) ---
+        const engagementInput = engagementContext(engagement);
+        const reading = readSituation(situation, engagementInput);
+        const facts = reading.facts;
+        const numberAdvice = factAdvice(facts);
         const searchText = reading.positiveText.length >= 3 ? reading.positiveText : situation;
         const matches = matchConsultRules(searchText, resolvedPhase?.id);
         const excluded: RuleMatch[] =
@@ -293,7 +375,8 @@ export function registerConsultTool(server: McpServer): void {
         const out: string[] = [];
         out.push(msg('# TOGAF ベースの見立て', '# TOGAF-Based Assessment', l));
         out.push('');
-        out.push(`> ${cell(situation)}`);
+        // 全文エコーはしない。長い状況説明をそのまま返すと応答が入力より大きくなる。
+        for (const line of echoInput(situation, l).split('\n')) out.push(`> ${cell(line)}`);
 
         const context: string[] = [];
         if (resolvedPhase) {
@@ -322,7 +405,15 @@ export function registerConsultTool(server: McpServer): void {
           );
         }
         if (engagement) {
-          context.push(msg(`案件: ${engagement.name}`, `Engagement: ${engagement.name}`, l));
+          context.push(
+            engagementInput
+              ? msg(
+                  `案件: ${engagement.name}(説明・スコープ・登録済みの期限も一緒に読みました)`,
+                  `Engagement: ${engagement.name} (its description, scope, and recorded due dates were read too)`,
+                  l,
+                )
+              : msg(`案件: ${engagement.name}`, `Engagement: ${engagement.name}`, l),
+          );
         }
         if (context.length > 0) {
           out.push('');
@@ -333,22 +424,43 @@ export function registerConsultTool(server: McpServer): void {
         // --- 2. 読み取った状況 ---
         out.push(msg('## 読み取った状況', '## What I Read From Your Description', l));
         out.push('');
-        if (reading.conditions.length > 0) {
+        if (reading.conditions.length > 0 || facts.length > 0) {
           out.push(
             msg(
-              '| 観点 | 読み取り | 根拠にした語 |',
-              '| Aspect | Read | Evidence in your text |',
+              '| 観点 | 読み取り | 根拠にした表現 |',
+              '| Aspect | Read | Wording it came from |',
               l === 'both' ? 'ja' : l,
             ),
           );
           out.push('| --- | --- | --- |');
+          // 数値から読んだものを先に出す。金額・日付・人数は形容詞より具体的に効く
+          for (const f of facts) out.push(factRow(f, l));
           for (const d of reading.conditions) {
             const axis = SITUATION_AXIS_LABELS[d.condition.axis];
+            const source = d.sourceLabel
+              ? ` (${cell(text(d.sourceLabel, l === 'both' ? 'ja' : l))})`
+              : d.from === 'number'
+                ? msg(' (上の数値から)', ' (derived from the number above)', l === 'both' ? 'ja' : l)
+                : '';
             out.push(
-              `| ${cell(text(axis, l === 'both' ? 'ja' : l))} | ${cell(text(d.condition.label, l))} | ${cell(d.cues.slice(0, 3).join(', '))} |`,
+              `| ${cell(text(axis, l === 'both' ? 'ja' : l))} | ${cell(text(d.condition.label, l))} | ${cell(d.cues.slice(0, 3).join(', '))}${source} |`,
             );
           }
           out.push('');
+          const assumptions = facts.filter((f) => f.assumption);
+          if (assumptions.length > 0) {
+            for (const f of assumptions) {
+              if (!f.assumption) continue;
+              out.push(
+                bulletPair(
+                  `補った前提: ${f.assumption.ja}`,
+                  `Assumption filled in: ${f.assumption.en}`,
+                  l,
+                ),
+              );
+            }
+            out.push('');
+          }
           out.push(
             msg(
               '以下の助言は、この読み取りに合わせて内容を変えています。読み取りが違っていれば、その旨を書いてもう一度呼んでください。',
@@ -357,10 +469,12 @@ export function registerConsultTool(server: McpServer): void {
             ),
           );
         } else {
+          // 「書かれていなかった」と断定しない。利用者が書いたことを「書いていない」と
+          // 言うのが一番の害になる(読み落としはこちら側の問題)。
           out.push(
             msg(
-              '予算・期限・体制・経営の関与といった条件は文中に書かれていなかったので、決めつけずに一般的な助言にしています。',
-              'Your description does not state constraints such as budget, deadline, staffing, or executive engagement, so the guidance below stays general rather than assuming any of them.',
+              '予算・期限・体制・経営の関与といった条件を、この文面からはこちらで読み取れませんでした(書かれていないと決めつけているわけではありません。書かれているのに拾えていないなら、こちらの読み落としです)。そのため以下は一般的な助言にしています。金額・日付・人数のように数字で書いていただけると、そのまま助言に反映します。',
+              'I could not pick up constraints such as budget, deadline, staffing, or executive engagement from this text — that is not a claim that you did not state them; if you did, the miss is on my side. The guidance below therefore stays general. Stating them as numbers — an amount, a date, a headcount — gets them straight into the advice.',
               l,
             ),
           );
@@ -371,8 +485,8 @@ export function registerConsultTool(server: McpServer): void {
           out.push('');
           out.push(
             msg(
-              `*記述が無いため判断していない観点: ${cell(jaNames)}。ここを書き足すと助言が変わります。*`,
-              `*Not judged, because your text says nothing about them: ${cell(enNames)}. Adding any of these changes the guidance.*`,
+              `*こちらでは読み取れなかった観点: ${cell(jaNames)}。書かれているのにここに並んでいる場合は、こちらの読み落としです — 表現を変えて書き足していただければ助言が変わります。*`,
+              `*Aspects I could not pick up: ${cell(enNames)}. If you did state any of them, that is a miss on my side — restate it in other words and the guidance changes.*`,
               l,
             ),
           );
@@ -451,6 +565,18 @@ export function registerConsultTool(server: McpServer): void {
             out.push(msg(`### ${base.code} の観点から`, `### From the perspective of Phase ${base.code}`, l));
             out.push('');
             out.push(bullets(base.steps, l));
+            out.push('');
+          }
+          if (numberAdvice.length > 0) {
+            out.push(
+              msg(
+                '### 読み取った数値から言えること',
+                '### What the numbers you gave already imply',
+                l,
+              ),
+            );
+            out.push('');
+            out.push(bullets(numberAdvice, l));
             out.push('');
           }
           if (advice.actions.length > 0) {
@@ -615,6 +741,18 @@ export function registerConsultTool(server: McpServer): void {
         // --- 8. 推奨アクション ---
         out.push(msg('## 推奨アクション', '## Recommended Actions', l));
         out.push('');
+        if (numberAdvice.length > 0) {
+          out.push(
+            msg(
+              '**書かれていた数値に対して(金額・日付・人数から直接言えること)**',
+              '**Against the numbers you stated (straight from the amount, date, and headcount)**',
+              l,
+            ),
+          );
+          out.push('');
+          out.push(bullets(numberAdvice, l));
+          out.push('');
+        }
         if (advice.actions.length > 0) {
           out.push(
             msg(
@@ -696,7 +834,7 @@ export function registerConsultTool(server: McpServer): void {
         // --- 10. 次の一手 ---
         out.push(msg('## 次の一手', '## Next Step', l));
         out.push('');
-        const firstAction = advice.actions[0] ?? ruleActions[0];
+        const firstAction = numberAdvice[0] ?? advice.actions[0] ?? ruleActions[0];
         if (firstAction) {
           out.push(
             msg(
@@ -728,9 +866,11 @@ export function registerConsultTool(server: McpServer): void {
 
         return textResult(out.join('\n'));
       } catch (error) {
+        // 例外の文面には入力の断片が入り得る(正規表現エラーは対象文をそのまま載せる)。
+        // そのまま返すと、失敗応答が入力より大きくなる。短く切ってから返す。
         const detail = error instanceof Error ? error.message : String(error);
         return errorResult(
-          `consult の実行に失敗しました / consult failed: ${detail.replace(/\r?\n/g, ' ')}`,
+          `consult の実行に失敗しました / consult failed: ${quoteClause(detail, 200)}`,
         );
       }
     },

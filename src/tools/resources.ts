@@ -27,6 +27,7 @@ import {
 import { renderDeliverable, renderPhase, renderTechnique } from './format.js';
 import { renderDashboardMarkdown } from '../dashboard/markdown.js';
 import { loadEngagement } from '../engagement/store.js';
+import { capInline } from './input-limits.js';
 
 /** リソースは常に日英併記で返す(クライアント側で言語指定ができないため) */
 const LANG: Lang = 'both';
@@ -107,7 +108,8 @@ function code(value: string): string {
 
 /** 該当 ID が無いときに返す Markdown(例外は投げない) */
 function notFoundMarkdown(kind: Bilingual, requested: string, ids: string[]): string {
-  const asked = code(requested);
+  // URI から来た値をそのまま返さない(長い値の全文エコー防止)
+  const asked = code(capInline(requested));
   const lines: string[] = [];
   lines.push(`# ${h(R.notFoundTitle)}`);
   lines.push('');

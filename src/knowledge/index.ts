@@ -95,13 +95,24 @@ function escapeRegExp(s: string): string {
 }
 
 /**
+ * 正規表現に埋め込んでよいキーワードの長さ。
+ *
+ * 利用者の入力から作った語がそのままキーワードになる経路があり、
+ * 極端に長い 1 トークン(例: 'a' を 10 万回)を渡すと
+ * `new RegExp` が "Invalid regular expression" を投げてツールが失敗していた。
+ * 知識ベース側のキーワードはすべてこの長さに収まるので、
+ * 超えるものは正規表現を使わず素の部分一致で判定する。
+ */
+const MAX_REGEX_KEYWORD_LENGTH = 200;
+
+/**
  * キーワードが対象文に含まれるか。
  * ASCII キーワードは単語境界で、日本語キーワードは部分一致で判定する。
  */
 export function matchesKeyword(haystackLower: string, keyword: string): boolean {
   const k = keyword.trim().toLowerCase();
   if (k.length === 0) return false;
-  if (isAscii(k)) {
+  if (isAscii(k) && k.length <= MAX_REGEX_KEYWORD_LENGTH) {
     const re = new RegExp(`(^|[^a-z0-9])${escapeRegExp(k)}($|[^a-z0-9])`, 'i');
     return re.test(haystackLower);
   }

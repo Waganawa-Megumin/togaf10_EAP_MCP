@@ -44,6 +44,15 @@ import {
 } from '../dashboard/labels.js';
 import { errorResult, langSchema, msg, textResult, type ToolResult } from './common.js';
 import { checkText, checkTextList, limitErrorResult, runChecks } from './engagement.js';
+import {
+  checkFreeText,
+  findTooManyItems,
+  freeTextSchema,
+  HINTS,
+  IDENTIFIER_LIMIT,
+  MAX_ITEMS,
+  tooManyItemsResult,
+} from './input-limits.js';
 
 // ---------------------------------------------------------------------------
 // 共通ヘルパ / Shared helpers
@@ -61,6 +70,15 @@ function inline(ja: string, en: string, lang: Lang): string {
 function cell(value: string | undefined): string {
   if (!value) return '';
   return value.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
+}
+
+/**
+ * 表・一覧に要素名を出すときの整形。
+ * 利用者の入力をそのまま何度も並べると、出力が入力より大きくなる(実測: 入力 60KB → 出力 155KB)。
+ * 表示は 120 文字で切り、`…(+N)` で切ったことを明示する(照合には元の名前を使う)。
+ */
+function elementCell(value: string): string {
+  return cell(capCell(value, 120));
 }
 
 /** 0〜scale の値を █░ のバーで表す */
@@ -353,6 +371,13 @@ interface WorkPackageProposal {
 /** 1 回の出力に載せる提案の上限(これを超えると読めなくなるため打ち切る) */
 const PROPOSAL_MAX = 10;
 
+/**
+ * 準備度評価が出すリスク登録用 JSON に載せる件数の上限。
+ * 以前は「N 件あります」と書いたあとに 3 件しか出さず、抜粋であることも書いていなかった。
+ * 原則は全件。ここで切る場合は、切ったことと残りの入れ方を必ず本文に書く。
+ */
+const RISK_JSON_MAX = 10;
+
 /** 要素 1 つの行き先(1 要素 = 1 分類。維持 / 新設 / 廃止 を混ぜないための単位) */
 interface ClassifiedGapElement {
   kind: 'new' | 'eliminated' | MappingKind;
@@ -404,6 +429,38 @@ function classifyGapElements(
 
 function runGapAnalysis(input: GapAnalysisInput): ToolResult {
   const lang = input.lang as Lang;
+
+  // 助言層の上限。ここを通すと、要素名の長さがそのまま出力の長さになる
+  // (実測: 1 要素 30 万字 → 495 万バイト)。
+  const tooMany =
+    findTooManyItems('baseline', input.baseline) ??
+    findTooManyItems('target', input.target) ??
+    findTooManyItems('mappings', input.mappings);
+  if (tooMany) return tooManyItemsResult(tooMany, lang);
+  const tooLong = checkFreeText(
+    [
+      ...(input.baseline ?? []).map((v, i) => ({
+        field: `baseline[${i}]`,
+        value: v,
+        limit: IDENTIFIER_LIMIT,
+        hint: HINTS.listItem,
+      })),
+      ...(input.target ?? []).map((v, i) => ({
+        field: `target[${i}]`,
+        value: v,
+        limit: IDENTIFIER_LIMIT,
+        hint: HINTS.listItem,
+      })),
+      ...(input.mappings ?? []).flatMap((m, i) => [
+        { field: `mappings[${i}].from`, value: m.from, limit: IDENTIFIER_LIMIT, hint: HINTS.listItem },
+        { field: `mappings[${i}].to`, value: m.to, limit: IDENTIFIER_LIMIT, hint: HINTS.listItem },
+      ]),
+      { field: 'domain', value: input.domain, limit: IDENTIFIER_LIMIT, hint: HINTS.identifier },
+    ],
+    lang,
+  );
+  if (tooLong) return tooLong;
+
   const baseline = uniqueNames(input.baseline);
   const target = uniqueNames(input.target);
 
@@ -539,13 +596,13 @@ function runGapAnalysis(input: GapAnalysisInput): ToolResult {
   } else {
     const header = [
       `${inline('現行 \\ 目標', 'Baseline \\ Target', lang)}`,
-      ...target.map((t) => cell(t)),
+      ...target.map((t) => elementCell(t)),
       inline('廃止 (Eliminated)', 'Eliminated', lang),
     ];
     out.push(`| ${header.join(' | ')} |`);
     out.push(`| --- |${target.map(() => ' :-: |').join('')} :-: |`);
     for (let i = 0; i < baseline.length; i += 1) {
-      const row: string[] = [cell(baseline[i])];
+      const row: string[] = [elementCell(baseline[i])];
       for (let j = 0; j < target.length; j += 1) {
         const m = resolved.find((r) => r.fromIndex === i && r.toIndex === j);
         row.push(m ? MAPPING_MARK[m.kind] : '');
@@ -619,7 +676,7 @@ function runGapAnalysis(input: GapAnalysisInput): ToolResult {
   ];
   for (const row of summaryRows) {
     const names = namesOf(row.kind);
-    const shown = names.slice(0, 8).map((n) => cell(n)).join(', ');
+    const shown = names.slice(0, 8).map((n) => elementCell(n)).join(', ');
     const rest = names.length > 8 ? ` (+${names.length - 8})` : '';
     out.push(
       `| ${text(GAP_KIND_TITLE[row.kind], lang)} | ${names.length} | ${shown || '—'}${rest} | ${text(row.meaning, lang)} |`,
@@ -671,7 +728,7 @@ function runGapAnalysis(input: GapAnalysisInput): ToolResult {
     out.push('| --- | --- | --- |');
     for (const row of gapRows) {
       out.push(
-        `| ${text(GAP_KIND_TITLE[row.kind], lang)} | ${cell(row.subject)} | ${cell(text(GAP_ACTION[row.kind], lang))} |`,
+        `| ${text(GAP_KIND_TITLE[row.kind], lang)} | ${elementCell(row.subject)} | ${cell(text(GAP_ACTION[row.kind], lang))} |`,
       );
     }
     out.push('');
@@ -679,7 +736,7 @@ function runGapAnalysis(input: GapAnalysisInput): ToolResult {
 
   if (retainedCount > 0) {
     out.push(
-      `${inline('維持される要素', 'Retained elements', lang)}: ${namesOf('retained').map((n) => cell(n)).join(', ')}`,
+      `${inline('維持される要素', 'Retained elements', lang)}: ${namesOf('retained').map((n) => elementCell(n)).join(', ')}`,
     );
     out.push('');
     out.push(
@@ -1440,19 +1497,40 @@ const CONFLICT_AXES: ConflictAxis[] = [
       {
         label: { ja: '早く出したい(速さ優先)', en: 'Wants an answer fast' },
         keywords: [
-          '早く', '早期', '迅速', 'スピード', '即答', '即日', 'その場で', '遅い', '遅く', '遅れ',
-          '待たされ', '待てない', 'リードタイム', '短縮', '失注', '機会損失', 'タイムリー',
-          'fast', 'faster', 'speed', 'quick', 'quickly', 'immediately', 'same-day', 'turnaround',
-          'delay', 'delays', 'slow', 'lead time', 'lose the deal', 'lost deals', 'responsive',
+          // 軸名そのものの語も入れる(「速さを取る」と書く人が居る)
+          '速さ', '速度', 'スピード',
+          '早く', '早期', '迅速', '即答', '即日', '当日', 'その場で', '今すぐ', 'すぐに回答',
+          '遅い', '遅く', '遅れ', '時間がかかる', '待たされ', '待たせ', '待てない', '待ち時間',
+          'リードタイム', '短縮', '失注', '取り逃', '機会損失', 'タイムリー', '間に合わ~ない',
+          // 議事メモで実際に出る言い回し(辞書語に書き直させないための追加)
+          'その日のうち', '当日中', '翌日には', '返事が遅', '回答が遅', '回答に~かかる',
+          '日~かかる', '週間~かかる', '時間~かかりすぎ', 'かかりすぎ', '先延ばし',
+          '商談が流れ', '他社に取ら', '他社に流れ', '他社に持って', '競合に取ら', '競合に流れ',
+          '競合に持って', '後手に回',
+          'fast', 'faster', 'speed', 'quick', 'immediately', 'same-day', 'turnaround', 'urgency',
+          'delay', 'slow', 'lead time', 'lose the deal', 'lost deals', 'responsive', 'waiting',
+          'right away', 'on the spot', 'time to market',
+          'takes too long', 'too long to', 'same day', 'within the day', 'competitor wins',
+          'lose to a competitor', 'go elsewhere',
         ],
       },
       {
         label: { ja: '確定してから出したい(確実さ優先)', en: 'Wants it confirmed before it goes out' },
         keywords: [
+          '確実', '確実さ', '確度',
           '正確', '精度', '確定してから', '確定した', '裏付け', '根拠を', '検証してから', '承認を経て',
-          '手戻り', 'ミス', '誤り', '間違い', '勝手に約束', '実現可能性', '守れない', '無理な約束', '確約',
-          'accuracy', 'accurate', 'precise', 'confirmed', 'verified', 'validated', 'double-check',
-          'rework', 'errors', 'mistake', 'feasibility', 'realistic', 'over-promise', 'overpromise',
+          '手戻り', 'ミス', '誤り', '間違い', '実現可能性', '守れない', '無理な約束', '確約',
+          // 「営業が勝手に納期を約束する」のように間に語が入る言い方に当てる
+          '勝手に~約束', '勝手に~決め', '勝手に~回答', '独断で', '安請け合い', '責任が持て~ない',
+          // 「確認せずに出す」は否定形だが、書いた本人は確実さを求めている。
+          // 否定の抑止に引っかからないよう、否定を含んだ形をそのまま判定語にする。
+          '確認せず', '確認もせず', '確認しないまま', '確認を取らず', '確認を取らないまま',
+          '裏取り', '裏取りをせず', '裏を取らず', '検証せず', '精査せず', '精査',
+          '未確認', '見込みで', '曖昧なまま', 'ダブルチェック', '出図~やめ', '手順を省',
+          'accuracy', 'accurate', 'precise', 'confirm', 'certainty', 'verified', 'validated',
+          'double-check', 'rework', 'error', 'mistake', 'feasibility', 'realistic', 'over-promise',
+          'overpromise', 'sign-off', 'signed off',
+          'without checking', 'unchecked', 'unverified', 'cross-check', 'due diligence',
         ],
       },
     ],
@@ -1476,19 +1554,36 @@ const CONFLICT_AXES: ConflictAxis[] = [
       {
         label: { ja: '標準に合わせる側', en: 'Wants to conform to the standard' },
         keywords: [
-          '標準', '標準化', '統一', '共通化', 'パッケージ', 'ノンカスタマイズ', '集約', '一元', '全社',
-          '統合', '業務を変える', '業務プロセスを変える', 'あるべき姿に合わせ', 'fit to standard',
-          'standard', 'standardize', 'standardise', 'package', 'out-of-the-box', 'consolidate',
-          'consolidation', 'single instance', 'company-wide', 'harmonize', 'harmonise', 'centralize', 'centralise',
+          '標準', '標準化', '全社最適', '統一', '共通化', 'パッケージ', 'ノンカスタマイズ', '集約',
+          '一元', '全社', '統合', 'グループ標準', 'グローバル標準', '横串', 'ばらつき',
+          '業務を変える', '業務プロセスを変える', 'あるべき姿に合わせ',
+          // 「標準」という語を使わずに標準化を言う人が多いので、その言い回しも入れる
+          '同じやり方', '一つのやり方', '同一のやり方', 'グループ全体', '全体で統一', '全体で揃え',
+          '足並みを揃え', 'ひな形', 'テンプレート', '逸脱', '例外は認め~ない', '横並び',
+          // `standard` は語幹で照合するので standardization / standardised / standards にも当たる
+          'standard', 'fit to standard', 'package', 'out-of-the-box', 'consolidate',
+          'single instance', 'company-wide', 'group-wide', 'harmonize', 'centralize',
+          'one way of working', 'common process',
+          'common template', 'one template', 'single template', 'common model',
+          'group blueprint', 'uniform', 'every site', 'every plant',
+          'all subsidiaries', 'across all sites', 'across all plants', 'roll out one',
         ],
       },
       {
         label: { ja: '現場のやり方を守る側', en: 'Wants to protect how the work is done today' },
         keywords: [
-          '現場', '個別対応', '独自', '例外', '特例', 'カスタマイズ', 'アドオン', '裁量', '部門ごと',
-          '拠点ごと', '現行踏襲', '今のやり方', '変更に反対', '反対', '負担が増える', '混乱',
-          'local', 'on-site', 'exception', 'exceptions', 'customization', 'customisation', 'add-on',
-          'discretion', 'per-site', 'as-is', 'resist', 'resistance', 'disruption', 'burden', 'retraining',
+          // 裸の「現場」は「営業が現場に確認せずに」のような無関係な文にも当たるので入れない。
+          // 現場側の立場を表す形にしてから入れる。
+          '現場裁量', '現場のやり方', '現場の事情', '現場の実情', '現場の負担', '現場が混乱',
+          '現場から反発', '現場が回ら~ない', '現場ごと',
+          '個別最適', '個別対応', '独自', '例外', '特例', 'カスタマイズ', 'アドオン',
+          '裁量', '部門ごと', '拠点ごと', '工場ごと', '部署ごと', '現行踏襲', '今のやり方', 'うちのやり方',
+          '特殊事情', '事情が違う', '変更に反対', '反対', '負担が増える', '混乱',
+          'local', 'autonomy', 'on-site', 'exception', 'customization', 'add-on', 'discretion',
+          'per-site', 'site-specific', 'as-is', 'resist', 'disruption', 'burden', 'retraining',
+          'our own way', 'special case', 'each plant', 'each site',
+          'carve out', 'carve-out', 'its own way', 'own way of working', 'opt out',
+          'waiver', 'not fit', 'does not cover', 'not cover', 'our site', 'this site only',
         ],
       },
     ],
@@ -1512,16 +1607,33 @@ const CONFLICT_AXES: ConflictAxis[] = [
       {
         label: { ja: '費用を抑えたい側', en: 'Wants the spend down' },
         keywords: [
-          'コスト', '費用', '予算', '削減', '安く', '低コスト', '投資対効果', '価格', '経費', '人員削減',
-          'roi', 'cost', 'costs', 'budget', 'cheaper', 'savings', 'reduce spend', 'headcount',
+          'コスト', 'コスト削減', '費用', '費用削減', '経費削減', '予算', '削減', '安く', '低コスト',
+          '投資対効果', '費用対効果', '価格', '経費', '人員削減', '採算', '原価',
+          // 金額の上限を口にするのは「費用を抑えたい側」の典型(例: 年5億円を超える案は承認しない)
+          '億円', '億を', '万円', '上限', '超える案', '承認しない', '決裁', '抑え', '圧縮', '増やせない',
+          // 「決裁しません」は否定の抑止に消されるので、否定を含んだ形をそのまま判定語にする
+          '決裁しません', '決裁しない', '決裁でき~ない', '承認しません', '通しません', '通りません',
+          '出せません', '追加は出せ~ない', '認められません', '据え置き', '予算枠', 'これ以上は',
+          '身の丈', '身銭',
+          'roi', 'cost', 'budget', 'cheap', 'cheaper', 'saving', 'reduce spend', 'spend', 'headcount',
+          'capex', 'opex', 'affordable', 'price tag',
+          'will not fund', 'cannot fund', 'not approve', 'sign the cheque', 'business case',
+          'value for money', 'cap the spend',
         ],
       },
       {
         label: { ja: '品質・可用性を守りたい側', en: 'Wants quality and availability protected' },
         keywords: [
-          '品質', '可用性', '性能', 'レスポンス', '信頼性', '冗長', '止まらない', '止められない', '障害',
-          '安定稼働', '保守性', '網羅', 'sla', 'quality', 'availability', 'performance', 'reliability',
-          'redundancy', 'uptime', 'downtime', 'outage', 'robust',
+          '品質', '可用性', '性能', 'レスポンス', '信頼性', '冗長', '障害', '安定稼働', '保守性', '網羅',
+          // 「1 日たりとも止めたくない」のように間に語が入る言い方に当てる
+          '止め~ない', '止まら~ない', '停止~できない', 'ライン停止', '稼働率', '歩留まり', '不良', 'クレーム',
+          // 「停める」「止まります」「落ちたら」など、辞書語に書き直させないための追加
+          '停め', '停ま', '停止', '止まる', '止まり', '止まっ',
+          'システムが落ち', '設備が落ち', 'サーバが落ち', 'サーバーが落ち', '落ちたら', '落ちると',
+          '復旧', '欠品',
+          'sla', 'quality', 'availability', 'performance', 'reliability', 'redundancy', 'uptime',
+          'downtime', 'outage', 'robust', 'stability', 'defect', 'service level',
+          'recovery time', 'mean time',
         ],
       },
     ],
@@ -1545,15 +1657,18 @@ const CONFLICT_AXES: ConflictAxis[] = [
       {
         label: { ja: '今期の成果を出したい側', en: 'Wants results this period' },
         keywords: [
-          '今期', '今年度', '早期に成果', '短期', 'すぐに', '当面', 'クイックウィン', '目先',
-          'this quarter', 'this fiscal', 'short term', 'short-term', 'quick win', 'quick wins', 'asap',
+          '短期', '短期の成果', '今期', '今年度', '年度内', '早期に成果', 'すぐに', '当面',
+          'クイックウィン', '目先', '目に見える成果',
+          'this quarter', 'this fiscal', 'this year', 'short term', 'quick win', 'asap',
         ],
       },
       {
         label: { ja: '長く使える形にしたい側', en: 'Wants something that lasts' },
         keywords: [
-          '長期', '中長期', '将来', '持続', '技術的負債', '拡張性', '作り直し', '土台', '次の10年',
-          'long term', 'long-term', 'sustainable', 'technical debt', 'scalability', 'maintainability', 'foundation',
+          '長期', '中長期', '持続性', '将来', '持続', '技術的負債', '拡張性', '作り直し', '土台',
+          '次の10年', '長く使える', '将来的に',
+          'long term', 'sustainable', 'sustainability', 'technical debt', 'scalability',
+          'maintainability', 'foundation', 'future-proof', 'long run',
         ],
       },
     ],
@@ -1578,16 +1693,20 @@ const CONFLICT_AXES: ConflictAxis[] = [
         label: { ja: '統制を効かせたい側', en: 'Wants control enforced' },
         keywords: [
           'セキュリティ', '統制', '内部統制', '監査', '規制', 'コンプライアンス', '法令', '権限管理',
-          '承認フロー', 'ガバナンス', '個人情報', '情報漏えい', '情報漏洩', '証跡',
-          'security', 'audit', 'compliance', 'regulation', 'regulatory', 'governance', 'privacy', 'traceability',
+          '承認フロー', 'ガバナンス', '個人情報', '情報漏えい', '情報漏洩', '漏えい', '証跡',
+          '不正', '権限', '認証', 'ログを残',
+          'security', 'audit', 'compliance', 'regulation', 'regulatory', 'governance', 'privacy',
+          'traceability', 'access control', 'least privilege', 'audit trail', 'accountability',
         ],
       },
       {
         label: { ja: '現場の使いやすさを守りたい側', en: 'Wants day-to-day usability protected' },
         keywords: [
-          '使いやすさ', '利便性', '手間', '煩雑', '面倒', '制約が多い', '自由に', '業務が止まる',
-          'ハードルが高い', '申請が多い', 'usability', 'convenience', 'friction', 'cumbersome',
-          'red tape', 'self-service', 'too many steps',
+          '使いやすさ', '使いにくい', '利便性', '手間', '二度手間', '煩雑', '面倒', '制約が多い',
+          '自由に', '業務が止まる', 'ハードルが高い', '申請が多い', '手続きが多い', '入力が増える',
+          '現場が回ら~ない',
+          'usability', 'convenience', 'friction', 'cumbersome', 'red tape', 'self-service',
+          'too many steps', 'user experience', 'slows people down',
         ],
       },
     ],
@@ -1611,15 +1730,19 @@ const CONFLICT_AXES: ConflictAxis[] = [
       {
         label: { ja: '一気に変えたい側', en: 'Wants to change it in one go' },
         keywords: [
-          '一気に', 'ビッグバン', '全面刷新', '抜本的', '一斉', 'スクラップ',
-          'big bang', 'all at once', 'radical', 'overhaul', 'rip and replace',
+          '一気に', '一気に変え', 'ビッグバン', '全面刷新', '刷新', '抜本的', '一斉', '一括で',
+          'スクラップ', '一度に~切り替え',
+          'big bang', 'all at once', 'radical', 'overhaul', 'rip and replace', 'single cutover',
         ],
       },
       {
         label: { ja: '現行業務の継続を守りたい側', en: 'Wants continuity of the running business' },
         keywords: [
-          '段階的', '小さく', '並行稼働', '現行を止められない', '業務を止められない', '繁忙期', 'リスクを抑え',
-          'incremental', 'phased', 'step by step', 'parallel run', 'cannot stop', 'peak season', 'low risk',
+          '段階的', '小さく', '徐々に', '並行稼働', '業務継続', '無停止', '繁忙期', 'リスクを抑え',
+          // 「1 日たりとも止めたくない」「現行を止められない」「一時間でも停めるわけには」
+          '止め~ない', '止まら~ない', '停止~できない', '停め~ない', '停め~いかない', '停まら~ない',
+          'incremental', 'phased', 'step by step', 'parallel run', 'cannot stop', 'peak season',
+          'low risk', 'continuity', 'keep running', 'no downtime',
         ],
       },
     ],
@@ -1650,16 +1773,18 @@ const CONFLICT_TOPICS: ConflictTopic[] = [
     id: 'order-quote',
     name: { ja: '見積・受注・納期回答', en: 'Quotes, orders, and delivery dates' },
     keywords: [
-      '見積', '受注', '納期', '引合', 'リードタイム', '出荷', '回答', '注文', '販売', '失注',
-      'quote', 'quotation', 'order', 'delivery date', 'lead time', 'rfq',
+      '見積', '受注', '納期', '引合', 'リードタイム', '出荷', '回答', '注文', '販売', '失注', '約束', '営業',
+      '商談', '客先', '顧客', '返事', '見込客', '案件',
+      'quote', 'order', 'delivery date', 'lead time', 'rfq', 'sales', 'customer', 'deal', 'bid',
     ],
   },
   {
     id: 'production',
     name: { ja: '生産・在庫', en: 'Production and inventory' },
     keywords: [
-      '生産', '製造', '在庫', '工場', '工程', '設備', '調達', '購買',
+      '生産', '製造', '在庫', '工場', '工程', '設備', '調達', '購買', 'ライン', '稼働', '拠点', '現場',
       'production', 'manufacturing', 'inventory', 'plant', 'shop floor', 'procurement',
+      'site', 'subsidiary', 'depot', 'factory',
     ],
   },
   {
@@ -1667,7 +1792,7 @@ const CONFLICT_TOPICS: ConflictTopic[] = [
     name: { ja: '業務プロセス・要員', en: 'Business process and people' },
     keywords: [
       '業務プロセス', '業務', 'プロセス', '手順', '運用ルール', '現場', '要員', '人員', '雇用', '教育', '組織',
-      'process', 'processes', 'workflow', 'staff', 'staffing', 'headcount', 'training', 'organisation', 'organization', 'jobs',
+      'process', 'workflow', 'staff', 'staffing', 'headcount', 'training', 'organisation', 'jobs',
     ],
   },
   {
@@ -1675,21 +1800,21 @@ const CONFLICT_TOPICS: ConflictTopic[] = [
     name: { ja: 'システム・データ', en: 'Systems and data' },
     keywords: [
       'システム', 'パッケージ', '基幹', 'データ', 'マスタ', '連携', 'インタフェース', 'クラウド', 'erp',
-      'system', 'systems', 'package', 'data', 'master data', 'interface', 'integration', 'cloud', 'platform',
+      'system', 'package', 'data', 'master data', 'interface', 'integration', 'cloud', 'platform',
     ],
   },
   {
     id: 'money',
     name: { ja: '費用・投資', en: 'Cost and investment' },
     keywords: [
-      'コスト', '費用', '予算', '投資', '価格', '原価', '料金',
-      'cost', 'costs', 'budget', 'investment', 'price', 'spend',
+      'コスト', '費用', '予算', '投資', '価格', '原価', '料金', '億円', '万円', '金額',
+      'cost', 'budget', 'investment', 'price', 'spend',
     ],
   },
   {
     id: 'customer',
     name: { ja: '顧客・取引先', en: 'Customers and partners' },
-    keywords: ['顧客', '客先', '取引先', 'チャネル', 'customer', 'customers', 'client', 'clients', 'channel'],
+    keywords: ['顧客', '客先', '取引先', 'チャネル', 'customer', 'client', 'channel'],
   },
   {
     id: 'security',
@@ -1706,51 +1831,217 @@ const NEGATION_JA =
   /^[はをもがのにでとへ、\s]{0,3}(?:しない|しません|せず|させない|できない|認めない|不要|不可|禁止|なし|無し|反対|避け|やめ|廃止|は困る|は避け)/;
 const NEGATION_EN = /^(?:no|not|never|without|avoid|avoiding|minimal|minimum|less)$/;
 
-function escapeRe(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+// --- 判定語の照合 / Matching a keyword against a concern ---
+//
+// 以前は「ASCII は単語境界のちょうど一致」「日本語は連続句のちょうど一致」だったため、
+// 利用者が自分の言葉で書くと当たらなかった(実測):
+//   - `standard` が "Group standardization" に当たらない
+//   - `勝手に約束` が「営業が勝手に納期を約束する」に当たらない(間に 3 文字入るだけで外れる)
+// そこで英語は語幹、日本語は「順序を保った飛び石」で照合する。
+// 緩めた分だけ誤検出は増えるので、話題が重ならない組は confidence='possible'(要確認)に落とし、
+// 根拠にした関心事と一致した語を必ず併記する。
+
+/** 日本語の飛び石照合で、部品と部品の間に許す最大文字数 */
+const JA_GAP_CHARS = 8;
+/** 英語の複数語で、語と語の間に許す最大単語数 */
+const EN_GAP_WORDS = 2;
+/** 判定語の中で「間に何か入ってよい」ことを表す区切り(例: `勝手に~約束`) */
+const KEYWORD_GAP = '~';
+
+/**
+ * 語尾を落として比較用の語幹にする。
+ * 残る語幹の長さに下限を付けることで、過剰一致(local と location が同じ語幹になるなど)を防ぐ。
+ */
+interface StemRule {
+  suffix: string;
+  /** 語幹として残す最小文字数。これを下回るなら落とさない */
+  min: number;
+  /** 落としたあとに付け直す文字(deliveries → delivery) */
+  to?: string;
 }
 
-/** キーワードの出現位置を返す(ASCII は単語境界、日本語は部分一致) */
-function keywordPositions(haystack: string, keyword: string): number[] {
-  const k = keyword.trim().toLowerCase();
-  if (k.length === 0) return [];
-  const positions: number[] = [];
-  if (/^[\x20-\x7e]+$/.test(k)) {
-    const re = new RegExp(`(^|[^a-z0-9])(${escapeRe(k)})($|[^a-z0-9])`, 'g');
-    let m: RegExpExecArray | null = re.exec(haystack);
-    while (m !== null) {
-      const start = m.index + m[1].length;
-      positions.push(start);
-      re.lastIndex = start + k.length;
-      m = re.exec(haystack);
+const STEM_RULES: StemRule[] = [
+  { suffix: 'izations', min: 5 },
+  { suffix: 'isations', min: 5 },
+  { suffix: 'ization', min: 5 },
+  { suffix: 'isation', min: 5 },
+  { suffix: 'ations', min: 5 },
+  { suffix: 'ation', min: 5 },
+  { suffix: 'izing', min: 5 },
+  { suffix: 'ising', min: 5 },
+  { suffix: 'ized', min: 5 },
+  { suffix: 'ised', min: 5 },
+  { suffix: 'izes', min: 5 },
+  { suffix: 'ises', min: 5 },
+  { suffix: 'ize', min: 5 },
+  { suffix: 'ise', min: 5 },
+  { suffix: 'ements', min: 5 },
+  { suffix: 'ement', min: 5 },
+  { suffix: 'ments', min: 5 },
+  { suffix: 'ment', min: 5 },
+  { suffix: 'ness', min: 5 },
+  { suffix: 'ates', min: 5 },
+  { suffix: 'ate', min: 5 },
+  { suffix: 'ities', min: 5 },
+  { suffix: 'ity', min: 5 },
+  { suffix: 'ally', min: 5 },
+  { suffix: 'ly', min: 5 },
+  { suffix: 'ing', min: 5 },
+  { suffix: 'ies', min: 4, to: 'y' },
+  { suffix: 'ed', min: 4 },
+  { suffix: 'es', min: 3 },
+  { suffix: 's', min: 3 },
+];
+
+/** 1 語を語幹にする(規則は最大 2 回まで適用する: businesses → business → busines) */
+function stemWord(word: string): string {
+  let current = word;
+  for (let pass = 0; pass < 2; pass += 1) {
+    let changed = false;
+    for (const rule of STEM_RULES) {
+      if (!current.endsWith(rule.suffix)) continue;
+      const base = current.slice(0, current.length - rule.suffix.length) + (rule.to ?? '');
+      if (base.length < rule.min) continue;
+      current = base;
+      changed = true;
+      break;
     }
-    return positions;
+    if (!changed) break;
   }
+  return current;
+}
+
+interface Token {
+  stem: string;
+  start: number;
+  end: number;
+}
+
+/** 照合結果の位置(否定表現を見るために終端も要る) */
+interface KeywordMatch {
+  start: number;
+  end: number;
+}
+
+/** キャッシュの上限。長時間動くサーバーで無制限に太らせない */
+const MATCH_CACHE_MAX = 500;
+
+function cachePut<K, V>(cache: Map<K, V>, key: K, value: V): V {
+  if (cache.size >= MATCH_CACHE_MAX) cache.clear();
+  cache.set(key, value);
+  return value;
+}
+
+const tokenCache = new Map<string, Token[]>();
+
+/** 英数字の並びを語として切り出す(日本語文中の "ERP" のような語も拾う) */
+function tokensOf(haystack: string): Token[] {
+  const cached = tokenCache.get(haystack);
+  if (cached) return cached;
+  const tokens: Token[] = [];
+  const re = /[a-z0-9]+/g;
+  let m: RegExpExecArray | null = re.exec(haystack);
+  while (m !== null) {
+    tokens.push({ stem: stemWord(m[0]), start: m.index, end: m.index + m[0].length });
+    m = re.exec(haystack);
+  }
+  return cachePut(tokenCache, haystack, tokens);
+}
+
+interface ParsedKeyword {
+  /** ASCII の語か(true なら語幹照合、false なら日本語の飛び石照合) */
+  ascii: boolean;
+  /** 順に現れる必要のある部品 */
+  parts: string[];
+  /** 根拠として画面に出す表記 */
+  display: string;
+  /** 同義の語をまとめるための鍵(cost と costs を 2 件として数えない) */
+  key: string;
+}
+
+const keywordCache = new Map<string, ParsedKeyword>();
+
+function parseKeyword(keyword: string): ParsedKeyword {
+  const cached = keywordCache.get(keyword);
+  if (cached) return cached;
+  const raw = keyword.trim().toLowerCase();
+  const ascii = /^[\x20-\x7e]+$/.test(raw);
+  const parts = ascii
+    ? raw.split(/[^a-z0-9]+/).filter((p) => p.length > 0).map(stemWord)
+    : raw.split(KEYWORD_GAP).map((p) => p.trim()).filter((p) => p.length > 0);
+  const display = ascii ? keyword.trim() : keyword.trim().split(KEYWORD_GAP).join('…');
+  return cachePut(keywordCache, keyword, { ascii, parts, display, key: parts.join(' ') });
+}
+
+/** 英語: 語幹が順に現れればよい(間に最大 EN_GAP_WORDS 語まで許す) */
+function asciiMatches(haystack: string, parts: string[]): KeywordMatch[] {
+  const tokens = tokensOf(haystack);
+  const found: KeywordMatch[] = [];
+  for (let i = 0; i < tokens.length; i += 1) {
+    if (tokens[i].stem !== parts[0]) continue;
+    let last = i;
+    let ok = true;
+    for (let p = 1; p < parts.length; p += 1) {
+      let next = -1;
+      for (let j = last + 1; j <= last + 1 + EN_GAP_WORDS && j < tokens.length; j += 1) {
+        if (tokens[j].stem === parts[p]) {
+          next = j;
+          break;
+        }
+      }
+      if (next < 0) {
+        ok = false;
+        break;
+      }
+      last = next;
+    }
+    if (ok) found.push({ start: tokens[i].start, end: tokens[last].end });
+  }
+  return found;
+}
+
+/** 日本語: 部品が語順どおりに現れればよい(間に最大 JA_GAP_CHARS 文字まで許す) */
+function jaMatches(haystack: string, parts: string[]): KeywordMatch[] {
+  const found: KeywordMatch[] = [];
   let from = 0;
   for (;;) {
-    const idx = haystack.indexOf(k, from);
-    if (idx < 0) return positions;
-    positions.push(idx);
-    from = idx + k.length;
+    const start = haystack.indexOf(parts[0], from);
+    if (start < 0) return found;
+    let end = start + parts[0].length;
+    let ok = true;
+    for (let p = 1; p < parts.length; p += 1) {
+      const idx = haystack.indexOf(parts[p], end);
+      if (idx < 0 || idx - end > JA_GAP_CHARS) {
+        ok = false;
+        break;
+      }
+      end = idx + parts[p].length;
+    }
+    if (ok) found.push({ start, end });
+    from = start + parts[0].length;
   }
+}
+
+function keywordMatches(haystack: string, parsed: ParsedKeyword): KeywordMatch[] {
+  if (parsed.parts.length === 0) return [];
+  return parsed.ascii ? asciiMatches(haystack, parsed.parts) : jaMatches(haystack, parsed.parts);
 }
 
 /** 話題の一致(立場ではなく題材なので否定は見ない) */
 function topicHit(haystack: string, keyword: string): boolean {
-  return keywordPositions(haystack, keyword).length > 0;
+  return keywordMatches(haystack, parseKeyword(keyword)).length > 0;
 }
 
 /** 立場の一致。否定されている出現は数えない */
 function stanceHit(haystack: string, keyword: string): boolean {
-  const k = keyword.trim().toLowerCase();
-  const ascii = /^[\x20-\x7e]+$/.test(k);
-  for (const idx of keywordPositions(haystack, k)) {
-    if (ascii) {
-      const before = haystack.slice(Math.max(0, idx - 24), idx);
+  const parsed = parseKeyword(keyword);
+  for (const m of keywordMatches(haystack, parsed)) {
+    if (parsed.ascii) {
+      const before = haystack.slice(Math.max(0, m.start - 24), m.start);
       const prev = /([a-z']+)[^a-z']*$/.exec(before)?.[1] ?? '';
       if (!NEGATION_EN.test(prev)) return true;
     } else {
-      const after = haystack.slice(idx + k.length, idx + k.length + 12);
+      const after = haystack.slice(m.end, m.end + 12);
       if (!NEGATION_JA.test(after)) return true;
     }
   }
@@ -1767,7 +2058,17 @@ function poleHits(concerns: string[], pole: ConflictPole): PoleHit[] {
   const hits: PoleHit[] = [];
   for (const concern of concerns) {
     const hay = concern.toLowerCase();
-    const matched = pole.keywords.filter((k) => stanceHit(hay, k));
+    // 語幹が同じ語(cost / costs)は 1 件として数える。根拠の欄に同じ語が並ぶのを避け、
+    // 「当たりの強い側」の判定が語形のゆれで決まらないようにする。
+    const seen = new Set<string>();
+    const matched: string[] = [];
+    for (const k of pole.keywords) {
+      const parsed = parseKeyword(k);
+      if (seen.has(parsed.key)) continue;
+      if (!stanceHit(hay, k)) continue;
+      seen.add(parsed.key);
+      matched.push(parsed.display);
+    }
     if (matched.length > 0) hits.push({ concern, matched });
   }
   return hits;
@@ -3209,17 +3510,20 @@ function runAssessment(kind: AssessmentKind, input: AssessmentInput): ToolResult
         ),
       );
       out.push('');
+      // 「N 件ある」と書いた直後に 3 件しか出さないと、貼った人はそれで全部だと思う。
+      // 原則は全件出す。多すぎて読めないときだけ切り、切ったことと残りの入れ方を必ず書く。
+      const shown = capRows(risky, RISK_JSON_MAX);
       out.push('```json');
       out.push(
         JSON.stringify(
           {
-            risks: risky.slice(0, 3).map((x) => {
+            risks: shown.rows.map((x) => {
               const note = x.factor.note && x.factor.note.trim().length > 0 ? quote(x.factor.note, 120) : null;
               return {
                 title:
                   lang === 'en'
-                    ? `Readiness shortfall: ${x.factor.name}`
-                    : `変革準備度の不足: ${x.factor.name}`,
+                    ? `Readiness shortfall: ${capCell(x.factor.name, 120)}`
+                    : `変革準備度の不足: ${capCell(x.factor.name, 120)}`,
                 description:
                   lang === 'en'
                     ? `Scored ${round1(x.factor.current)} of ${scale} against a target of ${round1(x.factor.target)}. Evidence: ${note ?? 'not recorded'}`
@@ -3236,6 +3540,25 @@ function runAssessment(kind: AssessmentKind, input: AssessmentInput): ToolResult
         ),
       );
       out.push('```');
+      out.push('');
+      if (shown.capped) {
+        const rest = risky.slice(RISK_JSON_MAX).map((x) => capCell(x.factor.name, 60));
+        out.push(
+          msg(
+            `この JSON は抜粋です: 該当 ${shown.total} 件のうち、ギャップの大きい ${shown.rows.length} 件だけを載せています。残り ${shown.hidden} 件(${rest.join('、')})も同じ形式で risks 配列に足してください。抜けたまま起票すると、登録済みの件数と本文の件数が食い違います。`,
+            `This JSON is an extract: ${shown.rows.length} of the ${shown.total} factors, widest gap first. Add the remaining ${shown.hidden} (${rest.join(', ')}) to the risks array in the same shape. If they are left out, the number of risks on record will not match the number stated above.`,
+            lang,
+          ),
+        );
+      } else {
+        out.push(
+          msg(
+            `上の JSON には該当 ${shown.total} 件をすべて入れてあります(抜粋ではありません)。owner と mitigation は空にしてあるので、埋めてから渡してください。`,
+            `The JSON above contains all ${shown.total} of them — it is not an extract. owner and mitigation are left blank; fill them in before sending it.`,
+            lang,
+          ),
+        );
+      }
       out.push('');
     }
   }
@@ -3386,10 +3709,12 @@ function runAssessment(kind: AssessmentKind, input: AssessmentInput): ToolResult
 // ---------------------------------------------------------------------------
 
 const factorInputSchema = z.object({
-  name: z.string().min(1).describe('評価因子名 / Factor name'),
+  // 上限の実際の判定は runAssessment 側(TEXT_LIMITS の title / text)。
+  // ここでの max は、その手前でメモリを食わないための最後の防波堤。
+  name: freeTextSchema('評価因子名 / Factor name', 300).min(1),
   current: z.number().describe('現在の水準(0〜scale) / Current level, 0 to scale'),
   target: z.number().describe('目標の水準(0〜scale) / Target level, 0 to scale'),
-  note: z.string().optional().describe('根拠・補足 / Evidence or remarks'),
+  note: freeTextSchema('根拠・補足 / Evidence or remarks', 4000).optional(),
 });
 
 const scaleSchema = z
@@ -3409,27 +3734,32 @@ export function registerAnalysisTools(server: McpServer): void {
         '現行(baseline)と目標(target)の構成要素を突き合わせ、マトリクスで対応関係を可視化し、新規に必要なもの・廃止されるもの・改修/置換されるものをギャップとして洗い出して、それぞれの推奨アクションと解釈を返す。廃止側も必ず出すため、コスト削減の根拠が消えない。検出したギャップは `add_work_package` にそのまま渡せる JSON として出力し、save=true で分析の要約を案件のメモに残せる。 / Compare baseline and target elements, render the mapping as a matrix, and derive the gaps: what must be newly created, what gets eliminated, and what is modified or replaced, each with a recommended action. Eliminations are always reported so the cost-reduction case stays visible. The gaps are also emitted as ready-to-paste `add_work_package` JSON, and save=true appends a summary of the analysis to the engagement notes.',
       inputSchema: {
         baseline: z
-          .array(z.string())
+          .array(freeTextSchema('現行の構成要素 1 件 / One baseline element', IDENTIFIER_LIMIT))
+          .max(MAX_ITEMS)
           .describe('現行の構成要素(能力・システム・データ・技術など) / Baseline elements: capabilities, systems, data, technologies'),
-        target: z.array(z.string()).describe('目標の構成要素 / Target elements'),
+        target: z
+          .array(freeTextSchema('目標の構成要素 1 件 / One target element', IDENTIFIER_LIMIT))
+          .max(MAX_ITEMS)
+          .describe('目標の構成要素 / Target elements'),
         mappings: z
           .array(
             z.object({
-              from: z.string().describe('現行の要素名 / Baseline element name'),
-              to: z.string().describe('目標の要素名 / Target element name'),
+              from: freeTextSchema('現行の要素名 / Baseline element name', IDENTIFIER_LIMIT),
+              to: freeTextSchema('目標の要素名 / Target element name', IDENTIFIER_LIMIT),
               kind: z
                 .enum(MAPPING_KINDS)
                 .describe('retained=そのまま流用 / modified=改修して流用 / replaced=置き換え'),
             }),
           )
+          .max(MAX_ITEMS)
           .optional()
           .describe(
             '現行と目標の対応関係。省略した現行要素は、同名の目標があれば維持、無ければ廃止として扱う / Mapping between baseline and target. Unmapped baseline elements are retained when a same-named target exists, otherwise eliminated',
           ),
-        domain: z
-          .string()
-          .optional()
-          .describe('対象ドメイン(business / data / application / technology など) / Architecture domain'),
+        domain: freeTextSchema(
+          '対象ドメイン(business / data / application / technology など) / Architecture domain',
+          IDENTIFIER_LIMIT,
+        ).optional(),
         save: z
           .boolean()
           .default(false)
@@ -3483,7 +3813,7 @@ export function registerAnalysisTools(server: McpServer): void {
           .describe(
             'エンゲージメントに評価を保存する(既定 false = プレビューのみ。指定しない限り案件データは変わらない) / Store the assessment on the engagement (default false: preview only; nothing is written unless you pass true)',
           ),
-        title: z.string().optional().describe('評価の名前(任意) / Optional title for this assessment'),
+        title: freeTextSchema('評価の名前(任意) / Optional title for this assessment', 300).optional(),
         lang: langSchema,
       },
     },
@@ -3509,7 +3839,7 @@ export function registerAnalysisTools(server: McpServer): void {
           .describe(
             'エンゲージメントに評価を保存する(既定 false = プレビューのみ。指定しない限り案件データは変わらない) / Store the assessment on the engagement (default false: preview only; nothing is written unless you pass true)',
           ),
-        title: z.string().optional().describe('評価の名前(任意) / Optional title for this assessment'),
+        title: freeTextSchema('評価の名前(任意) / Optional title for this assessment', 300).optional(),
         lang: langSchema,
       },
     },

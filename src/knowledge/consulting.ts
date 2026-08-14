@@ -803,6 +803,28 @@ export type SituationConditionId =
   | 'regulated';
 
 /**
+ * 言い換えを拾うための共起パターン / Co-occurrence pattern for paraphrases.
+ *
+ * 定型句の literal だけを並べると、能動・受動や語尾を変えただけで一致が消える
+ * (「経営の関与は薄い」は当たるのに「経営層はほとんど関心を示していない」は外れる)。
+ * そこで「誰の話か(subject)」「何の話か(topic)」「否定・弱さ(negative)」の 3 つが
+ * 同じ節の中で近くに揃ったときだけ成立させる。
+ *
+ * topic の近くに `positive` の語があるときは成立させない。
+ * 「経営の関与は強いが予算がない」のような文で誤検出しないための歯止め。
+ */
+export interface CuePattern {
+  /** 誰・何についての話か(節内のどこかにあればよい) */
+  subject: string[];
+  /** 話題の語。この語の周辺だけを見る */
+  topic: string[];
+  /** 否定・弱さを示す語。topic の周辺にあれば成立 */
+  negative: string[];
+  /** topic の周辺にあれば成立させない語(肯定が勝つ) */
+  positive?: string[];
+}
+
+/**
  * 状況条件 1 件 / One situational condition that changes what advice is useful.
  *
  * `favor` / `avoid` は、ルールが持つアクション・質問を並べ替えるための語。
@@ -816,6 +838,8 @@ export interface SituationCondition {
   label: Bilingual;
   /** 検出語。日本語は部分一致、英語は小文字で部分一致 */
   cues: string[];
+  /** 定型句から外れた言い方を拾う共起パターン(任意) */
+  patterns?: CuePattern[];
   /** この条件があると助言がどう変わるか(見立ての補足として出す) */
   implication: Bilingual;
   /** この条件のときに効く具体行動 */
@@ -851,6 +875,24 @@ export const SITUATION_CONDITIONS: SituationCondition[] = [
       '予算がつかない', '予算が付かない', '予算はつかない', '金がない', '金は出ない',
       '費用は出ない', '費用が出ない', '手弁当', '投資はできない', '身銭',
       'no budget', 'zero budget', 'without budget', 'unfunded', 'no funding', 'no money',
+    ],
+    // 「予算はほとんど付いていない」のように、literal から少し外れた言い方を拾う。
+    // positive の語がそばにあるとき(確保できている・これから決まる)は成立させない。
+    patterns: [
+      {
+        subject: ['予算', '資金', '原資', '投資枠', 'budget', 'funding'],
+        topic: ['予算', '資金', '原資', '投資枠', 'budget', 'funding'],
+        negative: [
+          'ない', '無い', 'なく', '無く', 'ませ', 'つかな', '付かな', '出ない', '取れな',
+          'ゼロ', '皆無', 'ほとんど', 'まったく', '全く',
+          'no ', 'not ', 'zero', 'without', 'unfunded',
+        ],
+        positive: [
+          '確保されている', '確保できている', '確保している', '確保済', '付いている', 'ついている',
+          '潤沢', '十分にある', '決ま', 'これから', '検討中', '要求中', '申請中',
+          'secured', 'approved', 'available',
+        ],
+      },
     ],
     implication: {
       ja: '予算がゼロなら、最初の仕事は設計ではなく「次の予算を取りに行くための 1 枚」を作ること。金を前提にした施策は全部後ろに送り、手元の情報だけで作れて意思決定者に見せられるものから始める。',
@@ -1027,7 +1069,45 @@ export const SITUATION_CONDITIONS: SituationCondition[] = [
     cues: [
       '経営は無関心', '無関心', '関心がない', '関心が無い', '興味を示さ', '他人事', '丸投げ',
       '現場任せ', '上が動かない', '理解がない', '理解されな', 'スポンサー不在', '経営に届いて',
+      // 「薄い」「弱い」「乏しい」系。9 人が独立に試して 1 つも当たらなかった言い回し。
+      '関与は薄', '関与が薄', '関与も薄', '関心は薄', '関心が薄', '関与は弱', '関与が弱',
+      '関与は限定', '関与が限定', '関与に乏し', '関与が乏し', '関心は低', '関心が低',
+      '当事者意識がな', '当事者意識は薄', '形式的な承認', '承認するだけ', '報告を聞くだけ',
+      'スポンサーが弱', 'スポンサーは弱', '経営の後ろ盾がな', '旗振り役がいな',
+      'スポンサーがいな', 'スポンサーはいな', 'スポンサーが決まって',
       'no sponsor', 'not interested', 'indifferent', 'no executive support', 'leadership is not engaged',
+      'weak sponsorship', 'thin engagement', 'nominal sponsor', 'rubber stamp', 'hands off',
+      'hands-off', 'little executive', 'limited executive',
+    ],
+    // literal を並べるだけでは語尾を変えただけで外れる。
+    // 「経営層はほとんど関心を示していない」「役員は聞こうともしない」「上層部の腰が重い」を拾う。
+    patterns: [
+      {
+        subject: [
+          '経営', '役員', '上層部', '経営陣', 'トップ', '社長', '本部長', 'スポンサー', '幹部',
+          'executive', 'leadership', 'board', 'sponsor', 'ceo', 'cfo', 'cio', 'senior management',
+        ],
+        topic: [
+          '関心', '関与', '興味', '理解', '当事者意識', '後ろ盾', '支援', '旗振り', '腰',
+          '聞こう', '話を聞', '出てこ', '言ってこ', '動い', '動か', 'コミット', '時間を取',
+          'interest', 'engagement', 'engaged', 'involved', 'involvement', 'support', 'attention',
+          'commitment', 'committed', 'sponsorship', 'backing', 'asked', 'showed up', 'shows up',
+        ],
+        // 「ず」「足り」のような短すぎる語は入れない(「まず」「足りている」で誤検出する)
+        negative: [
+          'ない', '無い', 'なく', '無く', 'ませ', 'おらず', 'られず', 'せず', 'えず',
+          '薄', '弱', '低い', '低く', '乏し', '限定', 'ほとんど', 'まったく', '全く',
+          'ゼロ', '皆無', '腰が重', '鈍', '消極', '形式的', '他人事', '任せきり', '丸投げ',
+          '足りな', '足りず', '示さず', '見えな', '届いてい',
+          'no ', 'not ', 'never', 'little', 'lack', 'weak', 'absent', 'minimal', 'nominal',
+          'without', "n't", 'barely', 'hardly', 'thin ',
+        ],
+        // 肯定が勝つ。「経営の関与は強い」を「関与が薄い」と読まないための歯止め
+        positive: [
+          '強い', '厚い', '高い', '十分', '積極', '本気', '肝いり', '主導', '直轄', '後押し',
+          'strong', 'high', 'active', 'committed to', 'fully engaged', 'behind it', 'top-down',
+        ],
+      },
     ],
     implication: {
       ja: '経営が関心を持っていない段階では、正しい計画より「関心を持たせる 1 枚」が先。網羅的な資料は読まれないので、経営が今期気にしている論点に接続したものだけを出す。',
@@ -1154,6 +1234,25 @@ export const SITUATION_CONDITIONS: SituationCondition[] = [
       '自分では決め', '上に諮', '説得しないと',
       'no authority', 'cannot decide', 'not my call', 'need approval from',
     ],
+    // 「私に決定権はない」「誰が決めるのか分からない」を拾う。
+    // 「決定権は事業部長にある」のような、権限の所在が書いてあるだけの文には当てない。
+    patterns: [
+      {
+        subject: [
+          '自分', '私', 'こちら', '担当', '決定権', '権限', '決裁', '決める',
+          'authority', 'decision', 'sign-off', 'mandate',
+        ],
+        topic: [
+          '決定権', '権限', '決裁', '決められ', '決める', '決まらな', '判断でき',
+          'authority', 'decide', 'decision right', 'sign-off', 'mandate',
+        ],
+        negative: [
+          'ない', '無い', 'なく', '無く', 'ませ', '分からな', 'わからな', '不明', '不在',
+          'no ', 'not ', "n't", 'cannot', 'unclear', 'nobody', 'no one',
+        ],
+        positive: ['にある', 'を持っている', '与えられている', '委任されている', 'i have', 'we have'],
+      },
+    ],
     implication: {
       ja: '決定権が無い立場でやるべきなのは決めることではなく、決める人が決められる材料を出すこと。意見を持っていくと止まり、選択肢を持っていくと進む。',
       en: 'Without the decision rights, the job is not to decide but to make the decision decidable. Bringing an opinion stalls; bringing options moves.',
@@ -1174,11 +1273,35 @@ export const SITUATION_CONDITIONS: SituationCondition[] = [
     priority: 1,
     label: { ja: '現場の抵抗がある', en: 'Resistance on the ground' },
     cues: [
-      '反発', '抵抗', '非協力', '協力が得られ', '現場が動かない', '嫌がら', '押し付け',
+      '反発', '抵抗', '非協力', '現場が動かない', '嫌がら', '押し付け',
       '納得していない', '不満',
+      // 「協力が得られている」を抵抗と読まないよう、否定形まで含めて一致させる
+      '協力が得られな', '協力が得られず', '協力を得られな', '協力を得られず',
       // 「反対」は語尾が揺れるので前方一致で拾う(「正反対」「反対側」を巻き込まない形にする)
       '反対し', '反対され', '反対が', '反対の声', '猛反対', '賛同が得られな', '乗り気でな',
       'resistance', 'pushback', 'push back', 'not cooperating', 'imposed', 'opposed', 'opposition',
+    ],
+    // 「現場は乗り気ではない」「利用部門の納得が取れていない」のような言い方を拾う
+    patterns: [
+      {
+        subject: [
+          '現場', 'ユーザー', '利用部門', '事業部門', '業務部門', '部門', '担当者', '関係者',
+          'users', 'business unit', 'the field', 'operations', 'staff',
+        ],
+        topic: [
+          '協力', '納得', '賛同', '合意', '受け入れ', '乗り気', '前向き', '参加', '巻き込',
+          'cooperation', 'buy-in', 'agreement', 'on board', 'onboard',
+        ],
+        negative: [
+          'ない', '無い', 'なく', '無く', 'ませ', 'られず', 'できてい', '取れてい', '薄',
+          '難しい', 'ほとんど', 'まったく', '全く',
+          'no ', 'not ', "n't", 'never', 'without', 'lack',
+        ],
+        positive: [
+          '得られている', '取れている', '進んでいる', '積極的', '協力的', 'できている',
+          'strong', 'good', 'fully',
+        ],
+      },
     ],
     implication: {
       ja: '現場が抵抗する原因はほぼ「決まった後に知らされた」こと。説明の仕方ではなく、関与のさせ方を変えないと同じことが繰り返される。',
@@ -1285,8 +1408,20 @@ const NEGATION_MARKERS_JA = [
   '見送', '対象外', 'スコープ外', '範囲外', '除外', '却下', '断念', '見合わせ',
   '実施しない', '行わない', 'しないことに', 'ないことに決', '予定はない', '予定は無い', '予定なし',
   '考えていない', '検討していない', '検討しない', '必要ない', '必要無い', '不要',
-  'なくなった', '無くなった', 'ボツ', 'ではない', 'ではありません', 'じゃない', 'ではなく',
+  'なくなった', '無くなった', 'ボツ',
 ];
+
+/**
+ * 「〜ではない」系。話題を取り下げた意味にも、状態をそのまま述べた意味にもなる。
+ *
+ * 「今回の対象ではない」は取り下げだが、「現場は乗り気ではない」は状況の説明であって
+ * 取り下げではない。後者まで落とすと、利用者が書いた状態をこちらが読めなくなるので、
+ * 話題の取り下げを示す語(下の SCOPE_WORDS_JA)が同じ節にあるときだけ打ち消しとして扱う。
+ */
+const SOFT_NEGATION_JA = ['ではない', 'ではありません', 'じゃない', 'ではなく'];
+
+/** 「〜ではない」を取り下げと読んでよい節の目印 */
+const SCOPE_WORDS_JA = ['対象', 'スコープ', '範囲', '今回', 'テーマ', '目的', '狙い', '主題', '本題'];
 
 /** 打ち消しを示す語(英語)。素の "not" は広すぎるので採らない */
 const NEGATION_MARKERS_EN = [
@@ -1330,6 +1465,14 @@ export interface DetectedCondition {
   condition: SituationCondition;
   /** 根拠になった語 */
   cues: string[];
+  /**
+   * どこから読んだか。
+   * `text`=相談文の定型表現 / `number`=文中の数値表現 / `engagement`=登録済みの案件情報。
+   * 出力では必ず出所を書く(利用者が誤読を正せるように)。
+   */
+  from?: 'text' | 'number' | 'engagement';
+  /** 出所の呼び名(案件の説明など) */
+  sourceLabel?: Bilingual;
 }
 
 /** 状況の読み取り結果 / The result of reading a situation description. */
@@ -1345,19 +1488,120 @@ export interface SituationReading {
   hedged: SituationClause[];
   /** 検出した条件(軸ごとに 1 件) */
   conditions: DetectedCondition[];
-  /** 記述が無く判断していない軸 */
+  /** 数値・単位から読み取った事実 */
+  facts: SituationFact[];
+  /** こちらでは読み取れなかった軸(「書かれていない」ではない) */
   unknownAxes: SituationAxis[];
   /** 成立した条件の組み合わせ */
   combos: ConditionCombo[];
   /** 並べ替えに使う内容語 */
   terms: string[];
+  /** 案件情報など、補助テキストから拾った内容語(並べ替えの弱い重みに使う) */
+  contextTerms: string[];
 }
 
-const CLAUSE_SPLIT = /[。．.!?！？\n;；、,]+/;
+/**
+ * 相談文と一緒に読む補助テキスト / Extra text read alongside the description.
+ *
+ * 案件の説明・スコープ・登録済みの期限など、相談者が既にこのサーバーに預けている情報。
+ * 相談文と同じ扱いにするとルールの一致が濁るので、条件・数値・並べ替えにだけ使う。
+ */
+export interface SituationContext {
+  text: string;
+  /** 出所の呼び名(出力に「案件の説明より」のように出す) */
+  label: Bilingual;
+}
+
+// 節の区切り。数字の中の「,」「.」では切らない
+// (「500,000,000 円」を 3 つの節に割ると、金額が読めなくなる)
+const CLAUSE_SPLIT = /[。．!?！？\n;；、]+|[,.]+(?!\d)/;
 
 /** 語が本文に出るか(英語は小文字化して比較) */
 function hasCue(haystack: string, lowerHaystack: string, cue: string): boolean {
   return /^[\x20-\x7E]+$/.test(cue) ? lowerHaystack.includes(cue.toLowerCase()) : haystack.includes(cue);
+}
+
+/** topic の前後をどこまで見るか。日本語は短く、英語は語が長いぶん広く取る */
+const PATTERN_WINDOW_JA = 14;
+const PATTERN_WINDOW_EN = 44;
+/** 表に出す根拠の最大長(利用者の文をそのまま長く貼らない) */
+const PATTERN_EVIDENCE_MAX = 40;
+
+/**
+ * 根拠として出す本文の一部を整える。
+ * 語の途中で切れたところは落とし、切ったことが分かるように「…」を付ける。
+ */
+function formatEvidence(window: string, cutHead: boolean, cutTail: boolean): string {
+  let text = window;
+  let head = cutHead;
+  let tail = cutTail;
+  // 英単語の途中から始まる/終わるのは読みにくいので、語の境界まで詰める
+  if (head && /^\w/.test(text)) {
+    const space = text.indexOf(' ');
+    if (space >= 0 && space < 20) text = text.slice(space + 1);
+  }
+  if (tail && /\w$/.test(text)) {
+    const space = text.lastIndexOf(' ');
+    if (space > text.length - 20) text = text.slice(0, space);
+  }
+  text = text.trim();
+  if (text.length > PATTERN_EVIDENCE_MAX) {
+    text = text.slice(0, PATTERN_EVIDENCE_MAX).trim();
+    tail = true;
+  }
+  return `${head ? '…' : ''}${text}${tail ? '…' : ''}`;
+}
+
+/**
+ * 共起パターンが節に当たるかを見る。当たったら根拠にする本文の一部を返す。
+ *
+ * subject は節のどこにあってもよい。topic の前後だけを窓として見て、
+ * 窓に肯定語があれば不成立、否定・弱さの語があれば成立とする。
+ * 「近くにあること」を条件にしているのは、
+ * 「経営の関与は強いが予算がない」のような文で軸をまたいで誤検出しないため。
+ */
+function matchCuePattern(segment: string, lowerSegment: string, pattern: CuePattern): string | undefined {
+  const subject = pattern.subject.find((s) => hasCue(segment, lowerSegment, s));
+  if (!subject) return undefined;
+  for (const topic of pattern.topic) {
+    const ascii = /^[\x20-\x7E]+$/.test(topic);
+    const hay = ascii ? lowerSegment : segment;
+    const needle = ascii ? topic.toLowerCase() : topic;
+    const at = hay.indexOf(needle);
+    if (at < 0) continue;
+    const w = ascii ? PATTERN_WINDOW_EN : PATTERN_WINDOW_JA;
+    const from = Math.max(0, at - w);
+    const to = Math.min(hay.length, at + needle.length + w);
+    const window = segment.slice(from, to);
+    const lowerWindow = lowerSegment.slice(from, to);
+    // 肯定が勝つ。「関与は強い」と書いてあるものを「関与が薄い」と読まない
+    if ((pattern.positive ?? []).some((p) => hasCue(window, lowerWindow, p))) continue;
+    if (!pattern.negative.some((n) => hasCue(window, lowerWindow, n))) continue;
+    return formatEvidence(window, from > 0, to < hay.length);
+  }
+  return undefined;
+}
+
+/** 条件の共起パターンを節ごとに見て、当たった根拠を返す */
+function patternCues(text: string, condition: SituationCondition): string[] {
+  if (!condition.patterns || condition.patterns.length === 0) return [];
+  const out: string[] = [];
+  for (const raw of text.split(CLAUSE_SPLIT)) {
+    const segment = raw.trim();
+    if (segment.length === 0) continue;
+    const lower = segment.toLowerCase();
+    for (const pattern of condition.patterns) {
+      const hit = matchCuePattern(segment, lower, pattern);
+      if (hit && !out.includes(hit)) out.push(hit);
+    }
+  }
+  return out;
+}
+
+/** 「〜ではない」を取り下げとして読んでよい節かを見る */
+function softNegationMarker(part: string): string | undefined {
+  if (!SCOPE_WORDS_JA.some((w) => part.includes(w))) return undefined;
+  return SOFT_NEGATION_JA.find((m) => part.includes(m));
 }
 
 /** 状況文を節に割り、節ごとに打ち消しの有無を判定する */
@@ -1373,6 +1617,7 @@ export function splitSituationClauses(situation: string): SituationClause[] {
     if (hedgeMarker) return { text: part, negated: false, hedged: true, hedgeMarker };
     const marker =
       NEGATION_MARKERS_JA.find((m) => part.includes(m)) ??
+      softNegationMarker(part) ??
       NEGATION_MARKERS_EN.find((m) => lower.includes(m));
     const decided = DECISION_MARKERS.some((m) => part.includes(m) || lower.includes(m));
     return marker ? { text: part, negated: true, marker, decided } : { text: part, negated: false };
@@ -1406,12 +1651,648 @@ export function extractSituationTerms(situation: string): string[] {
   return Array.from(found);
 }
 
+// ============================================================
+// 数値・単位の読み取り / Reading numbers and units out of a description
+//
+// 定型句だけを照合すると「予算は限られている」は読めるのに「予算は 5 億円」が読めない。
+// 実務の相談文では、制約は形容詞ではなく数字で書かれることの方が多い。
+// ここでは金額・人数・期日・割合を数字と単位から読み、
+// 「どの表現から読んだのか」を必ず一緒に返す(利用者が誤読をその場で正せるように)。
+//
+// 読めなかったものを「書かれていない」と断定しない。呼び出し側もそう書かないこと。
+// ============================================================
+
+/** 読み取った数値の種類 / What kind of number was read. */
+export type SituationFactKind = 'budget' | 'deadline' | 'capacity' | 'ratio';
+
+/** 数値から読み取った事実 1 件 / One fact read from a number in the text. */
+export interface SituationFact {
+  kind: SituationFactKind;
+  /** 対応する軸(割合など、軸に紐付かないものは undefined) */
+  axis?: SituationAxis;
+  /** 出力の「観点」列に出す名前 */
+  topic: Bilingual;
+  /** 読み取った内容 */
+  label: Bilingual;
+  /** 根拠にした本文の表現(そのまま引用する) */
+  evidence: string;
+  /** 根拠の表現が出てきた節(短く切って引用する) */
+  clause: string;
+  /** 正規化した値(金額=通貨単位、人数=人、期日=残り日数、割合=%) */
+  value: number;
+  /** 期日のときの ISO 日付 */
+  isoDate?: string;
+  /** 体制のときの内訳(専任 / 兼任)。書かれていなければ undefined */
+  staffing?: 'dedicated' | 'part-time';
+  /** 読み取りに含めた推測(年の補完など)。あれば必ず開示する */
+  assumption?: Bilingual;
+  /** その数値だからこそ言える助言 */
+  advice?: Bilingual;
+  /** どこから読んだか */
+  from: 'text' | 'engagement';
+  /** 出所の呼び名(案件の説明など) */
+  sourceLabel?: Bilingual;
+}
+
+const KANJI_DIGIT: Record<string, number> = {
+  〇: 0, 零: 0, 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9,
+};
+const KANJI_SCALE: Record<string, number> = { 十: 10, 百: 100, 千: 1000 };
+/** 漢数字を算用数字に直すのは、単位が続くときだけ(「十分」を 10 分にしない) */
+const KANJI_RUN_RE =
+  /(?<![0-9〇零一二三四五六七八九十百千])[〇零一二三四五六七八九十百千]+(?=\s*(?:兆|億|万|円|名|人|件|割|%|パーセント|か月|ヶ月|カ月|ケ月|週間|日間|年|月|日))/g;
+
+function parseKanjiNumber(run: string): number | null {
+  if (run.length === 0) return null;
+  const hasScale = Array.from(run).some((c) => c in KANJI_SCALE);
+  if (!hasScale) {
+    // 「二〇二六」のような位取り表記
+    let value = 0;
+    for (const c of run) {
+      const d = KANJI_DIGIT[c];
+      if (d === undefined) return null;
+      value = value * 10 + d;
+    }
+    return value;
+  }
+  let total = 0;
+  let current = 0;
+  for (const c of run) {
+    const d = KANJI_DIGIT[c];
+    if (d !== undefined) {
+      current = d;
+      continue;
+    }
+    const scale = KANJI_SCALE[c];
+    if (scale === undefined) return null;
+    total += (current === 0 ? 1 : current) * scale;
+    current = 0;
+  }
+  return total + current;
+}
+
+/**
+ * 数値表現を読むための正規化。全角を半角にし、単位が続く漢数字を算用数字に直す。
+ * 条件の定型句照合には使わない(「予算は十分」を壊さないため)。
+ */
+export function normalizeQuantitativeText(value: string): string {
+  const halfWidth = value
+    .replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0))
+    .replace(/[Ａ-Ｚａ-ｚ]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0))
+    .replace(/．/g, '.')
+    .replace(/，/g, ',')
+    .replace(/％/g, '%')
+    .replace(/＄/g, '$')
+    .replace(/￥/g, '¥')
+    .replace(/　/g, ' ');
+  return halfWidth.replace(KANJI_RUN_RE, (run) => {
+    const parsed = parseKanjiNumber(run);
+    return parsed === null ? run : String(parsed);
+  });
+}
+
+type FactCurrency = 'JPY' | 'USD' | 'EUR' | 'GBP';
+
+const MONEY_UNIT_FACTOR: Record<string, number> = {
+  兆: 1e12, 億: 1e8, 千万: 1e7, 百万: 1e6, 万: 1e4, 千: 1e3,
+  billion: 1e9, bn: 1e9, million: 1e6, mn: 1e6, thousand: 1e3,
+  b: 1e9, m: 1e6, k: 1e3,
+};
+
+const MONEY_RE =
+  /([¥$€£]|USD|JPY|EUR|GBP)?\s*(\d[\d,]*(?:\.\d+)?)\s*(兆|億|千万|百万|万|千|billion|bn|million|mn|thousand|[bmk](?![a-z]))?\s*(円|ドル|ユーロ|ポンド|yen|jpy|usd|eur|gbp|dollars?)?/gi;
+/** 金額の話だと判断してよい語(単位だけの「3 億」を金額と読むための条件) */
+const MONEY_KEYWORD_RE =
+  /予算|投資|上限|キャップ|コスト|費用|原資|資金|金額|見積|発注|調達額|budget|funding|invest|cost|capex|opex|spend|ceiling|cap(?![a-z])/i;
+/** 数字の直後がこれなら金額ではない(人数・日付・割合) */
+const NOT_MONEY_AFTER_RE = /^\s*(?:年|月|日|時|分|秒|人|名|件|社|台|回|%|割|パーセント)/;
+
+function currencyOf(token: string | undefined): FactCurrency | null {
+  if (!token) return null;
+  const t = token.toLowerCase();
+  if (t === '¥' || t === 'jpy' || t === '円' || t === 'yen') return 'JPY';
+  if (t === '$' || t === 'usd' || t === 'ドル' || t.startsWith('dollar')) return 'USD';
+  if (t === '€' || t === 'eur' || t === 'ユーロ') return 'EUR';
+  if (t === '£' || t === 'gbp' || t === 'ポンド') return 'GBP';
+  return null;
+}
+
+function groupDigits(n: number): string {
+  return Math.round(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
+function trimNumber(n: number): string {
+  return Number.isInteger(n) ? String(n) : n.toFixed(1);
+}
+
+/** 金額を日英で書き分ける(日本語は億・万、英語は通貨 + 3 桁区切り) */
+function formatMoney(value: number, currency: FactCurrency): Bilingual {
+  const en = `${currency} ${groupDigits(value)}`;
+  if (currency !== 'JPY') return { ja: en, en };
+  if (value >= 1e8) return { ja: `${trimNumber(value / 1e8)} 億円`, en };
+  if (value >= 1e4) return { ja: `${trimNumber(value / 1e4)} 万円`, en };
+  return { ja: `${groupDigits(value)} 円`, en };
+}
+
+/** 短く引用する(表・引用ブロックを壊さない) */
+function clip(value: string, max: number): string {
+  const one = value.replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
+  return one.length > max ? `${one.slice(0, max)}…` : one;
+}
+
+interface MoneyRead {
+  value: number;
+  currency: FactCurrency;
+  evidence: string;
+}
+
+interface MoneyToken {
+  value: number;
+  factor: number;
+  start: number;
+  end: number;
+  currency: FactCurrency | null;
+  hasUnit: boolean;
+  singleLetterUnit: boolean;
+  text: string;
+}
+
+function readMoney(clause: string): MoneyRead | null {
+  const hasKeyword = MONEY_KEYWORD_RE.test(clause);
+  const tokens: MoneyToken[] = [];
+  MONEY_RE.lastIndex = 0;
+  for (const m of clause.matchAll(MONEY_RE)) {
+    const [whole, cur1, num, unit, cur2] = m;
+    if (!num) continue;
+    const currency = currencyOf(cur1) ?? currencyOf(cur2);
+    const unitKey = unit?.toLowerCase();
+    const factor = unitKey ? MONEY_UNIT_FACTOR[unitKey] ?? 1 : 1;
+    // 通貨も単位も無い裸の数字は金額と読まない
+    if (!currency && !unitKey) continue;
+    const start = m.index ?? 0;
+    const end = start + whole.length;
+    if (!cur2 && NOT_MONEY_AFTER_RE.test(clause.slice(end))) continue;
+    const value = Number(num.replace(/,/g, '')) * factor;
+    if (!Number.isFinite(value) || value <= 0) continue;
+    tokens.push({
+      value,
+      factor,
+      start,
+      end,
+      currency,
+      hasUnit: Boolean(unitKey),
+      singleLetterUnit: Boolean(unitKey && unitKey.length === 1),
+      text: whole.trim(),
+    });
+  }
+
+  // 「1 億 2 千万円」のように続けて書かれたトークンを 1 つの金額にまとめる
+  // (まとめないと、大きい方だけを採って 1 億円と読んでしまう)
+  const groups: MoneyToken[][] = [];
+  for (const token of tokens) {
+    const last = groups[groups.length - 1];
+    const prev = last?.[last.length - 1];
+    if (
+      last &&
+      prev &&
+      prev.hasUnit &&
+      token.factor < prev.factor &&
+      clause.slice(prev.end, token.start).trim().length === 0
+    ) {
+      last.push(token);
+      continue;
+    }
+    groups.push([token]);
+  }
+
+  let best: MoneyRead | null = null;
+  for (const group of groups) {
+    const value = group.reduce((sum, t) => sum + t.value, 0);
+    const currency = group.map((t) => t.currency).find((c): c is FactCurrency => c !== null) ?? null;
+    const hasUnit = group.some((t) => t.hasUnit);
+    // 単位だけ(「3 億」)は、金額の話だと分かるときにだけ採る
+    if (!currency && !hasKeyword) continue;
+    // 1 文字の単位(5M / 3k)は通貨が書かれているときだけ採る(months の m と区別できない)
+    if (!currency && group.every((t) => t.singleLetterUnit)) continue;
+    if (!currency && !hasUnit) continue;
+    const first = group[0];
+    const last = group[group.length - 1];
+    if (!first || !last) continue;
+    const read: MoneyRead = {
+      value,
+      currency: currency ?? 'JPY',
+      evidence: clip(clause.slice(first.start, last.end).trim(), 40),
+    };
+    if (!best || read.value > best.value) best = read;
+  }
+  return best;
+}
+
+/** 金額の桁に応じた刻み方の助言(数字をそのまま使う) */
+function moneyAdvice(value: number, currency: FactCurrency): Bilingual {
+  const big = currency === 'JPY' ? 1e9 : 1e7;
+  const mid = currency === 'JPY' ? 1e8 : 1e6;
+  const small = currency === 'JPY' ? 1e7 : 1e5;
+  if (value >= big) {
+    const per = formatMoney(value / 6, currency);
+    return {
+      ja: `この桁は経営が定期的に見る規模なので、単年の計画ではなく四半期ごとの判断点(継続 / 縮小 / 中止)を先に置く。作業パッケージは 5〜7 本、1 本あたり ${per.ja} 前後に割り、各本に中止条件と測る指標を先に書いておく。総額の 10% 前後をデータ移行と品質是正に先取りで確保すること(後から積み増しは通らない)。`,
+      en: `At this order of magnitude executives will review it on a cycle, so set quarterly decision points — continue, shrink, stop — before the annual plan. Split it into five to seven work packages of roughly ${per.en} each, and write the stop criterion and the measure for each one up front. Reserve around 10% of the total for data migration and data quality now; a top-up for it never gets approved later.`,
+    };
+  }
+  if (value >= mid) {
+    const per = formatMoney(value / 4, currency);
+    return {
+      ja: `この桁は一括では管理できないので、3〜5 本の作業パッケージに割る(1 本あたり ${per.ja} 前後)。1 本は 6 か月以内・効果が測れる単位にし、2 本目以降は 1 本目の結果を見てから起案する。一括発注にすると、遅れていることが分かるのが最後になる。`,
+      en: `This is past the size one contract can manage, so split it into three to five work packages of roughly ${per.en} each. Keep each under six months with a measurable outcome, and only start the later ones once the first has reported. Award it as one lump and you learn it is late last.`,
+    };
+  }
+  if (value >= small) {
+    const per = formatMoney(value / 2, currency);
+    return {
+      ja: `1 案件として回せる桁。作るものを 1〜2 本(1 本あたり ${per.ja} 前後)に絞り、残りは既存資料と自前の作業で埋める前提で計画する。2 本目は 1 本目の効果が出てから起案する。`,
+      en: `This is a size one initiative can carry. Hold it to one or two builds of roughly ${per.en} each and plan for existing material and in-house effort to cover the rest. Raise the second only after the first has paid back.`,
+    };
+  }
+  return {
+    ja: `この桁で外部に頼めるのは調査か 1 機能までなので、金で解く範囲を先に 1 つに決め、残りは「既存資料の棚卸し」「関係者への聞き取り」「決めごとの明文化」といった金の要らない作業に振り分ける。`,
+    en: `At this size external spend buys an investigation or a single function, so name the one thing money will solve and route the rest to work that costs nothing — inventorying existing material, interviewing people, writing decisions down.`,
+  };
+}
+
+const HEADCOUNT_RE = /(\d+)\s*(名|人)(?![月日間件])/g;
+/** 「3 dedicated architects」のように数字と役割の間に語が挟まる書き方も拾う */
+const HEADCOUNT_EN_RE =
+  /(\d+)\s*(?:(?:full[- ]?time|part[- ]?time|dedicated|senior|junior|additional|extra)\s+)?(?:fte|ftes|people|persons?|engineers?|architects?|analysts?|members?|developers?|staff)(?![a-z])/gi;
+/** 体制の話だと判断してよい語(「3 名の顧客」を体制と読まないため) */
+const CAPACITY_KEYWORD_RE =
+  /専任|兼任|兼務|体制|要員|人員|メンバ|チーム|担当|アサイン|確保|投入|staff|team|dedicated|assign|headcount|fte|resource/i;
+const DEDICATED_RE = /専任|full[- ]?time|dedicated/i;
+const PART_TIME_RE = /兼任|兼務|片手間|part[- ]?time/i;
+
+/** 人数に応じた助言(週あたりの実働に落として返す) */
+function headcountAdvice(count: number, dedicated: boolean): Bilingual {
+  if (count <= 1) {
+    return {
+      ja: '実質ひとりなので、作る量ではなく「他人に渡せる形」で決まる。成果物を 3 つに絞り、情報収集は空欄の表を各部門に配って埋めてもらう形にする。会議体は新設せず既存の定例に 10 分もらう。',
+      en: 'With effectively one person the result depends on how much you can hand off, not how much you produce. Cap deliverables at three, gather information by sending each department an empty table to fill in, and take ten minutes in an existing meeting instead of creating a forum.',
+    };
+  }
+  const dayPerWeek = count * 5;
+  const usable = Math.max(5, Math.round(dayPerWeek * 0.65));
+  const streams = Math.max(1, Math.min(3, Math.round(count / 2)));
+  if (count <= 5) {
+    return {
+      ja: `${count} 名${dedicated ? '(専任)' : ''}は週 ${dayPerWeek} 人日。調整・資料・会議で 3 割は消えるので、設計に使えるのは週 ${usable} 人日前後と見ておく。同時に走らせる検討は ${streams} 本までにし、それぞれに「いつ何が出るか」を置く。`,
+      en: `${count} people${dedicated ? ' (dedicated)' : ''} is about ${dayPerWeek} person-days a week. Coordination, documents, and meetings take roughly a third, so plan on about ${usable} person-days of actual design. Hold parallel workstreams to ${streams} and give each a stated output and date.`,
+    };
+  }
+  return {
+    ja: `${count} 名規模になると、作業を割るより決定を割る方が効く。誰がどの決定の責任者かを先に決めないと、週 ${dayPerWeek} 人日ぶんの資料が増えるだけで判断は進まない。並行させる作業は 3 本までに抑え、残りは待たせる。`,
+    en: `Past ${count} people, splitting decisions matters more than splitting tasks. Without named decision owners, ${dayPerWeek} person-days a week turns into documents rather than progress. Hold parallel work to three streams and let the rest wait.`,
+  };
+}
+
+const DATE_YMD_RE = /(\d{4})\s*[-/年]\s*(\d{1,2})\s*[-/月]\s*(\d{1,2})\s*日?/g;
+const DATE_MD_RE = /(?<![\d-/])(\d{1,2})\s*月\s*(\d{1,2})\s*日/g;
+const REL_MONTH_RE = /(\d+)\s*(?:か月|ヶ月|カ月|ケ月|months?)(?![a-z])/gi;
+/** 「3 月末」「年度末」のように日を書かない期日表現(日本の実務では日付より多い) */
+const MONTH_END_RE = /(\d{1,2})\s*月末/g;
+const FISCAL_END_RE = /年度末|今年度末|年度いっぱい/;
+const REL_WEEK_RE = /(\d+)\s*(?:週間|weeks?)(?![a-z])/gi;
+/** 期日の話だと判断してよい語 */
+const DEADLINE_KEYWORD_RE =
+  /期限|締切|締め切り|まで|決裁|判断|会議|委員会|報告|提出|リリース|稼働|移行|開始|着手|回答|deadline|due|by\s|go-?live|board|committee|steering|submit|launch/i;
+
+function toIsoDate(date: Date): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function formatDate(iso: string): Bilingual {
+  const [y, m, d] = iso.split('-');
+  return { ja: `${Number(y)}年${Number(m)}月${Number(d)}日`, en: iso };
+}
+
+function addDays(iso: string, days: number): string {
+  const base = new Date(`${iso}T00:00:00Z`);
+  base.setUTCDate(base.getUTCDate() + days);
+  return base.toISOString().slice(0, 10);
+}
+
+function daysBetween(fromIso: string, toIso: string): number {
+  const a = Date.parse(`${fromIso}T00:00:00Z`);
+  const b = Date.parse(`${toIso}T00:00:00Z`);
+  return Math.round((b - a) / 86_400_000);
+}
+
+/** 期日に応じた助言。逆算した日付をそのまま書く */
+function deadlineAdvice(iso: string, remaining: number): Bilingual {
+  if (remaining < 0) {
+    return {
+      ja: `この日付は既に過ぎている。過ぎた期日を計画に残したままにすると、以降の日付が全部信用されなくなる。新しい期日を置き直すか、この項目を閉じるかを今日決めること。`,
+      en: 'That date has already passed. Leaving an expired date in the plan makes every later date untrusted. Decide today whether to reset it or close the item.',
+    };
+  }
+  const review = formatDate(addDays(iso, -14));
+  const prebrief = formatDate(addDays(iso, -28));
+  if (remaining <= 30) {
+    return {
+      ja: `残り ${remaining} 日。この日数では事前説明と資料確定を同じ週に畳むことになるので、説明する相手を 3 人までに絞り、そこで反対されたら止まる論点を今日洗い出す。新規の調査は始めない。`,
+      en: `${remaining} days left. At this range the pre-brief and the final document collapse into the same week, so cut the pre-brief list to three people and identify today the objection that would stop it. Do not start new investigation.`,
+    };
+  }
+  return {
+    ja: `残り ${remaining} 日。逆算すると、資料の確定は ${review.ja}(2 週間前)、キーパーソンへの事前説明は ${prebrief.ja}(4 週間前)が折り返し点。この 2 つの日付から先に予定を押さえ、当日に初めて見せる資料を作らない。`,
+    en: `${remaining} days left. Working back, the document should be frozen by ${review.en} (two weeks out) and the key people pre-briefed by ${prebrief.en} (four weeks out). Book those two dates first — nothing should be seen for the first time on the day.`,
+  };
+}
+
+const RATIO_RE = /(\d+(?:\.\d+)?)\s*(?:%|パーセント)/g;
+
+const FACT_TOPIC: Record<SituationFactKind, Bilingual> = {
+  budget: { ja: '予算(金額)', en: 'Budget (amount)' },
+  deadline: { ja: '期限(日付)', en: 'Deadline (date)' },
+  capacity: { ja: '体制(人数)', en: 'Capacity (headcount)' },
+  ratio: { ja: '目標値(割合)', en: 'Target (percentage)' },
+};
+
+/**
+ * 節の並びから数値の事実を読み取る。
+ * `today` は残り日数の計算に使う(既定は実行日)。テストから固定できるように引数にしている。
+ */
+export function extractSituationFacts(
+  clauses: readonly SituationClause[],
+  options: { from?: 'text' | 'engagement'; sourceLabel?: Bilingual; today?: string } = {},
+): SituationFact[] {
+  const from = options.from ?? 'text';
+  const today = options.today ?? toIsoDate(new Date());
+  const facts: SituationFact[] = [];
+  const seen = new Set<string>();
+  const push = (fact: Omit<SituationFact, 'from' | 'sourceLabel'>): void => {
+    const key = `${fact.kind}:${fact.value}:${fact.isoDate ?? ''}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    facts.push({ ...fact, from, sourceLabel: options.sourceLabel });
+  };
+
+  for (const clause of clauses) {
+    if (clause.negated || clause.hedged) continue;
+    const raw = clause.text;
+    const norm = normalizeQuantitativeText(raw);
+    const quote = clip(raw, 60);
+
+    // --- 金額 ---
+    const money = readMoney(norm);
+    if (money) {
+      const amount = formatMoney(money.value, money.currency);
+      push({
+        kind: 'budget',
+        axis: 'budget',
+        topic: FACT_TOPIC.budget,
+        label: { ja: `金額 ${amount.ja}`, en: `Amount ${amount.en}` },
+        evidence: money.evidence,
+        clause: quote,
+        value: money.value,
+        advice: moneyAdvice(money.value, money.currency),
+      });
+    }
+
+    // --- 人数 ---
+    if (CAPACITY_KEYWORD_RE.test(norm)) {
+      let count: number | null = null;
+      let evidence = '';
+      HEADCOUNT_RE.lastIndex = 0;
+      for (const m of norm.matchAll(HEADCOUNT_RE)) {
+        const n = Number(m[1]);
+        if (Number.isFinite(n) && n > 0 && (count === null || n > count)) {
+          count = n;
+          evidence = clip(m[0].trim(), 20);
+        }
+      }
+      if (count === null) {
+        HEADCOUNT_EN_RE.lastIndex = 0;
+        for (const m of norm.matchAll(HEADCOUNT_EN_RE)) {
+          const n = Number(m[1]);
+          if (Number.isFinite(n) && n > 0 && (count === null || n > count)) {
+            count = n;
+            evidence = clip(m[0].trim(), 20);
+          }
+        }
+      }
+      if (count !== null) {
+        const dedicated = DEDICATED_RE.test(norm);
+        const partTime = PART_TIME_RE.test(norm);
+        const kindJa = dedicated ? '専任' : partTime ? '兼任' : '';
+        const kindEn = dedicated ? 'dedicated' : partTime ? 'part-time' : '';
+        push({
+          kind: 'capacity',
+          axis: 'capacity',
+          staffing: dedicated ? 'dedicated' : partTime ? 'part-time' : undefined,
+          topic: FACT_TOPIC.capacity,
+          label: {
+            ja: `${kindJa}${kindJa ? ' ' : ''}${count} 名`,
+            en: `${count} people${kindEn ? ` (${kindEn})` : ''}`,
+          },
+          evidence,
+          clause: quote,
+          value: partTime && !dedicated ? Math.max(1, Math.floor(count / 2)) : count,
+          advice: headcountAdvice(
+            partTime && !dedicated ? Math.max(1, Math.floor(count / 2)) : count,
+            dedicated,
+          ),
+          assumption: partTime && !dedicated
+            ? {
+                ja: '兼任と書かれていたので、実働はおよそ半分として数えました。実際の割合が違えば書き足してください。',
+                en: 'Stated as part-time, so the effective capacity is counted as roughly half. Correct the share if it differs.',
+              }
+            : undefined,
+        });
+      }
+    }
+
+    // --- 期日 ---
+    if (DEADLINE_KEYWORD_RE.test(norm)) {
+      let iso: string | null = null;
+      let evidence = '';
+      let assumption: Bilingual | undefined;
+      DATE_YMD_RE.lastIndex = 0;
+      const ymd = norm.match(DATE_YMD_RE);
+      if (ymd && ymd[0]) {
+        const parts = /(\d{4})\s*[-/年]\s*(\d{1,2})\s*[-/月]\s*(\d{1,2})/.exec(ymd[0]);
+        if (parts) {
+          iso = `${parts[1]}-${String(Number(parts[2])).padStart(2, '0')}-${String(Number(parts[3])).padStart(2, '0')}`;
+          evidence = clip(ymd[0].trim(), 20);
+        }
+      }
+      if (!iso) {
+        DATE_MD_RE.lastIndex = 0;
+        const md = DATE_MD_RE.exec(norm);
+        if (md) {
+          const month = Number(md[1]);
+          const day = Number(md[2]);
+          if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+            const year = Number(today.slice(0, 4));
+            const same = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+            iso = daysBetween(today, same) >= 0
+              ? same
+              : `${year + 1}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+            evidence = clip(md[0].trim(), 20);
+            assumption = {
+              ja: `年が書かれていなかったので、直近の ${formatDate(iso).ja} と読みました。違う年なら書き足してください。`,
+              en: `No year was stated, so this is read as the next ${iso}. Say otherwise if it is a different year.`,
+            };
+          }
+        }
+      }
+      if (!iso) {
+        MONTH_END_RE.lastIndex = 0;
+        const me = MONTH_END_RE.exec(norm);
+        if (me) {
+          const month = Number(me[1]);
+          if (month >= 1 && month <= 12) {
+            const year = Number(today.slice(0, 4));
+            const lastDay = (y: number): number => new Date(Date.UTC(y, month, 0)).getUTCDate();
+            const same = `${year}-${String(month).padStart(2, '0')}-${lastDay(year)}`;
+            iso = daysBetween(today, same) >= 0
+              ? same
+              : `${year + 1}-${String(month).padStart(2, '0')}-${lastDay(year + 1)}`;
+            evidence = clip(me[0].trim(), 20);
+            assumption = {
+              ja: `「${evidence}」を月の最終日(${formatDate(iso).ja})として読みました。違う日なら書き足してください。`,
+              en: `"${evidence}" is read as the last day of that month (${iso}). Say otherwise if it is a different day.`,
+            };
+          }
+        }
+      }
+      if (!iso && FISCAL_END_RE.test(norm)) {
+        // 日本の年度末は 3 月 31 日。会計年度が違う組織もあるので前提として明示する
+        const year = Number(today.slice(0, 4));
+        const march = `${year}-03-31`;
+        iso = daysBetween(today, march) >= 0 ? march : `${year + 1}-03-31`;
+        evidence = '年度末';
+        assumption = {
+          ja: `「年度末」を 3 月 31 日(${formatDate(iso).ja})として読みました。会計年度が 3 月末でなければ書き足してください。`,
+          en: `"Fiscal year end" is read as 31 March (${iso}). Say so if your fiscal year ends elsewhere.`,
+        };
+      }
+      if (!iso) {
+        REL_MONTH_RE.lastIndex = 0;
+        const rm = REL_MONTH_RE.exec(norm);
+        if (rm) {
+          const months = Number(rm[1]);
+          if (Number.isFinite(months) && months > 0 && months <= 120) {
+            iso = addDays(today, Math.round(months * 30.4));
+            evidence = clip(rm[0].trim(), 20);
+            assumption = {
+              ja: `「${evidence}」を今日からの期間として ${formatDate(iso).ja} と置きました。起点が違うなら書き足してください。`,
+              en: `"${evidence}" is treated as a period from today, giving ${iso}. Say so if it starts elsewhere.`,
+            };
+          }
+        }
+      }
+      if (!iso) {
+        REL_WEEK_RE.lastIndex = 0;
+        const rw = REL_WEEK_RE.exec(norm);
+        if (rw) {
+          const weeks = Number(rw[1]);
+          if (Number.isFinite(weeks) && weeks > 0 && weeks <= 520) {
+            iso = addDays(today, weeks * 7);
+            evidence = clip(rw[0].trim(), 20);
+            assumption = {
+              ja: `「${evidence}」を今日からの期間として ${formatDate(iso).ja} と置きました。起点が違うなら書き足してください。`,
+              en: `"${evidence}" is treated as a period from today, giving ${iso}. Say so if it starts elsewhere.`,
+            };
+          }
+        }
+      }
+      if (iso) {
+        const remaining = daysBetween(today, iso);
+        const shown = formatDate(iso);
+        push({
+          kind: 'deadline',
+          axis: 'time',
+          topic: FACT_TOPIC.deadline,
+          label: {
+            ja: `${shown.ja}(残り ${remaining} 日)`,
+            en: `${shown.en} (${remaining} days out)`,
+          },
+          evidence,
+          clause: quote,
+          value: remaining,
+          isoDate: iso,
+          assumption,
+          advice: deadlineAdvice(iso, remaining),
+        });
+      }
+    }
+
+    // --- 割合 ---
+    RATIO_RE.lastIndex = 0;
+    const ratio = RATIO_RE.exec(norm);
+    if (ratio) {
+      const pct = Number(ratio[1]);
+      if (Number.isFinite(pct) && pct > 0) {
+        push({
+          kind: 'ratio',
+          topic: FACT_TOPIC.ratio,
+          label: { ja: `${trimNumber(pct)}%`, en: `${trimNumber(pct)}%` },
+          evidence: clip(ratio[0].trim(), 20),
+          clause: quote,
+          value: pct,
+          advice: {
+            ja: `${trimNumber(pct)}% は、分母(何に対しての割合か)・基準日・測る人が決まっていないと後で検証できない。この 3 つを先に文章で固定し、初回の測定値を今のうちに記録しておく。`,
+            en: `${trimNumber(pct)}% cannot be verified later unless the denominator, the baseline date, and who measures it are fixed. Write those three down first and record the opening measurement now.`,
+          },
+        });
+      }
+    }
+  }
+  return facts.slice(0, 8);
+}
+
+/**
+ * 数値から読み取った事実を、既存の条件に翻訳する。
+ * 条件になると助言の並べ替え(favor / avoid)まで効くので、金額のように
+ * 「多い / 少ない」を断定できないものは条件にせず、事実のまま扱う。
+ */
+export function conditionsFromFacts(
+  facts: readonly SituationFact[],
+  covered: ReadonlySet<SituationAxis>,
+): DetectedCondition[] {
+  const byId = new Map(SITUATION_CONDITIONS.map((c) => [c.id, c]));
+  const out: DetectedCondition[] = [];
+  const used = new Set<SituationAxis>(covered);
+  const add = (id: SituationConditionId, cue: string): void => {
+    const condition = byId.get(id);
+    if (!condition || used.has(condition.axis)) return;
+    used.add(condition.axis);
+    out.push({ condition, cues: [cue], from: 'number' });
+  };
+  for (const fact of facts) {
+    if (fact.kind === 'capacity') {
+      // 「専任」と書かれていない人数から「専任の体制がある」とは言わない。
+      // 数字が読めたことと、その体制の性質を読めたことは別。
+      if (fact.value <= 1) add('team-solo', fact.evidence);
+      else if (fact.staffing === 'dedicated') add('team-dedicated', fact.evidence);
+    } else if (fact.kind === 'deadline') {
+      add(fact.value <= 60 ? 'deadline-urgent' : 'deadline-fixed', fact.evidence);
+    }
+  }
+  return out;
+}
+
 /** 条件を検出する。同じ軸で複数当たった場合は根拠の数、次に priority で 1 件に絞る */
 export function detectSituationConditions(text: string): DetectedCondition[] {
   const lower = text.toLowerCase();
   const byAxis = new Map<SituationAxis, DetectedCondition>();
   for (const condition of SITUATION_CONDITIONS) {
-    const cues = condition.cues.filter((c) => hasCue(text, lower, c));
+    const cues = [
+      ...condition.cues.filter((c) => hasCue(text, lower, c)),
+      ...patternCues(text, condition),
+    ];
     if (cues.length === 0) continue;
     const found: DetectedCondition = { condition, cues };
     const current = byAxis.get(condition.axis);
@@ -1444,7 +2325,7 @@ export function matchConditionCombos(conditions: DetectedCondition[]): Condition
  * 打ち消された節は条件検出と話題の一致から外す。ただし全部の節が打ち消されている場合は
  * 「打ち消しではなく、そういう書き方をしているだけ」の可能性が高いので、打ち消しを適用しない。
  */
-export function readSituation(situation: string): SituationReading {
+export function readSituation(situation: string, context?: SituationContext): SituationReading {
   const clauses = splitSituationClauses(situation);
   const positives = clauses.filter((c) => !c.negated && !c.hedged);
   const applyNegation = positives.length > 0 && positives.some((c) => c.text.length >= 4);
@@ -1452,10 +2333,48 @@ export function readSituation(situation: string): SituationReading {
   // 保留した節はどちらの文にも入れない(肯定として読むのも打ち消すのも誤りになる)
   const positiveText = effective.filter((c) => !c.negated && !c.hedged).map((c) => c.text).join('。');
   const negatedText = effective.filter((c) => c.negated).map((c) => c.text).join('。');
-  const conditions = detectSituationConditions(positiveText);
-  const axes = new Set(conditions.map((c) => c.condition.axis));
+
+  const conditions = detectSituationConditions(positiveText).map(
+    (d): DetectedCondition => ({ ...d, from: 'text' }),
+  );
+  const facts = extractSituationFacts(effective, { from: 'text' });
+
+  // 案件に登録済みの情報も状況として読む。ただしルールの一致には混ぜない
+  // (案件の説明で見立てが上書きされると、今聞かれていることに答えられなくなる)。
+  const contextText = context?.text?.trim() ?? '';
+  let contextFacts: SituationFact[] = [];
+  let contextConditions: DetectedCondition[] = [];
+  if (contextText.length >= 3) {
+    const contextClauses = splitSituationClauses(contextText);
+    contextFacts = extractSituationFacts(contextClauses, {
+      from: 'engagement',
+      sourceLabel: context?.label,
+    });
+    contextConditions = detectSituationConditions(contextText).map(
+      (d): DetectedCondition => ({ ...d, from: 'engagement', sourceLabel: context?.label }),
+    );
+  }
+
+  // 相談文で読めた軸を、案件情報で上書きしない(今書かれていることを優先する)
+  const factKinds = new Set(facts.map((f) => f.kind));
+  const mergedFacts = [...facts, ...contextFacts.filter((f) => !factKinds.has(f.kind))].slice(0, 10);
+
+  // 数値から起こす条件は、定型表現で既に読めている軸だけ避ける。
+  // (事実として読めている軸を避けてしまうと、数値が助言の並べ替えに効かなくなる)
+  const cueAxes = new Set<SituationAxis>(conditions.map((c) => c.condition.axis));
+  const derived = conditionsFromFacts(mergedFacts, cueAxes);
+  const covered = new Set<SituationAxis>(cueAxes);
+  for (const f of mergedFacts) if (f.axis) covered.add(f.axis);
+  for (const d of derived) covered.add(d.condition.axis);
+  const fromContext = contextConditions.filter((c) => {
+    if (covered.has(c.condition.axis)) return false;
+    covered.add(c.condition.axis);
+    return true;
+  });
+
+  const allConditions = [...conditions, ...derived, ...fromContext];
   const unknownAxes = (Object.keys(SITUATION_AXIS_LABELS) as SituationAxis[]).filter(
-    (a) => !axes.has(a),
+    (a) => !covered.has(a),
   );
   return {
     clauses: effective,
@@ -1463,10 +2382,12 @@ export function readSituation(situation: string): SituationReading {
     negatedText,
     hasNegation: effective.some((c) => c.negated),
     hedged: effective.filter((c) => c.hedged),
-    conditions,
+    conditions: allConditions,
+    facts: mergedFacts,
     unknownAxes,
-    combos: matchConditionCombos(conditions),
+    combos: matchConditionCombos(allConditions),
     terms: extractSituationTerms(positiveText),
+    contextTerms: contextText.length >= 3 ? extractSituationTerms(contextText) : [],
   };
 }
 
@@ -1489,6 +2410,8 @@ export function rankByRelevance(
     const hay = `${item.ja} ${item.en}`.toLowerCase();
     let score = 0;
     for (const t of reading.terms) if (hay.includes(t)) score += 2;
+    // 案件側の語は弱く効かせる(相談文で言われたことを上回らせない)
+    for (const t of reading.contextTerms ?? []) if (hay.includes(t)) score += 1;
     for (const t of extraTerms) {
       const v = t.toLowerCase();
       if (v.length >= 2 && hay.includes(v)) score += 2;
@@ -1501,6 +2424,25 @@ export function rankByRelevance(
   });
   scored.sort((a, b) => b.score - a.score || a.index - b.index);
   return scored.slice(0, limit).map((s) => s.item);
+}
+
+/**
+ * 数値から読み取った事実に対する助言。
+ * 条件由来の助言より先に出す — 金額・日付・人数は、形容詞より具体的に効く。
+ */
+export function factAdvice(facts: readonly SituationFact[], limit = 4): Bilingual[] {
+  const out: Bilingual[] = [];
+  const seen = new Set<string>();
+  const order: SituationFactKind[] = ['deadline', 'budget', 'capacity', 'ratio'];
+  for (const kind of order) {
+    for (const f of facts) {
+      if (f.kind !== kind || !f.advice || out.length >= limit) continue;
+      if (seen.has(f.advice.ja)) continue;
+      seen.add(f.advice.ja);
+      out.push(f.advice);
+    }
+  }
+  return out;
 }
 
 /** 条件から出す助言をまとめる(数が増えすぎないよう上限を掛ける) */

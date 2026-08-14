@@ -30,9 +30,21 @@ import {
   securityPitfallsForPhase,
   securityRequirementsFor,
 } from '../knowledge/security-ea.js';
+import { splitSituationClauses } from '../knowledge/consulting.js';
 import { loadEngagement } from '../engagement/store.js';
 import type { Engagement } from '../engagement/model.js';
 import { errorResult, langSchema, msg, textResult } from './common.js';
+import {
+  capInline,
+  checkFreeText,
+  echoInput,
+  findTooManyItems,
+  freeTextSchema,
+  HINTS,
+  IDENTIFIER_LIMIT,
+  MAX_ITEMS,
+  tooManyItemsResult,
+} from './input-limits.js';
 
 /* ------------------------------------------------------------------ *
  * 共通のヘルパ
@@ -194,6 +206,14 @@ interface Situation {
   /** 外部システム・SaaS との連携があるか */
   integration: boolean;
   contextEvidence: string[];
+  /** 「扱わない」と書かれていたため、根拠から外した機微性 */
+  deniedSensitivities: AssetKind[];
+  /** 打ち消しとして読んだ語(利用者が訂正できるよう必ず開示する) */
+  deniedEvidence: string[];
+  /** 打ち消しと判断した言い回し */
+  deniedMarkers: string[];
+  /** 二重否定・留保のため、打ち消さずに肯定として読んだ節 */
+  hedgedClauses: string[];
 }
 
 /* --- 判定に使う語 ------------------------------------------------- */
@@ -245,7 +265,7 @@ const SENSITIVITY_WORDS: { kind: AssetKind; words: string[] }[] = [
   {
     kind: 'payment',
     words: [
-      '決済', '支払', '請求', '与信', 'クレジット', 'カード番号', '口座', '送金',
+      '決済', '支払', '請求', '与信', 'クレジット', 'カード番号', 'カード情報', '口座', '送金',
       '課金', '代金', '取引金額', '売掛', '買掛',
       'payment', 'billing', 'invoice', 'credit card', 'settlement',
     ],
@@ -356,7 +376,169 @@ const SCALE_UNITS: { unit: ScaleHint['unit']; words: string[] }[] = [
   },
 ];
 
+/* --- 打ち消しの読み取り ------------------------------------------- *
+ *
+ * 「個人情報もカード情報も扱わない」を「個人データを扱う」と読むと、
+ * 利用者が扱わないと明言したものを根拠に対策を勧めることになる。
+ *
+ * 節への分割・一般的な打ち消し語・二重否定の保留(「〜が無いわけではない」)は
+ * consulting.ts の `splitSituationClauses` が持っているので、判定をもう一組
+ * 作らずにそれを使う。ここに足すのは、セキュリティの記述に固有の
+ * 「そのデータは持っていない / その経路は無い」型の言い回しだけ。
+ * ------------------------------------------------------------------ */
+
+/** データ・経路を持たないことを示す語(consulting.ts に無いものだけ) */
+const HANDLING_DENIAL_MARKERS = [
+  '扱わない', '扱いません', '扱っていない', '扱ってない', '扱わず',
+  '取り扱わない', '取り扱いません', '取り扱っていない',
+  '保持しない', '保持しません', '保持していない', '保持せず',
+  '保存しない', '保存しません', '保存していない', '保存せず',
+  '保管しない', '格納しない', '記録しない', '収集しない', '取得しない', '蓄積しない',
+  '収集せず', '取得せず', '記録せず',
+  '含まない', '含みません', '含まれない', '含んでいない', '含まず',
+  '持たない', '持ちません', '持っていない', '持たず',
+  '使わない', '使用しない', '利用しない', '用いない',
+  '連携しない', '連携せず', '接続しない', '接続せず', '公開しない', '送信しない',
+  '残さない', '置かない',
+  // 「決済は行いません」「外部連携は行っていない」型。動詞「行う」は
+  // 「〜は/も行わない」の形でしか採らない(「削除を行う」のような肯定文脈と
+  // 取り違えないため)。
+  'は行わない', 'は行いません', 'は行っていない', 'は行っておりません', 'は行わず',
+  'も行わない', 'も行いません', 'も行っていない',
+  'は実施しない', 'は実施しません', 'も実施しない',
+  // 存在の打ち消し。助詞が「は」だけだと
+  // 「個人情報もありません」「決済も無い」を取りこぼす(実測で確認)。
+  'はありません', 'は無い', 'はない', 'は無く', 'はなく', 'は存在しない', 'は無し', 'はなし',
+  'はございません', '保有しない', '保有しません', '保有していない',
+  'もありません', 'も無い', 'もない', 'も無く', 'もなく', 'も存在しない', 'も無し', 'もなし',
+  'もございません',
+  'do not handle', 'does not handle', "doesn't handle", 'do not store', 'does not store',
+  'do not hold', 'does not hold', 'do not collect', 'does not collect',
+  'do not process', 'does not process', 'not stored', 'never stored', 'not collected',
+  'not handled', 'without storing', 'no personal data', 'no payment data', 'no card data',
+];
+
+/**
+ * 打ち消しが及ぶ範囲の切れ目。日本語の打ち消しは語の後ろに来るので、
+ * 「A で B は扱わない」の A まで打ち消さないよう、直前の切れ目から先だけを対象にする。
+ * 切れ目を多めに採るほど打ち消しは弱くなる = 過剰配慮側に倒れる。
+ */
+const DENIAL_SPAN_BREAKERS = [
+  'で', 'が', 'けど', 'けれど', 'ものの', 'ため', 'ので', 'ただし', 'なお', 'しかし',
+  'but ', 'however', 'although', 'while ', 'though ',
+];
+
+/** 打ち消しが掛かっている範囲 */
+interface DenialSpan {
+  start: number;
+  end: number;
+  marker: string;
+}
+
+/** ASCII だけで書かれた語か(英語は小文字化して突き合わせる) */
+function isAsciiWord(value: string): boolean {
+  return /^[\x20-\x7E]+$/.test(value);
+}
+
+/** 日本語の打ち消し語について、打ち消しが始まる位置を決める */
+function denialSpanStart(clause: string, markerIndex: number): number {
+  let start = 0;
+  for (const breaker of DENIAL_SPAN_BREAKERS) {
+    const idx = clause.lastIndexOf(breaker, Math.max(0, markerIndex - 1));
+    if (idx >= 0 && idx + breaker.length <= markerIndex) {
+      start = Math.max(start, idx + breaker.length);
+    }
+  }
+  return start;
+}
+
+/** 節 1 つの中で打ち消しが掛かっている範囲を返す */
+function denialSpans(clause: string, extraMarker?: string): DenialSpan[] {
+  const lower = clause.toLowerCase();
+  const markers = extraMarker ? [extraMarker, ...HANDLING_DENIAL_MARKERS] : HANDLING_DENIAL_MARKERS;
+  const spans: DenialSpan[] = [];
+  for (const marker of markers) {
+    const ascii = isAsciiWord(marker);
+    const hay = ascii ? lower : clause;
+    const needle = ascii ? marker.toLowerCase() : marker;
+    if (needle.length === 0) continue;
+    let i = hay.indexOf(needle);
+    while (i >= 0) {
+      // 英語は打ち消しの後ろに対象が来る("does not handle personal data")
+      if (ascii) spans.push({ start: i, end: clause.length, marker });
+      else spans.push({ start: denialSpanStart(clause, i), end: i + needle.length, marker });
+      i = hay.indexOf(needle, i + needle.length);
+    }
+  }
+  return spans.sort((a, b) => a.start - b.start || a.end - b.end);
+}
+
+/** 打ち消しを踏まえた読み取り結果 */
+interface NegationReading {
+  /** 打ち消されていない部分 */
+  positive: string;
+  /** 打ち消されている部分 */
+  denied: string;
+  /** 打ち消しと判断した語 */
+  markers: string[];
+  /** 二重否定・留保のため、打ち消さずに肯定として読んだ節 */
+  hedged: string[];
+}
+
+/**
+ * 文を節に割り、打ち消しの掛かった範囲を肯定側から外す。
+ *
+ * 二重否定・留保(「機微情報が無いわけではない」)は打ち消しに数えない。
+ * consulting.ts は保留した節をどちらにも入れないが、セキュリティでは
+ * 「無いとは言い切っていない」を「無い」と読むほうが高くつくので、
+ * ここでは肯定側に残したうえで、保留した旨を出力で開示する。
+ */
+function readWithNegation(raw: string): NegationReading {
+  const kept: string[] = [];
+  const denied: string[] = [];
+  const markers: string[] = [];
+  const hedged: string[] = [];
+  for (const clause of splitSituationClauses(raw)) {
+    if (clause.hedged === true) {
+      hedged.push(clause.text);
+      kept.push(clause.text);
+      continue;
+    }
+    const spans = denialSpans(clause.text, clause.negated ? clause.marker : undefined);
+    if (spans.length === 0) {
+      kept.push(clause.text);
+      continue;
+    }
+    // 重なった範囲は 1 つに畳む
+    const merged: DenialSpan[] = [];
+    for (const span of spans) {
+      markers.push(span.marker);
+      const last = merged[merged.length - 1];
+      if (last && span.start <= last.end) last.end = Math.max(last.end, span.end);
+      else merged.push({ ...span });
+    }
+    let cursor = 0;
+    for (const span of merged) {
+      if (span.start > cursor) kept.push(clause.text.slice(cursor, span.start));
+      denied.push(clause.text.slice(span.start, span.end));
+      cursor = span.end;
+    }
+    if (cursor < clause.text.length) kept.push(clause.text.slice(cursor));
+  }
+  return {
+    positive: kept.join(' 。 '),
+    denied: denied.join(' 。 '),
+    markers: unique(markers),
+    hedged,
+  };
+}
+
 /* --- 読み取り本体 ------------------------------------------------- */
+
+/** 重複を落とす(根拠の語をそのまま並べると同じ語が何度も出る) */
+function unique(values: string[]): string[] {
+  return Array.from(new Set(values));
+}
 
 /** キーワードのうち実際に当たったものを返す(根拠として出力する) */
 function hits(haystackLower: string, keywords: string[]): string[] {
@@ -398,13 +580,21 @@ function parseScales(raw: string): ScaleHint[] {
  * 記述・資産・主体から状況を読み取る。
  * 断定できないものは 'unknown' / false のまま返し、呼び出し側で
  * 「聞けば埋まること」として提示する。
+ *
+ * 語の一致だけで読むと「個人情報もカード情報も扱わない」が「個人データを扱う」に
+ * なるため、判定はすべて**打ち消しを外した部分**に対して行う。何を打ち消しとして
+ * 読んだかは Situation に載せて必ず開示する(読み違えを利用者が訂正できるように)。
  */
 function readSituation(system: string, assets: string[], actors: string[]): Situation {
   const all = [system, ...assets, ...actors].join(' \n ');
-  const h = all.toLowerCase();
+  const reading = readWithNegation(all);
+  const h = reading.positive.toLowerCase();
+  const deniedLower = reading.denied.toLowerCase();
+  // 「インターネットに接続していない」は打ち消しの文面そのものが根拠になるので全文を見る
+  const full = all.toLowerCase();
 
   // --- 公開範囲 ---
-  const netDenied = hits(h, NET_DENIAL_WORDS);
+  const netDenied = hits(full, NET_DENIAL_WORDS);
   const isolatedHits = [...hits(h, ISOLATED_WORDS), ...netDenied];
   const publicHits = [
     ...hits(h, PUBLIC_WORDS),
@@ -438,24 +628,39 @@ function readSituation(system: string, assets: string[], actors: string[]): Situ
   }
 
   // --- 機微性 ---
+  // 打ち消し側にしか出てこない種別は「扱わない」と読み、優先度の根拠から外す。
+  // ただし黙って捨てず、外したことと根拠語を持ち帰る。
   const sensitivities: AssetKind[] = [];
   const sensitivityEvidence: string[] = [];
+  const deniedSensitivities: AssetKind[] = [];
+  const deniedSensitivityWords: string[] = [];
   for (const group of SENSITIVITY_WORDS) {
     const found = hits(h, group.words);
     if (found.length > 0) {
       sensitivities.push(group.kind);
       sensitivityEvidence.push(...found);
+      continue;
+    }
+    const denied = hits(deniedLower, group.words);
+    if (denied.length > 0) {
+      deniedSensitivities.push(group.kind);
+      deniedSensitivityWords.push(...denied);
     }
   }
 
   // --- 規模 ---
   // 大きい順に並べ、先頭を見出しに使う。根拠の列も同じ順に出さないと
   // 「なぜこの数字なのか」が読み手に追えない。
+  /* 規模だけは原文から読む。節への分割はカンマでも切るため、打ち消しを外した
+     文からでは「1,240 社」が「240 社」になってしまう。規模を打ち消す書き方
+     (「1,240 社は対象外」)は稀で、外し損ねても過剰配慮側にしか倒れない */
   const scales = parseScales(all).sort((a, b) => b.count - a.count);
   const scale = scales[0];
 
   // --- 主体 ---
-  const actorHaystack = (actors.length > 0 ? actors.join(' \n ') : all).toLowerCase();
+  const actorText =
+    actors.length > 0 ? readWithNegation(actors.join(' \n ')).positive : reading.positive;
+  const actorHaystack = actorText.toLowerCase();
   const actorKinds: ActorKind[] = [];
   const actorEvidence: string[] = [];
   for (const group of ACTOR_WORDS) {
@@ -487,6 +692,22 @@ function readSituation(system: string, assets: string[], actors: string[]): Situ
     cloud: cloudHits.length > 0,
     integration: integrationHits.length > 0,
     contextEvidence: [...physicalHits, ...maintenanceHits, ...cloudHits, ...integrationHits],
+    deniedSensitivities,
+    deniedEvidence: unique([
+      ...deniedSensitivityWords,
+      ...hits(deniedLower, [
+        ...PUBLIC_WORDS,
+        ...PUBLIC_NET_WORDS,
+        ...PARTNER_WORDS,
+        ...INTERNAL_WORDS,
+        ...CLOUD_WORDS,
+        ...INTEGRATION_WORDS,
+        ...MAINTENANCE_WORDS,
+        ...PHYSICAL_WORDS,
+      ]),
+    ]),
+    deniedMarkers: reading.markers,
+    hedgedClauses: reading.hedged,
   };
 }
 
@@ -747,6 +968,11 @@ function scaleText(scale: ScaleHint, lang: Lang): string {
   return label(`${n} アカウント`, `${n} accounts`, lang);
 }
 
+/** 資産の性質の名前を、指定した言語で並べる(表のセルと文中の両方で使う) */
+function kindNames(kinds: AssetKind[], key: 'ja' | 'en'): string {
+  return kinds.map((k) => ASSET_KIND_LABEL[k][key]).join(' / ');
+}
+
 /** 読み取り結果の表。根拠と確度を必ず並べる */
 function situationTable(sit: Situation, lang: Lang): string[] {
   const out: string[] = [];
@@ -787,6 +1013,60 @@ function situationTable(sit: Situation, lang: Lang): string[] {
   out.push(
     `| ${label('経路・環境', 'Paths and environment', lang)} | ${ctx.length > 0 ? ctx.join(' / ') : label('読み取れず', 'not determined', lang)} | ${sit.contextEvidence.length > 0 ? sit.contextEvidence.slice(0, 5).map(cell).join(', ') : dash} | ${ctx.length > 0 ? stated : none} |`,
   );
+  /* 打ち消しは黙って効かせない。「扱わない」と読んだこと自体を表に出して、
+     読み違えていれば利用者がその場で直せるようにする */
+  if (sit.deniedMarkers.length > 0) {
+    const readAs =
+      sit.deniedSensitivities.length > 0
+        ? label(
+            `${kindNames(sit.deniedSensitivities, 'ja')} を対象外として扱った`,
+            `${kindNames(sit.deniedSensitivities, 'en')} treated as out of scope`,
+            lang,
+          )
+        : label('該当する記述を根拠から外した', 'the matching text was excluded from the evidence', lang);
+    const evidence = unique([...sit.deniedMarkers, ...sit.deniedEvidence]).slice(0, 5).map(cell).join(', ');
+    out.push(
+      `| ${label('打ち消しとして読んだ記述', 'Read as ruled out', lang)} | ${readAs} | ${evidence.length > 0 ? evidence : dash} | ${label('要確認', 'needs confirming', lang)} |`,
+    );
+  }
+  if (sit.hedgedClauses.length > 0) {
+    out.push(
+      `| ${label('打ち消さなかった二重否定', 'Double negatives kept', lang)} | ${label('「無いとは言い切っていない」ため、有るものとして読んだ', 'read as present, because the text stops short of saying it is absent', lang)} | ${sit.hedgedClauses.slice(0, 3).map((c) => cell(capInline(c, 40))).join(', ')} | ${label('要確認', 'needs confirming', lang)} |`,
+    );
+  }
+  return out;
+}
+
+/**
+ * 打ち消しを効かせたことの開示。
+ * 「扱わない」と書いたものを根拠に対策を勧めないための修正なので、
+ * 逆に読み違えたときに気付ける形で必ず出す。
+ */
+function negationNotes(sit: Situation, lang: Lang): string[] {
+  const out: string[] = [];
+  if (sit.deniedMarkers.length > 0) {
+    const words = unique([...sit.deniedEvidence, ...sit.deniedMarkers]).slice(0, 5).map(cell).join(', ');
+    const jaKinds = kindNames(sit.deniedSensitivities, 'ja');
+    const enKinds = kindNames(sit.deniedSensitivities, 'en');
+    out.push(
+      quote(
+        `打ち消しの表現(${words})を見つけたので、その部分は**判定の根拠から外しました**。${jaKinds.length > 0 ? `具体的には ${jaKinds} を「扱わない」と読み、優先度を上げる根拠にしていません。` : ''}実際には扱う・繋がるのであれば、その旨を肯定形で書いて呼び直してください(例: 「氏名と所属を保持する」)。優先度が変わります。`,
+        `Wording that rules things out (${words}) was found, and **those parts were excluded from the reading**.${enKinds.length > 0 ? ` Specifically, ${enKinds} was read as not handled here, so it is not raising any priority.` : ''} If it is in fact handled or connected, restate it positively — "we store names and departments" — and re-run; the priorities will change.`,
+        lang,
+      ),
+    );
+    out.push('');
+  }
+  if (sit.hedgedClauses.length > 0) {
+    out.push(
+      quote(
+        '「〜が無いわけではない」のような二重否定は、打ち消しとして扱っていません。**有るものとして読んでいます。** 断定できるなら言い切ってください(「機微情報は含まない」/「要配慮個人情報を含む」)。',
+        'Double negatives such as "it is not that there is none" are not treated as denials — **they are read as present.** If you can be definite, say it plainly: "contains no sensitive data" or "contains special-category personal data".',
+        lang,
+      ),
+    );
+    out.push('');
+  }
   return out;
 }
 
@@ -799,7 +1079,14 @@ function situationUnknowns(sit: Situation, lang: Lang): Bilingual[] {
       en: '**Exposure** could not be read. Add one sentence about who can reach it without authenticating — "partners over the internet", "isolated network, internal only". This one fact reorders all six lenses.',
     });
   }
-  if (sit.sensitivities.length === 0) {
+  if (sit.sensitivities.length === 0 && sit.deniedSensitivities.length > 0) {
+    /* 「読み取れませんでした」と書くと、扱わないと明記した利用者に同じことを
+       もう一度書かせることになる。読み取った内容の確認に変える */
+    gaps.push({
+      ja: `**${kindNames(sit.deniedSensitivities, 'ja')}は扱わない**と読み取りました。この読み取りが正しいなら、情報漏えいの優先度はこのままで構いません。**残っているのは「本当に 1 か所も無いか」の確認です。** 検証環境のテストデータ、問い合わせ対応の記録、障害調査用のダンプ、外部サービスに渡しているログの 4 か所を見て、無いことを 1 回だけ確かめてください。1 か所でも見つかったら、その旨を書いて呼び直すと優先度が変わります。`,
+      en: `The text was read as **not handling ${kindNames(sit.deniedSensitivities, 'en').toLowerCase()}**. If that is right, the disclosure lens can stay where it is. **What remains is confirming there is genuinely not one copy anywhere.** Check four places once — test data in non-production, support-case records, troubleshooting dumps, and logs shipped to an outside service. If any of them turns one up, say so and re-run; the priorities move.`,
+    });
+  } else if (sit.sensitivities.length === 0) {
     gaps.push({
       ja: '**扱うデータの機微性**が読み取れませんでした。個人情報・決済・認証情報・設計情報のどれが入るかを書いてください。どれも入らないなら、それ自体が「情報漏えい」の優先度を下げる根拠になります。',
       en: '**Data sensitivity** could not be read. Say whether personal data, payments, credentials, or design information are involved. If none are, that in itself justifies lowering the disclosure lens.',
@@ -1585,21 +1872,29 @@ export function registerSecurityTools(server: McpServer): void {
       description:
         '指定した ADM フェーズで並走させるセキュリティ層、そのフェーズを抜ける前に必ず答えておくべきセキュリティ上の問い、作成・更新すべきセキュリティ成果物、そのフェーズで起きやすい失敗を返す。 / For a given ADM phase, return the security layers to run alongside it, the security questions that must be answered before leaving the phase, the security artifacts to produce or update, and the failures that typically happen there.',
       inputSchema: {
-        phase: z
-          .string()
-          .describe('フェーズ ID / コード。例: "a", "Phase A", "preliminary", "requirements-management"'),
+        phase: freeTextSchema(
+          'フェーズ ID / コード。例: "a", "Phase A", "preliminary", "requirements-management"',
+          IDENTIFIER_LIMIT,
+        ),
         lang: langSchema,
       },
     },
     async ({ phase, lang }) => {
       try {
         const l = lang as Lang;
+        const tooLong = checkFreeText(
+          [{ field: 'phase', value: phase, limit: IDENTIFIER_LIMIT, hint: HINTS.identifier }],
+          l,
+        );
+        if (tooLong) return tooLong;
         const found = findPhase(phase);
         if (!found) {
+          // 見つからなかった値は短縮してから返す(長い値の全文エコー防止)
+          const shown = capInline(phase);
           return errorResult(
             msg(
-              `フェーズ「${phase}」が見つかりません。利用可能な ID: ${ADM_PHASES.map((p) => p.id).join(', ')}`,
-              `Phase "${phase}" not found. Available ids: ${ADM_PHASES.map((p) => p.id).join(', ')}`,
+              `フェーズ「${shown}」が見つかりません。利用可能な ID: ${ADM_PHASES.map((p) => p.id).join(', ')}`,
+              `Phase "${shown}" not found. Available ids: ${ADM_PHASES.map((p) => p.id).join(', ')}`,
               l,
             ),
           );
@@ -1731,16 +2026,17 @@ export function registerSecurityTools(server: McpServer): void {
       description:
         '対象システムの説明から公開範囲・扱うデータの機微性・利用者規模・主体の種類を読み取り、その状況に合わせた脅威モデリングの出発点を作る。読み取り結果と根拠、状況に応じた信頼境界の引き方、資産 × 6 観点(なりすまし/改ざん/否認/情報漏えい/サービス妨害/権限昇格)の**優先度入りの表**(空欄では返さない)、まず埋めるべき 3 セル、観点ごとにこの状況で実際に起きやすいこと、入力に足りない情報を返す。社外公開の大規模ポータルと閉域網の IoT 基盤では中身が変わる。出力は草案であり、セキュリティ担当との対話で確定させる前提。 / Read exposure, data sensitivity, user scale, and subject types out of a system description, then build a threat-modelling starting point fitted to that situation. Returns what was read and on what evidence, situation-specific trust-boundary rules, an asset-by-lens matrix over the six lenses (spoofing, tampering, repudiation, information disclosure, denial of service, elevation of privilege) that comes back **already prioritized rather than blank**, the three cells to fill first, what actually tends to go wrong here under each lens, and what the input did not say. A large public portal and an isolated IoT platform get materially different answers. The output is a draft to be settled in conversation with a security owner.',
       inputSchema: {
-        system: z
-          .string()
-          .optional()
-          .describe('対象システムの説明。公開範囲・利用者規模・扱うデータ・外部連携が書かれているほど助言が具体的になる。省略すると書き方の案内を返す / A description of the target system. The more it says about exposure, user scale, the data held, and external connections, the more specific the advice. Omit it to get guidance on what to write'),
+        system: freeTextSchema(
+          '対象システムの説明。公開範囲・利用者規模・扱うデータ・外部連携が書かれているほど助言が具体的になる。省略すると書き方の案内を返す / A description of the target system. The more it says about exposure, user scale, the data held, and external connections, the more specific the advice. Omit it to get guidance on what to write',
+        ).optional(),
         assets: z
-          .array(z.string())
+          .array(freeTextSchema('守る対象 1 件 / One protected asset', IDENTIFIER_LIMIT))
+          .max(MAX_ITEMS)
           .optional()
           .describe('守る対象。省略すると一般的な候補を出す / What is being protected; omitted, a generic candidate set is used'),
         actors: z
-          .array(z.string())
+          .array(freeTextSchema('主体・攻撃者 1 件 / One subject or adversary', IDENTIFIER_LIMIT))
+          .max(MAX_ITEMS)
           .optional()
           .describe('登場する主体・攻撃者。省略すると一般的な候補を出す / Subjects and adversaries; omitted, a generic candidate set is used'),
         lang: langSchema,
@@ -1749,6 +2045,27 @@ export function registerSecurityTools(server: McpServer): void {
     async ({ system, assets, actors, lang }) => {
       try {
         const l = lang as Lang;
+        const tooManyAssets = findTooManyItems('assets', assets) ?? findTooManyItems('actors', actors);
+        if (tooManyAssets) return tooManyItemsResult(tooManyAssets, l);
+        const tooLong = checkFreeText(
+          [
+            { field: 'system', value: system, hint: HINTS.situation },
+            ...(assets ?? []).map((v, i) => ({
+              field: `assets[${i}]`,
+              value: v,
+              limit: IDENTIFIER_LIMIT,
+              hint: HINTS.listItem,
+            })),
+            ...(actors ?? []).map((v, i) => ({
+              field: `actors[${i}]`,
+              value: v,
+              limit: IDENTIFIER_LIMIT,
+              hint: HINTS.listItem,
+            })),
+          ],
+          l,
+        );
+        if (tooLong) return tooLong;
         const target = (system ?? '').trim();
         if (target.length === 0) {
           // 引数なしで呼ばれたときは、エラーではなく「何を書けばよいか」を返す。
@@ -1877,7 +2194,7 @@ export function registerSecurityTools(server: McpServer): void {
         out.push('');
         out.push(`## ${label('対象', 'Target', l)}`);
         out.push('');
-        out.push(quoteRaw(target));
+        out.push(quoteRaw(echoInput(target, l)));
         out.push('');
 
         /* --- 0. 読み取った状況 --- */
@@ -1893,6 +2210,7 @@ export function registerSecurityTools(server: McpServer): void {
         out.push('');
         out.push(...situationTable(sit, l));
         out.push('');
+        out.push(...negationNotes(sit, l));
         if (sit.exposureConflict.length > 0) {
           out.push(
             quote(
@@ -2300,10 +2618,9 @@ export function registerSecurityTools(server: McpServer): void {
       description:
         '非機能要件として ID 管理すべきセキュリティ要件のチェックリストを返す。各項目に「どう検証するか」を併記する。scope の記述から公開範囲・データの機微性・規模・運用体制を読み取り、**この範囲で先に着手すべき項目を理由付きで選ぶ**とともに、共通の一覧には無い範囲固有の観点(物理アクセス、取引先アカウントのライフサイクル、責任分界など)を足す。regulated を true にすると規制対象の案件で追加になる項目も含める(false でも、記述に個人情報・決済が出てくれば指摘する)。 / Return the checklist of security requirements to register and track as non-functional requirements, each with its verification method. Reads exposure, data sensitivity, scale, and the operating arrangement out of `scope` to **select, with reasons, which items to start with here**, and adds scope-specific concerns the generic list omits — physical access, partner account lifecycle, the responsibility split. Set `regulated` to true to include what regulated engagements additionally need; with false, it still flags personal data or payments if the text mentions them.',
       inputSchema: {
-        scope: z
-          .string()
-          .optional()
-          .describe('対象範囲。システム名だけでなく、公開範囲・扱うデータ・保守体制まで書くと項目に優先度が付く。省略すると書き方の案内を返す / The scope. Beyond a system name, describing exposure, the data held, and the maintenance arrangement makes the items get prioritized. Omit it for guidance on what to write'),
+        scope: freeTextSchema(
+          '対象範囲。システム名だけでなく、公開範囲・扱うデータ・保守体制まで書くと項目に優先度が付く。省略すると書き方の案内を返す / The scope. Beyond a system name, describing exposure, the data held, and the maintenance arrangement makes the items get prioritized. Omit it for guidance on what to write',
+        ).optional(),
         regulated: z
           .boolean()
           .default(false)
@@ -2314,6 +2631,8 @@ export function registerSecurityTools(server: McpServer): void {
     async ({ scope, regulated, lang }) => {
       try {
         const l = lang as Lang;
+        const tooLong = checkFreeText([{ field: 'scope', value: scope, hint: HINTS.situation }], l);
+        if (tooLong) return tooLong;
         const target = (scope ?? '').trim();
         if (target.length === 0) {
           const guide: string[] = [];
@@ -2385,7 +2704,7 @@ export function registerSecurityTools(server: McpServer): void {
 
         out.push(msg('# セキュリティ要件チェックリスト', '# Security requirements checklist', l));
         out.push('');
-        out.push(`- ${label('対象', 'Scope', l)}: ${oneLine(target)}`);
+        out.push(`- ${label('対象', 'Scope', l)}: ${capInline(target, 300)}`);
         out.push(
           `- ${label('規制対象', 'Regulated', l)}: ${regulated ? label('はい', 'yes', l) : label('いいえ', 'no', l)}`,
         );
@@ -2408,7 +2727,8 @@ export function registerSecurityTools(server: McpServer): void {
         out.push('');
         out.push(...situationTable(sit, l));
         out.push('');
-        if (sit.exposure === 'unknown' && sit.sensitivities.length === 0) {
+        out.push(...negationNotes(sit, l));
+        if (sit.exposure === 'unknown' && sit.sensitivities.length === 0 && sit.deniedSensitivities.length === 0) {
           out.push(
             quote(
               '`scope` からは公開範囲もデータの機微性も読み取れませんでした。**下の優先度は既定値のままです。** 「社外公開」「個人情報を扱う」「閉域網」のような一文を足して呼び直すと、この一覧の順序と理由が変わります。',

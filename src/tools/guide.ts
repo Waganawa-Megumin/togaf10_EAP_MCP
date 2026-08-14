@@ -40,10 +40,12 @@ import {
   INFLUENCE_LABEL,
   PHASE_STATUS_ICON,
   PHASE_STATUS_LABEL,
+  RISK_LEVEL_LABEL,
   RISK_STATUS_LABEL,
   WORK_PACKAGE_STATUS_LABEL,
 } from '../dashboard/labels.js';
 import { errorResult, langSchema, msg, textResult, type ToolResult } from './common.js';
+import { capInline, checkFreeText, echoInput, freeTextSchema, HINTS } from './input-limits.js';
 
 // ---------------------------------------------------------------------------
 // 共通ヘルパ / Shared helpers
@@ -1733,7 +1735,8 @@ function renderColdStart(goal: string | undefined, lang: Lang): string {
     const matches = matchConsultRules(goal, undefined, 2);
     out.push(msg('## あなたの目的からの見立て', '## First read on your goal', lang));
     out.push('');
-    out.push(`> ${flat(goal.trim())}`);
+    // 全文エコーはしない(実測: 30 万字の goal → 99 万バイトの応答)
+    for (const line of echoInput(goal, lang).split('\n')) out.push(`> ${flat(line)}`);
     out.push('');
     // 案件が無くても目的レンズは読める。案件を作った後に何が判定されるかを先に見せる
     const lenses = matchGoalLenses(goal, 2);
@@ -2866,7 +2869,9 @@ function hintScore(text: string, hints: string[]): number {
  * 4 択だけでは「営業本部長」と「生産管理部長」が同じ出力になるため、持ち場を別に取る。
  */
 function resolveAudience(raw: string): ResolvedAudience {
-  const label = flat(raw).slice(0, 60) || 'business';
+  // 60 文字を超える相手の書き方はそのまま見出しに載せられないが、
+  // 黙って切ると「自分が書いた肩書きと違うものが返ってきた」と読める。切った旨と残り字数を出す。
+  const label = capInline(flat(raw), 60) || 'business';
   const lower = label.toLowerCase();
   const exact = (['executive', 'business', 'engineer', 'pmo'] as const).includes(lower as Audience);
   if (exact) {
@@ -3545,11 +3550,26 @@ function engagementFacts(
   const heavy = live.filter((r) => r.level === 'critical' || r.level === 'high');
   if (heavy.length > 0) {
     const orphan = heavy.filter((r) => !r.owner || !r.mitigation);
-    const top = orphan[0] ?? heavy[0];
+    // 経営層には 1 件しか出さないので、その 1 件は必ず最も重いものにする。
+    // 登録順で先頭を取ると、後から登録された critical を飛ばして high を出してしまう。
+    // 並びは 重大度 → 担当/対策の欠落 → 登録順(安定)。
+    const criticalFirst = (r: (typeof heavy)[number]): number => (r.level === 'critical' ? 0 : 1);
+    const orphanFirst = (r: (typeof heavy)[number]): number => (!r.owner || !r.mitigation ? 0 : 1);
+    const ranked = heavy
+      .map((risk, index) => ({ risk, index }))
+      .sort(
+        (a, b) =>
+          criticalFirst(a.risk) - criticalFirst(b.risk) ||
+          orphanFirst(a.risk) - orphanFirst(b.risk) ||
+          a.index - b.index,
+      );
+    const top = ranked[0].risk;
+    const topLevel = one(RISK_LEVEL_LABEL[top.level] ?? { ja: top.level, en: top.level }, lang);
+    const criticalCount = heavy.filter((r) => r.level === 'critical').length;
     facts.push({
       fact: {
-        ja: `重大リスク ${heavy.length} 件(最上位「${flat(clip(top.title, 28))}」${top.owner ? `・担当 ${flat(clip(top.owner, 12))}` : '・担当未設定'}${top.mitigation ? '' : '・対策未記入'})`,
-        en: `${heavy.length} severe risks (top: "${flat(clip(top.title, 28))}"${top.owner ? `, owner ${flat(clip(top.owner, 12))}` : ', no owner'}${top.mitigation ? '' : ', no mitigation'})`,
+        ja: `重大リスク ${heavy.length} 件(うち critical ${criticalCount} 件)。最上位は重大度で選んだ ${topLevel} の「${flat(clip(top.title, 28))}」${top.owner ? `・担当 ${flat(clip(top.owner, 12))}` : '・担当未設定'}${top.mitigation ? '' : '・対策未記入'}`,
+        en: `${heavy.length} severe risks (${criticalCount} of them critical). The one below is the top by severity, not by entry order: ${topLevel} — "${flat(clip(top.title, 28))}"${top.owner ? `, owner ${flat(clip(top.owner, 12))}` : ', no owner'}${top.mitigation ? '' : ', no mitigation'}`,
       },
       say:
         archetype === 'executive'
@@ -3792,16 +3812,17 @@ export function registerGuideTools(server: McpServer): void {
       description:
         'このサーバーの入口。案件が無ければ「まず決めるべき 3 つ」を、あれば現在地(フェーズ・進捗)と今週やる 3 つを 1 画面で返す。goal を渡すと目的に沿った見立てが付く。迷ったら最初にこれを呼ぶ。 / The entry point. With no engagement it returns the three things to settle first; with one it returns where you are and the three things to do this week, in a single screen. Pass a goal for a tailored read. Call this first when unsure.',
       inputSchema: {
-        goal: z
-          .string()
-          .optional()
-          .describe('やりたいことの自由記述(任意) / What you are trying to achieve, in free text'),
+        goal: freeTextSchema(
+          'やりたいことの自由記述(任意) / What you are trying to achieve, in free text',
+        ).optional(),
         lang: langSchema,
       },
     },
     async ({ goal, lang }): Promise<ToolResult> => {
       try {
         const l = lang as Lang;
+        const tooLong = checkFreeText([{ field: 'goal', value: goal, hint: HINTS.situation }], l);
+        if (tooLong) return tooLong;
         const engagement = loadEngagement();
         if (!engagement) return textResult(renderColdStart(goal, l));
         return textResult(renderWarmStart(engagement, goal, l));
@@ -3929,10 +3950,9 @@ export function registerGuideTools(server: McpServer): void {
         scale: z
           .enum(['small', 'medium', 'large'])
           .describe('規模 / Scale: small (one unit), medium (several units), large (enterprise-wide)'),
-        purpose: z
-          .string()
-          .min(3)
-          .describe('この取り組みの目的(自由記述) / What this engagement is for, in free text'),
+        purpose: freeTextSchema(
+          'この取り組みの目的(自由記述) / What this engagement is for, in free text',
+        ).min(3),
         timeboxWeeks: z
           .number()
           .int()
@@ -3950,6 +3970,8 @@ export function registerGuideTools(server: McpServer): void {
     async ({ scale, purpose, timeboxWeeks, hasExistingEa, lang }): Promise<ToolResult> => {
       try {
         const l = lang as Lang;
+        const tooLong = checkFreeText([{ field: 'purpose', value: purpose, hint: HINTS.situation }], l);
+        if (tooLong) return tooLong;
         const s = scale as Scale;
         const ctx: TailorContext = {
           scale: s,
@@ -3978,7 +4000,8 @@ export function registerGuideTools(server: McpServer): void {
         const out: string[] = [];
         out.push(msg('# 自社版 ADM の設計', '# Your Tailored ADM', l));
         out.push('');
-        out.push(`> ${flat(purpose)}`);
+        // 全文エコーはしない(purpose をそのまま返すと出力が入力より大きくなる)
+        for (const line of echoInput(purpose, l).split('\n')) out.push(`> ${flat(line)}`);
         out.push('');
         out.push(
           `${inline('規模', 'Scale', l)}: **${one(SCALE_LABEL[s], l)}** ・ ` +
@@ -4276,24 +4299,27 @@ export function registerGuideTools(server: McpServer): void {
       description:
         'topic に書いた内容と、保存済みの案件の実データ(準備度・リスク・関係者・作業パッケージ・期限)を読んで、その相手にどう話すかを組み立てて返す。topic から論点(金額・期日・過去の失敗・規模・現場影響・技術・リスク・未決)を拾い、相手ごとの刺さり方に翻訳する。audience は executive / business / engineer / pmo のほか「営業本部長」「生産管理部長」のような自由記述でもよく、役職の高さと持ち場を読み分ける。言い換え表は topic に出てきた用語だけを載せる。 / Build the pitch from what you wrote in topic plus the stored engagement (readiness, risks, stakeholders, work packages, dates). Signals in the topic — money, dates, past failures, scale, impact on staff, technology, risk, open questions — are translated into what each audience does with them. audience takes executive / business / engineer / pmo or free text such as "head of sales", from which seniority and functional patch are read. The jargon table lists only terms that actually appear in your topic.',
       inputSchema: {
-        topic: z
-          .string()
-          .optional()
-          .describe(
-            '説明したい内容。金額・期日・過去の経緯・規模まで書くほど出力が具体的になる / What you need to explain. The more you include — money, dates, history, scale — the more specific the answer',
-          ),
-        audience: z
-          .string()
-          .optional()
-          .describe(
-            '相手。executive / business / engineer / pmo のいずれか、または「営業本部長」「工場の生産管理担当」のような自由記述 / The audience: executive, business, engineer, pmo, or free text such as "head of sales" or "production planner at the plant"',
-          ),
+        topic: freeTextSchema(
+          '説明したい内容。金額・期日・過去の経緯・規模まで書くほど出力が具体的になる / What you need to explain. The more you include — money, dates, history, scale — the more specific the answer',
+        ).optional(),
+        audience: freeTextSchema(
+          '相手。executive / business / engineer / pmo のいずれか、または「営業本部長」「工場の生産管理担当」のような自由記述 / The audience: executive, business, engineer, pmo, or free text such as "head of sales" or "production planner at the plant"',
+          300,
+        ).optional(),
         lang: langSchema,
       },
     },
     async ({ topic, audience, lang }): Promise<ToolResult> => {
       try {
         const l = lang as Lang;
+        const tooLong = checkFreeText(
+          [
+            { field: 'topic', value: topic, hint: HINTS.situation },
+            { field: 'audience', value: audience, limit: 300, hint: HINTS.identifier },
+          ],
+          l,
+        );
+        if (tooLong) return tooLong;
         const rawTopic = (topic ?? '').trim();
         const rawAudience = (audience ?? '').trim();
 

@@ -32,6 +32,7 @@ import {
 } from '../engagement/model.js';
 import { DELIVERABLE_STATUS_LABEL, L, PHASE_STATUS_LABEL, RISK_LEVEL_LABEL } from '../dashboard/labels.js';
 import { errorResult, langSchema, msg, textResult } from './common.js';
+import { capInline, checkFreeText, freeTextSchema, HINTS, IDENTIFIER_LIMIT } from './input-limits.js';
 
 // ---------------------------------------------------------------------------
 // 共通ヘルパ / Small shared helpers
@@ -521,10 +522,23 @@ const HL = {
   summary: { ja: '集計', en: 'Summary' },
   count: { ja: '件数', en: 'Count' },
   situation: { ja: '状況', en: 'What is happening' },
-  goodPoints: { ja: '良好な点', en: 'What is working' },
+  goodPoints: { ja: '良好な点(記録に根拠のあるものだけ)', en: 'What is working (only what the record proves)' },
+  notJudgeable: { ja: 'まだ判断できないこと(記録が無い)', en: 'What cannot be judged yet (no record)' },
+  noGoodPoints: {
+    ja: '記録に根拠のある良好な点は 0 件。悪いという意味ではなく、褒める材料がまだ記録に無いという意味。下の「まだ判断できないこと」が、何を埋めれば判断できるようになるかを示している。',
+    en: 'Nothing here is backed by the record yet. That is not a negative verdict — there is simply nothing recorded to praise. The list below says which evidence is missing.',
+  },
+  allJudgeable: {
+    ja: '記録が無くて判断を保留した観点は無い(準備度・関係者・リスク・アクション・成果物・決定・進捗のいずれにも記録がある)。',
+    en: 'No dimension had to be left unjudged — readiness, stakeholders, risks, actions, deliverables, decisions, and progress all carry records.',
+  },
   allClear: {
     ja: '危険信号は検出されませんでした。記録の粒度・鮮度ともに追跡可能な状態です。',
     en: 'No red flags found. The record is detailed and current enough to be trackable.',
+  },
+  allClearButBlind: {
+    ja: '危険信号は検出されませんでしたが、これは「問題が無い」ことの証明にはなりません。記録が空で検査対象にならなかった観点があります(下の「まだ判断できないこと」)。',
+    en: 'No red flags were found, but that is not evidence that nothing is wrong: some dimensions have no record at all and were never examined. See "What cannot be judged yet" below.',
   },
   nextStep: { ja: '次の一手', en: 'Next step' },
   auditedAt: { ja: '監査基準日', en: 'Audited as of' },
@@ -1148,7 +1162,28 @@ function collectFindings(engagement: Engagement, today: string, base: Date): Fin
       },
     });
   }
-  const malformedDue = openActions.filter((a) => a.due !== undefined && isoDue(a.due) === undefined);
+  // 期限が無いアクションは定義上「期限超過」にならない。超過 0 件をそのまま健全と読むと、
+  // 記録の欠落が実績に化けるので、期限そのものの欠落をここで指摘しておく。
+  const undatedOpen = openActions.filter((a) => a.due === undefined || a.due.trim().length === 0);
+  if (undatedOpen.length > 0) {
+    findings.push({
+      severity: 'warning',
+      code: 'undated-actions',
+      title: { ja: '期限の入っていない未完了アクションがある', en: 'Open actions carry no due date' },
+      detail: {
+        ja: `未完了 ${openActions.length} 件のうち ${undatedOpen.length} 件に期限が入っていない: ${joinNames(undatedOpen.map((a) => a.title), 3, 'ja')}。期限が無いアクションは定義上「期限超過」にならないため、監査では「守られている」ように見えてしまう。`,
+        en: `${undatedOpen.length} of ${openActions.length} open actions have no due date: ${joinNames(undatedOpen.map((a) => a.title), 3, 'en')}. An action with no date can never be overdue, so an audit reads it as "on track" when nothing is being tracked at all.`,
+      },
+      recommendation: {
+        ja: '`update_engagement` で 1 件ずつ YYYY-MM-DD の期限を入れる。日付を今決められないものは「いつ決めるか」を決め、その日を期限にする。',
+        en: 'Give each one a YYYY-MM-DD due date with `update_engagement`. Where the real date is not knowable yet, set the date by which the date will be decided.',
+      },
+    });
+  }
+  // 空文字は上で「未設定」として扱っているので、ここでは書式不正だけを見る(二重報告を避ける)
+  const malformedDue = openActions.filter(
+    (a) => a.due !== undefined && a.due.trim().length > 0 && isoDue(a.due) === undefined,
+  );
   if (malformedDue.length > 0) {
     findings.push({
       severity: 'warning',
@@ -1351,24 +1386,64 @@ export function summarizeHealth(engagement: Engagement, today: string, base: Dat
   };
 }
 
-/** 良好な点を最大 3 件挙げる */
-function collectGoodPoints(engagement: Engagement, today: string, base: Date): Bilingual[] {
-  const goods: Bilingual[] = [];
+/**
+ * 「良好な点」と「まだ判断できないこと」/ What the record proves, and what it cannot.
+ *
+ * 監査目的の道具なので、**データが無いことを根拠に褒めない**。
+ * 観点ごとに、記録に裏付けがあれば褒め、記録が無ければ「判断できない」と明示する。
+ * 沈黙させないのは、褒める材料が無いことと問題が無いことを読み手が取り違えるため。
+ */
+interface GoodPointsResult {
+  /**
+   * 記録に裏付けのある良好な点。観点ごとに最大 1 件しか積まないので件数で切らない
+   * (件数で切ると、正当に得られた「期限が守られている」が押し出されて消える)。
+   */
+  goods: Bilingual[];
+  /**
+   * 記録が無いために判断を保留した観点。ここは特に件数で切ってはいけない —
+   * 切った件数を「判断を保留したのは N 件」として下流が使うので、
+   * 監査対象の見えていない範囲を実際より小さく報告することになる。
+   */
+  unknowns: Bilingual[];
+}
 
+function collectGoodPoints(engagement: Engagement, today: string, base: Date): GoodPointsResult {
+  const goods: Bilingual[] = [];
+  const unknowns: Bilingual[] = [];
+
+  // --- 変革準備度: 数値が実在する場合だけ評価する ---
   const readiness = latestAssessment(engagement, 'readiness', base);
-  if (readiness && bandOf('readiness', readiness.achievement) === 'ready') {
-    goods.push({
-      ja: `変革準備度 ${readiness.achievement}%(平均 ${round1(readiness.avgCurrent)} / ${readiness.scale})。着手できる水準にあり、判断の根拠が数値で残っている。`,
-      en: `Readiness is ${readiness.achievement}% (average ${round1(readiness.avgCurrent)} of ${readiness.scale}) — at a level where you can start, with the judgement backed by numbers.`,
+  if (readiness) {
+    if (bandOf('readiness', readiness.achievement) === 'ready') {
+      goods.push({
+        ja: `変革準備度 ${readiness.achievement}%(平均 ${round1(readiness.avgCurrent)} / ${readiness.scale}、評価日 ${readiness.assessment.assessedAt.slice(0, 10)})。着手できる水準にあり、判断の根拠が数値で残っている。`,
+        en: `Readiness is ${readiness.achievement}% (average ${round1(readiness.avgCurrent)} of ${readiness.scale}, assessed ${readiness.assessment.assessedAt.slice(0, 10)}) — at a level where you can start, with the judgement backed by numbers.`,
+      });
+    }
+  } else {
+    unknowns.push({
+      ja: '着手して大丈夫かは判断できない — 変革準備度の評価記録が 0 件。低い点数が付いているのではなく、点数が存在しない。`assess_readiness` を引数なし(`{}`)で呼ぶと入力例が出る。',
+      en: 'Whether it is safe to start cannot be judged: there is no readiness assessment on record — not a low score, no score at all. Call `assess_readiness` with `{}` for a ready-to-fill example.',
     });
   }
 
+  // --- 合意形成: 影響力の高い相手が登録され、その全員に関与方針がある場合だけ ---
   const highInfluence = engagement.stakeholders.filter((s) => s.influence === 'high');
   const highWithApproach = highInfluence.filter((s) => s.approach && s.approach.trim().length > 0);
-  if (highWithApproach.length > 0) {
+  if (highInfluence.length > 0 && highWithApproach.length === highInfluence.length) {
     goods.push({
-      ja: `影響力の高いステークホルダー ${highWithApproach.length} 名について関与方針まで書かれている。合意形成が設計されている。`,
-      en: `${countEn(highWithApproach.length, 'high-influence stakeholder', 'high-influence stakeholders')} ${highWithApproach.length === 1 ? 'has' : 'have'} a written engagement approach — buy-in is being designed, not hoped for.`,
+      ja: `影響力の高いステークホルダー ${highInfluence.length} 名全員に関与方針が書かれている(未記入 0 名)。合意形成が設計されている。`,
+      en: `All ${countEn(highInfluence.length, 'high-influence stakeholder', 'high-influence stakeholders')} carry a written engagement approach, with none left blank — buy-in is being designed, not hoped for.`,
+    });
+  } else if (engagement.stakeholders.length === 0) {
+    unknowns.push({
+      ja: '合意形成が設計されているかは判断できない — ステークホルダーが 1 人も登録されていない。誰が決めるのかが記録に無い状態。',
+      en: 'Whether buy-in is being designed cannot be judged: the stakeholder register is empty, so the record does not say who decides anything.',
+    });
+  } else if (highInfluence.length === 0) {
+    unknowns.push({
+      ja: `合意形成が設計されているかは判断できない — 登録 ${engagement.stakeholders.length} 名のうち影響力「高」が 0 名。全員が低〜中影響という記録は、影響力の評価がまだ行われていない兆候であることが多い。`,
+      en: `Whether buy-in is being designed cannot be judged: none of the ${engagement.stakeholders.length} recorded stakeholders is marked high-influence. A register where nobody has influence usually means influence has not been assessed yet.`,
     });
   }
 
@@ -1386,36 +1461,70 @@ function collectGoodPoints(engagement: Engagement, today: string, base: Date): B
           ? 'The one live high risk carries both an owner and a mitigation.'
           : `All ${activeHighRisks.length} live high risks carry both an owner and a mitigation.`,
     });
-  }
-
-  const openActions = engagement.actions.filter((a) => a.status !== 'done');
-  const anyOverdue = openActions.some((a) => {
-    const due = isoDue(a.due);
-    return due !== undefined && due < today;
-  });
-  if (engagement.actions.length > 0 && !anyOverdue) {
-    goods.push({
-      ja: `期限超過のアクションが 0 件(未完了 ${openActions.length} 件)。期限が守られる文化が保たれている。`,
-      en: `No overdue actions (${openActions.length} still open). Dates on this engagement still mean something.`,
+  } else if (engagement.risks.length === 0) {
+    unknowns.push({
+      ja: 'リスク管理の質は判断できない — リスクが 1 件も登録されていない。リスクの無い案件ではなく、リスクをまだ洗い出していない案件として扱うべき状態。',
+      en: 'The quality of risk management cannot be judged: the risk register is empty. Treat that as risks not yet identified, never as an engagement without risk.',
     });
   }
 
+  // --- 期限: 「超過 0 件」は、日付として読める期限が実在するときにしか意味を持たない ---
+  const openActions = engagement.actions.filter((a) => a.status !== 'done');
+  const doneActions = engagement.actions.filter((a) => a.status === 'done');
+  const datedOpen = openActions.filter((a) => isoDue(a.due) !== undefined);
+  const overdueOpen = datedOpen.filter((a) => (isoDue(a.due) as string) < today);
+  const undatedOpen = openActions.filter((a) => isoDue(a.due) === undefined);
+  if (datedOpen.length > 0 && overdueOpen.length === 0 && undatedOpen.length === 0) {
+    goods.push({
+      ja: `未完了アクション ${openActions.length} 件すべてに日付として読める期限が入っており、基準日 ${today} 時点で超過は 0 件${doneActions.length > 0 ? `(完了済み ${doneActions.length} 件)` : ''}。期限が無いから超過していないのではなく、置いた期限が守られている。`,
+      en: `All ${countEn(openActions.length, 'open action', 'open actions')} carry a machine-readable due date and none is past it as of ${today}${doneActions.length > 0 ? ` (${doneActions.length} already closed)` : ''}. Dates are being met, not merely absent.`,
+    });
+  } else if (datedOpen.length > 0 && overdueOpen.length === 0) {
+    goods.push({
+      ja: `期限が入っている未完了アクション ${datedOpen.length} 件は、基準日 ${today} 時点で全件が期限内。ただし期限未設定が ${undatedOpen.length} 件あるため、案件全体で期限が守られているとまでは言えない。`,
+      en: `The ${datedOpen.length} open actions that do carry a date are all inside it as of ${today}. This does not extend to the engagement as a whole: ${undatedOpen.length} open actions carry no date at all.`,
+    });
+  } else if (engagement.actions.length === 0) {
+    unknowns.push({
+      ja: '期限が守られているかは判断できない — アクションが 1 件も登録されていない。期限超過 0 件は実績ではなく、一覧が空であることの表れ。',
+      en: 'Whether dates are met cannot be judged: the action register is empty. Zero overdue here is not a track record, it is an empty list.',
+    });
+  } else if (datedOpen.length === 0) {
+    unknowns.push({
+      ja: `期限が守られているかは判断できない — 未完了 ${openActions.length} 件のうち、日付として読める期限が付いているものが 0 件。期限が無いアクションは定義上「超過」にならないため、超過 0 件は何の保証にもならない。`,
+      en: `Whether dates are met cannot be judged: none of the ${countEn(openActions.length, 'open action', 'open actions')} carries a machine-readable due date. An action with no date can never be overdue, so "zero overdue" guarantees nothing here.`,
+    });
+  }
+
+  // --- 成果物 ---
   const approved = engagement.deliverables.filter((d) => APPROVED_STATUSES.has(d.status));
   if (approved.length > 0) {
     goods.push({
       ja: `成果物 ${approved.length} 件が承認済み / ベースライン化されている。後戻りの基準点がある。`,
       en: `${countEn(approved.length, 'deliverable', 'deliverables')} ${isAre(approved.length)} approved or baselined, giving you a fixed point to fall back to.`,
     });
+  } else if (engagement.deliverables.length === 0) {
+    unknowns.push({
+      ja: '成果が出ているかは判断できない — 成果物が 1 件も登録されていない。戻れる基準点(ベースライン)がまだ存在しない。',
+      en: 'Whether anything has been produced cannot be judged: no deliverables are recorded, so there is no baseline to fall back to.',
+    });
   }
 
+  // --- 決定の追跡性 ---
   const accepted = engagement.decisions.filter((d) => d.status === 'accepted');
   if (accepted.length > 0) {
     goods.push({
       ja: `決定事項 ${accepted.length} 件が承認済みとして記録されている。誰が何を決めたかを後から辿れる。`,
       en: `${countEn(accepted.length, 'decision', 'decisions')} ${isAre(accepted.length)} recorded as accepted, so who decided what can be traced later.`,
     });
+  } else if (engagement.decisions.length === 0) {
+    unknowns.push({
+      ja: '決定が辿れるかは判断できない — 決定事項が 1 件も登録されていない。後から「誰がそう決めたのか」を答えられない状態。',
+      en: 'Whether decisions can be traced cannot be judged: no decisions are recorded, so "who decided this?" has no answer on file.',
+    });
   }
 
+  // --- 移行計画 ---
   if (engagement.transitions.some((t) => t.standalone)) {
     goods.push({
       ja: '途中で止めても事業が回る移行状態が定義されている。計画変更に耐えられる刻み方になっている。',
@@ -1423,15 +1532,23 @@ function collectGoodPoints(engagement: Engagement, today: string, base: Date): B
     });
   }
 
+  // --- 進捗: 完了フェーズが実在し、記録も新しい場合だけ ---
   const progress = summarizeProgress(engagement);
   if (progress.completed > 0 && daysSince(engagement.updatedAt, base) < 14) {
     goods.push({
       ja: `ADM 進捗 ${progress.percent}%(完了 ${progress.completed} / 全 ${progress.total} フェーズ)で、記録も最近更新されている。`,
       en: `ADM progress is ${progress.percent}% (${progress.completed} of ${progress.total} phases complete) and the record is current.`,
     });
+  } else if (progress.completed === 0) {
+    unknowns.push({
+      ja: `進み方の良し悪しは判断できない — 完了したフェーズが 0 / ${progress.total}。実績が 1 件も無いので、速い・遅いを比べる対象が存在しない。`,
+      en: `Whether this is progressing well cannot be judged: 0 of ${progress.total} phases are complete, so there is no track record to compare anything against.`,
+    });
   }
 
-  return take(goods, 3);
+  // 観点は 8 個しかなく、1 観点 1 行なので全件出しても長くならない。
+  // 件数で切ると監査結果が静かに欠落する(良好な点は消え、判断保留は過少報告になる)。
+  return { goods, unknowns };
 }
 
 /**
@@ -1490,7 +1607,7 @@ function renderAssessmentSnapshot(engagement: Engagement, base: Date, lang: Lang
 function renderHealth(
   engagement: Engagement,
   findings: Finding[],
-  goods: Bilingual[],
+  praise: GoodPointsResult,
   today: string,
   base: Date,
   lang: Lang,
@@ -1522,10 +1639,13 @@ function renderHealth(
   if (findings.length === 0) {
     out.push(`## ${text(L.findings, lang)}`);
     out.push('');
-    out.push(text(HL.allClear, lang === 'both' ? 'ja' : lang));
+    // 「指摘 0 件」が安心材料になるのは、見た結果として問題が無かった場合だけ。
+    // 記録が空で見る対象そのものが無かった場合は、そう書く。
+    const clear = praise.unknowns.length > 0 ? HL.allClearButBlind : HL.allClear;
+    out.push(text(clear, lang === 'both' ? 'ja' : lang));
     if (lang === 'both') {
       out.push('');
-      out.push(HL.allClear.en);
+      out.push(clear.en);
     }
     out.push('');
   } else {
@@ -1544,19 +1664,36 @@ function renderHealth(
     });
   }
 
-  out.push(`## ${text(HL.goodPoints, lang)}`);
-  out.push('');
-  if (goods.length === 0) {
-    out.push(`- ${text(L.none, lang)}`);
-  } else {
-    for (const g of goods) {
+  // 良好な点は「記録に裏付けのあるもの」に限る。
+  // 裏付けが無いものは黙って落とさず、次の節で「なぜ判断できないか」を明示する。
+  const pushBilingualList = (items: Bilingual[]): void => {
+    for (const item of items) {
       if (lang === 'both') {
-        out.push(`- ${g.ja}`);
-        out.push(`  - ${g.en}`);
+        out.push(`- ${item.ja}`);
+        out.push(`  - ${item.en}`);
       } else {
-        out.push(`- ${text(g, lang)}`);
+        out.push(`- ${text(item, lang)}`);
       }
     }
+  };
+
+  out.push(`## ${text(HL.goodPoints, lang)}`);
+  out.push('');
+  if (praise.goods.length === 0) {
+    out.push(`- ${text(HL.noGoodPoints, lang === 'both' ? 'ja' : lang)}`);
+    if (lang === 'both') out.push(`  - ${HL.noGoodPoints.en}`);
+  } else {
+    pushBilingualList(praise.goods);
+  }
+  out.push('');
+
+  out.push(`## ${text(HL.notJudgeable, lang)}`);
+  out.push('');
+  if (praise.unknowns.length === 0) {
+    out.push(`- ${text(HL.allJudgeable, lang === 'both' ? 'ja' : lang)}`);
+    if (lang === 'both') out.push(`  - ${HL.allJudgeable.en}`);
+  } else {
+    pushBilingualList(praise.unknowns);
   }
   out.push('');
 
@@ -1590,6 +1727,15 @@ function renderHealth(
       msg(
         '重大な問題は無い。警告は次の定例までに片付ける想定で担当を割り当てる。',
         'Nothing critical. Assign the warnings with the next regular checkpoint as the target.',
+        lang,
+      ),
+    );
+  } else if (praise.unknowns.length > 0) {
+    // 指摘が 0 件でも、記録が無くて判断を保留した観点が残っているなら「問題なし」とは言わない
+    out.push(
+      msg(
+        `指摘は 0 件だが、記録が無いために判断を保留した観点が ${praise.unknowns.length} 件ある。まずその ${praise.unknowns.length} 件を埋めること — 現時点の「指摘 0 件」は、健全である証拠ではなく、見えていないという意味。`,
+        `No findings — but ${praise.unknowns.length} ${praise.unknowns.length === 1 ? 'dimension was' : 'dimensions were'} left unjudged for lack of a record. Fill ${praise.unknowns.length === 1 ? 'that one' : 'those'} in first: right now "zero findings" means nothing was visible, not that nothing is wrong.`,
         lang,
       ),
     );
@@ -1631,86 +1777,103 @@ export function registerReviewTools(server: McpServer): void {
           .describe(
             'レビュー対象の種類 / What is being reviewed: an ADM phase, a deliverable, or an implementation project',
           ),
-        target: z
-          .string()
-          .optional()
-          .describe(
-            'フェーズ ID / 成果物 ID(implementation ではプロジェクト名などの自由記述)。省略時は現在のエンゲージメントのフェーズを使う / Phase id or deliverable id; free text for implementation. Defaults to the current engagement phase.',
-          ),
+        target: freeTextSchema(
+          'フェーズ ID / 成果物 ID(implementation ではプロジェクト名などの自由記述)。省略時は現在のエンゲージメントのフェーズを使う / Phase id or deliverable id; free text for implementation. Defaults to the current engagement phase.',
+          IDENTIFIER_LIMIT,
+        ).optional(),
         lang: langSchema,
       },
     },
     async ({ scope, target, lang }) => {
       const l = lang as Lang;
-      const engagement = loadEngagement();
+      // 上限超過は案内付きで返す(巨大入力そのものはエラー文に載せない)
+      const tooLong = checkFreeText(
+        [{ field: 'target', value: target, limit: IDENTIFIER_LIMIT, hint: HINTS.identifier }],
+        l,
+      );
+      if (tooLong) return tooLong;
 
-      if (scope === 'phase') {
-        const wanted = target ?? engagement?.currentPhaseId;
-        const phase = wanted ? findPhase(wanted) : undefined;
-        if (!phase) {
-          return errorResult(
-            msg(
-              `フェーズ「${wanted ?? '(未指定)'}」が見つかりません。有効な ID: ${ADM_PHASES.map((p) => p.id).join(', ')}`,
-              `Phase "${wanted ?? '(not given)'}" not found. Valid ids: ${ADM_PHASES.map((p) => p.id).join(', ')}`,
-              l,
-            ),
-          );
+      try {
+        const engagement = loadEngagement();
+
+        if (scope === 'phase') {
+          const wanted = target ?? engagement?.currentPhaseId;
+          const phase = wanted ? findPhase(wanted) : undefined;
+          if (!phase) {
+            return errorResult(
+              msg(
+                `フェーズ「${wanted ? capInline(wanted, 60) : '(未指定)'}」が見つかりません。有効な ID: ${ADM_PHASES.map((p) => p.id).join(', ')}`,
+                `Phase "${wanted ? capInline(wanted, 60) : '(not given)'}" not found. Valid ids: ${ADM_PHASES.map((p) => p.id).join(', ')}`,
+                l,
+              ),
+            );
+          }
+          const sections = capSections(phaseSections(phase), 22);
+          const targetLine = `${phase.code}. ${text(phase.name, l)} (\`${phase.id}\`) — ${text(phase.tagline, l)}`;
+          const extra: Bilingual[] = [
+            {
+              ja: `このフェーズの詳細は \`get_adm_phase\` に \`${phase.id}\` を渡すと読める。`,
+              en: `Read the full phase entry by passing \`${phase.id}\` to \`get_adm_phase\`.`,
+            },
+          ];
+          return textResult(renderChecklist(targetLine, sections, l, extra));
         }
-        const sections = capSections(phaseSections(phase), 22);
-        const targetLine = `${phase.code}. ${text(phase.name, l)} (\`${phase.id}\`) — ${text(phase.tagline, l)}`;
+
+        if (scope === 'deliverable') {
+          if (!target) {
+            return errorResult(
+              msg(
+                '成果物 ID を `target` に指定してください。ID の一覧は `list_deliverables` で確認できます。',
+                'Pass a deliverable id in `target`. Use `list_deliverables` to see the available ids.',
+                l,
+              ),
+            );
+          }
+          const deliverable = findDeliverable(target);
+          if (!deliverable) {
+            return errorResult(
+              msg(
+                `成果物「${capInline(target, 60)}」が見つかりません。ID の一覧は \`list_deliverables\` で確認できます。`,
+                `Deliverable "${capInline(target, 60)}" not found. Use \`list_deliverables\` to see the available ids.`,
+                l,
+              ),
+            );
+          }
+          const sections = capSections(deliverableSections(deliverable), 22);
+          const targetLine = `${text(deliverable.name, l)} (\`${deliverable.id}\`)`;
+          const extra: Bilingual[] = [
+            {
+              ja: `記載項目の全体像は \`get_deliverable\` に \`${deliverable.id}\` を渡すと読める。`,
+              en: `See the full content list by passing \`${deliverable.id}\` to \`get_deliverable\`.`,
+            },
+          ];
+          return textResult(renderChecklist(targetLine, sections, l, extra));
+        }
+
+        // scope === 'implementation'
+        const sections = capSections(implementationSections(), 22);
+        // 見出しに出す名前は 120 文字で切る(切ったことは末尾の … と残り字数で分かる)
+        const name = target && target.trim().length > 0 ? capInline(target, 120) : undefined;
+        const targetLine = name
+          ? msg(`実装プロジェクト「${name}」`, `Implementation project "${name}"`, l)
+          : msg('実装プロジェクト(名称未指定)', 'Implementation project (unnamed)', l);
         const extra: Bilingual[] = [
           {
-            ja: `このフェーズの詳細は \`get_adm_phase\` に \`${phase.id}\` を渡すと読める。`,
-            en: `Read the full phase entry by passing \`${phase.id}\` to \`get_adm_phase\`.`,
+            ja: 'ガバナンスの進め方はフェーズ G を参照する(`get_adm_phase` に `g`)。',
+            en: 'For how to run governance, see Phase G — pass `g` to `get_adm_phase`.',
           },
         ];
         return textResult(renderChecklist(targetLine, sections, l, extra));
+      } catch (error) {
+        // 知識ベース・保存済み JSON のどちらが原因でも、サーバーを落とさずに返す
+        return errorResult(
+          msg(
+            `チェックリストの生成に失敗しました: ${error instanceof Error ? error.message : String(error)}。有効な ID は \`list_adm_phases\` / \`list_deliverables\` で確認できます。`,
+            `Failed to build the checklist: ${error instanceof Error ? error.message : String(error)}. Check the valid ids with \`list_adm_phases\` / \`list_deliverables\`.`,
+            l,
+          ),
+        );
       }
-
-      if (scope === 'deliverable') {
-        if (!target) {
-          return errorResult(
-            msg(
-              '成果物 ID を `target` に指定してください。ID の一覧は `list_deliverables` で確認できます。',
-              'Pass a deliverable id in `target`. Use `list_deliverables` to see the available ids.',
-              l,
-            ),
-          );
-        }
-        const deliverable = findDeliverable(target);
-        if (!deliverable) {
-          return errorResult(
-            msg(
-              `成果物「${target}」が見つかりません。ID の一覧は \`list_deliverables\` で確認できます。`,
-              `Deliverable "${target}" not found. Use \`list_deliverables\` to see the available ids.`,
-              l,
-            ),
-          );
-        }
-        const sections = capSections(deliverableSections(deliverable), 22);
-        const targetLine = `${text(deliverable.name, l)} (\`${deliverable.id}\`)`;
-        const extra: Bilingual[] = [
-          {
-            ja: `記載項目の全体像は \`get_deliverable\` に \`${deliverable.id}\` を渡すと読める。`,
-            en: `See the full content list by passing \`${deliverable.id}\` to \`get_deliverable\`.`,
-          },
-        ];
-        return textResult(renderChecklist(targetLine, sections, l, extra));
-      }
-
-      // scope === 'implementation'
-      const sections = capSections(implementationSections(), 22);
-      const name = target && target.trim().length > 0 ? target.trim() : undefined;
-      const targetLine = name
-        ? msg(`実装プロジェクト「${name}」`, `Implementation project "${name}"`, l)
-        : msg('実装プロジェクト(名称未指定)', 'Implementation project (unnamed)', l);
-      const extra: Bilingual[] = [
-        {
-          ja: 'ガバナンスの進め方はフェーズ G を参照する(`get_adm_phase` に `g`)。',
-          en: 'For how to run governance, see Phase G — pass `g` to `get_adm_phase`.',
-        },
-      ];
-      return textResult(renderChecklist(targetLine, sections, l, extra));
     },
   );
 
@@ -1756,8 +1919,8 @@ export function registerReviewTools(server: McpServer): void {
 
       try {
         const findings = collectFindings(engagement, today, base);
-        const goods = collectGoodPoints(engagement, today, base);
-        return textResult(renderHealth(engagement, findings, goods, today, base, l));
+        const praise = collectGoodPoints(engagement, today, base);
+        return textResult(renderHealth(engagement, findings, praise, today, base, l));
       } catch (error) {
         // 保存済み JSON は列挙値の検証を通っていないため、想定外の値でも落とさない
         return errorResult(

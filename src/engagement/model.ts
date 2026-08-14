@@ -4,6 +4,8 @@
  * 1 つの「アーキテクチャ案件」の進行状況を表す。JSON でそのまま永続化される。
  */
 
+import { randomBytes } from 'node:crypto';
+
 import { ADM_PHASES, type Bilingual, type Lang } from '../knowledge/index.js';
 
 export const PHASE_STATUSES = ['not_started', 'in_progress', 'completed', 'skipped'] as const;
@@ -251,13 +253,195 @@ export function now(): string {
   return new Date().toISOString();
 }
 
-let idCounter = 0;
+// ---------------------------------------------------------------------------
+// ID 採番 / Identifier allocation
+// ---------------------------------------------------------------------------
 
-/** 種別ごとの短い一意 ID を作る(例: risk-3-lq8f2k) */
-export function makeId(prefix: string): string {
-  idCounter += 1;
-  const rand = Math.random().toString(36).slice(2, 8);
-  return `${prefix}-${idCounter}-${rand}`;
+/**
+ * ID の形は `<種別>-<通し番号>-<乱数>`(例: `risk-3-k7f2qa`)。
+ *
+ * **通し番号の意味は全種類で同じ**: 「その入れ物の中で何番目に作られたか」。
+ * 入れ物は 2 段しかない。
+ *
+ * - 案件の中の項目(`risk` / `dec` / `act` / `stk` / `dlv` / `trn` / `wp` / `asmt`)
+ *   → その**案件の中**での通し番号。種別ごとに 1 から数える。
+ * - 案件そのもの(`eng`)→ **保存先全体**での通し番号。ただし採番表に入るのは
+ *   そのプロセスが読み込んだ案件だけなので、索引しか読まずに新規作成する経路では
+ *   番号が 1 に戻る(ID 自体は乱数部で必ず異なる)。`store.readIndex()` が
+ *   `registerExistingIds(索引の ID 一覧)` を呼べば番号も通しになる。
+ *
+ * 以前はモジュール変数のカウンタだけで採番していたため、番号は
+ * 「そのプロセスが何個 ID を作ったか」でしかなかった。1 回の呼び出しで
+ * まとめて登録するツール(取り込みなど)では連番に見える一方、
+ * `add_work_package` のように 1 件ずつ別プロセスで呼ばれるものは毎回 1 に戻り、
+ * 同じ台帳の中で番号の意味が場所によって違っていた。
+ *
+ * いまは**保存済みの状態から採番する**。読み込み時(`normalizeEngagement`)に
+ * 既存 ID を採番表へ取り込み、次の番号をその最大値の次に押し上げる。
+ * したがって取り込みを 2 回走らせても `risk-1` が 2 つできることはない。
+ *
+ * 乱数部は残す。プロセスをまたいで同時に書き込まれた場合(番号だけでは
+ * 衝突しうる)と、外部で編集された ID との衝突に対する保険。
+ */
+const ID_SUFFIX_ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789';
+
+/** 案件そのものの ID 種別 */
+const ENGAGEMENT_ID_PREFIX = 'eng';
+
+/** 案件 ID を数える入れ物のキー(案件 ID とは衝突しない名前にする) */
+const ENGAGEMENT_SCOPE_KEY = '#engagements';
+
+/**
+ * 採番表に取り込む番号の上限。外部で編集された `risk-99999999999-x` のような
+ * ID に引きずられて、以降の番号が読めない桁数になるのを防ぐ。
+ */
+const MAX_SEED_SEQUENCE = 1_000_000;
+
+/** `<種別>-<番号>` を取り出す。番号が無い ID(`eng-legacy-1` など)は一致しない */
+const ID_SEQUENCE_PATTERN = /^([a-z][a-z0-9]*)-(\d{1,12})(?:-|$)/i;
+
+interface IdScope {
+  /** この入れ物で既に使われている ID */
+  used: Set<string>;
+  /** 種別ごとの次の番号 */
+  next: Map<string, number>;
+}
+
+/** 入れ物(案件 ID か `#engagements`)ごとの採番状態 */
+const idScopes = new Map<string, IdScope>();
+
+/** このプロセスが見た・作った全 ID。入れ物を取り違えても衝突させないための保険 */
+const knownIds = new Set<string>();
+
+/** 直近に読み込まれた案件。`makeId` に入れ物が渡されなかったときの既定 */
+let activeScopeKey: string | null = null;
+
+function getIdScope(key: string): IdScope {
+  let scope = idScopes.get(key);
+  if (!scope) {
+    scope = { used: new Set<string>(), next: new Map<string, number>() };
+    idScopes.set(key, scope);
+  }
+  return scope;
+}
+
+/** 入れ物の指定(案件そのもの / 案件 ID / 未指定)をキーに直す */
+function scopeKeyFor(prefix: string, scope?: Engagement | string): string {
+  if (typeof scope === 'string' && scope.length > 0) return scope;
+  if (scope && typeof scope === 'object' && typeof scope.id === 'string' && scope.id.length > 0) {
+    return scope.id;
+  }
+  if (prefix === ENGAGEMENT_ID_PREFIX) return ENGAGEMENT_SCOPE_KEY;
+  return activeScopeKey ?? ENGAGEMENT_SCOPE_KEY;
+}
+
+/** ファイル名にもそのまま使える種別名に整える */
+function normalizePrefix(prefix: string): string {
+  const cleaned = prefix.toLowerCase().replace(/[^a-z0-9]/g, '');
+  return cleaned.length > 0 ? cleaned : 'id';
+}
+
+function randomIdSuffix(length = 6): string {
+  const bytes = randomBytes(length);
+  let out = '';
+  for (let i = 0; i < length; i += 1) {
+    out += ID_SUFFIX_ALPHABET[(bytes[i] ?? 0) % ID_SUFFIX_ALPHABET.length];
+  }
+  return out;
+}
+
+/** ID 1 件を採番表に取り込む(既存の番号を追い越すように次の番号を上げる) */
+function registerId(id: string, scope: IdScope): void {
+  if (typeof id !== 'string' || id.length === 0) return;
+  scope.used.add(id);
+  knownIds.add(id);
+  const match = ID_SEQUENCE_PATTERN.exec(id);
+  if (!match) return;
+  const prefix = normalizePrefix(match[1] ?? '');
+  const seq = Number.parseInt(match[2] ?? '', 10);
+  if (!Number.isFinite(seq) || seq < 1 || seq > MAX_SEED_SEQUENCE) return;
+  const next = scope.next.get(prefix) ?? 1;
+  if (seq + 1 > next) scope.next.set(prefix, seq + 1);
+}
+
+/**
+ * 保存済みの ID を採番表に取り込む。
+ *
+ * 呼ぶ必要があるのは「model.ts の外で ID を読み込んだ」場合だけ
+ * (案件そのものの読み込みは `normalizeEngagement` が済ませる)。
+ *
+ * @param ids   既に存在する ID
+ * @param scope 入れ物。案件かその ID。未指定なら案件 ID の入れ物として扱う
+ */
+export function registerExistingIds(ids: Iterable<string>, scope?: Engagement | string): void {
+  const key = typeof scope === 'string' || scope ? scopeKeyFor(ENGAGEMENT_ID_PREFIX, scope) : ENGAGEMENT_SCOPE_KEY;
+  const target = getIdScope(key);
+  for (const id of ids) registerId(id, target);
+}
+
+/** 案件 1 件ぶんの ID(案件自身と全項目)を採番表に取り込み、既定の入れ物にする */
+export function registerEngagementIds(engagement: Engagement): void {
+  registerId(engagement.id, getIdScope(ENGAGEMENT_SCOPE_KEY));
+  const scope = getIdScope(engagement.id);
+  const lists: { id?: unknown }[][] = [
+    engagement.risks,
+    engagement.decisions,
+    engagement.actions,
+    engagement.stakeholders,
+    engagement.deliverables,
+    engagement.transitions,
+    engagement.workPackages,
+    engagement.assessments,
+  ];
+  for (const list of lists) {
+    if (!Array.isArray(list)) continue;
+    for (const item of list) {
+      if (item && typeof item.id === 'string') registerId(item.id, scope);
+    }
+  }
+  activeScopeKey = engagement.id;
+}
+
+/**
+ * 種別ごとの一意 ID を作る(例: `risk-3-k7f2qa`)。
+ *
+ * 番号は**保存済みの状態の続き**から始まる。読み込み済みの案件があれば
+ * その案件の中での通し番号、無ければ案件 ID の通し番号。
+ *
+ * @param prefix 種別(`risk` / `act` / `wp` など)
+ * @param scope  どの案件の中で数えるか。省略時は直近に読み込まれた案件
+ */
+export function makeId(prefix: string, scope?: Engagement | string): string {
+  const kind = normalizePrefix(prefix);
+  const target = getIdScope(scopeKeyFor(kind, scope));
+  let seq = target.next.get(kind) ?? 1;
+  // 番号 + 乱数の両方が一致したときだけ番号を進める(通常は 1 周目で確定する)
+  for (let attempt = 0; attempt < 64; attempt += 1) {
+    const candidate = `${kind}-${seq}-${randomIdSuffix()}`;
+    if (!knownIds.has(candidate) && !target.used.has(candidate)) {
+      target.used.add(candidate);
+      knownIds.add(candidate);
+      target.next.set(kind, seq + 1);
+      return candidate;
+    }
+    seq += 1;
+  }
+  // ここには到達しない想定。到達しても衝突しないよう乱数部を伸ばす。
+  const fallback = `${kind}-${seq}-${randomIdSuffix(16)}`;
+  target.used.add(fallback);
+  knownIds.add(fallback);
+  target.next.set(kind, seq + 1);
+  return fallback;
+}
+
+/**
+ * 採番表を空にする(テスト用)。
+ * 実行中のサーバーからは呼ばない — 呼ぶと番号が 1 に戻る。
+ */
+export function resetIdAllocationForTests(): void {
+  idScopes.clear();
+  knownIds.clear();
+  activeScopeKey = null;
 }
 
 /** 全 ADM フェーズを未着手で初期化する */
@@ -522,8 +706,11 @@ export interface CreateEngagementInput {
 export function createEngagement(input: CreateEngagementInput): Engagement {
   assertEngagementProfile(input);
   const timestamp = now();
+  const id = makeId(ENGAGEMENT_ID_PREFIX);
+  // 作った直後にこの案件へ項目を足す呼び出し元のために、既定の入れ物を移す
+  activeScopeKey = id;
   return {
-    id: makeId('eng'),
+    id,
     name: input.name,
     client: input.client,
     industry: input.industry,
@@ -587,7 +774,7 @@ export function normalizeEngagement(raw: unknown): Engagement | null {
       phases.push({ phaseId: p.id, status: 'not_started', updatedAt: timestamp });
     }
   }
-  return {
+  const engagement: Engagement = {
     id: e.id,
     name: e.name,
     client: e.client,
@@ -609,4 +796,7 @@ export function normalizeEngagement(raw: unknown): Engagement | null {
     assessments: Array.isArray(e.assessments) ? e.assessments : [],
     notes: Array.isArray(e.notes) ? e.notes : [],
   };
+  // 読み込みは必ずここを通る。保存済みの ID を採番表に取り込むのはこの 1 か所。
+  registerEngagementIds(engagement);
+  return engagement;
 }

@@ -26,6 +26,13 @@ import {
   type Lang,
 } from '../knowledge/index.js';
 import { errorResult, langSchema, msg, textResult } from './common.js';
+import {
+  capInline,
+  checkFreeText,
+  freeTextSchema,
+  HINTS,
+  IDENTIFIER_LIMIT,
+} from './input-limits.js';
 
 /** Markdown の表セルを壊さないようにする */
 function cell(value: string): string {
@@ -69,23 +76,30 @@ export function registerArchiMateReferenceTools(server: McpServer): void {
       description:
         'ArchiMate の要素を層ごとに一覧する。層を指定するとその層だけに絞り込む。要素の詳細は get_archimate_element。 / List ArchiMate elements grouped by layer; pass a layer to narrow it down. Use get_archimate_element for the detail.',
       inputSchema: {
-        layer: z
-          .string()
-          .optional()
-          .describe('層 ID(motivation / strategy / business / application / technology / physical / implementation)'),
+        layer: freeTextSchema(
+          '層 ID(motivation / strategy / business / application / technology / physical / implementation)',
+          IDENTIFIER_LIMIT,
+        ).optional(),
         lang: langSchema,
       },
     },
     async ({ layer, lang }) => {
       try {
         const l = lang as Lang;
+        const tooLong = checkFreeText(
+          [{ field: 'layer', value: layer, limit: IDENTIFIER_LIMIT, hint: HINTS.identifier }],
+          l,
+        );
+        if (tooLong) return tooLong;
         if (layer) {
           const found = findArchiMateLayer(layer);
           if (!found) {
+            // 見つからなかった値はそのまま返さず短縮する(長い値の全文エコー防止)
+            const shown = capInline(layer);
             return errorResult(
               msg(
-                `層「${layer}」が見つかりません。利用可能: ${ARCHIMATE_LAYERS.map((x) => x.id).join(', ')}`,
-                `Layer "${layer}" not found. Available: ${ARCHIMATE_LAYERS.map((x) => x.id).join(', ')}`,
+                `層「${shown}」が見つかりません。利用可能: ${ARCHIMATE_LAYERS.map((x) => x.id).join(', ')}`,
+                `Layer "${shown}" not found. Available: ${ARCHIMATE_LAYERS.map((x) => x.id).join(', ')}`,
                 l,
               ),
             );
@@ -148,13 +162,21 @@ export function registerArchiMateReferenceTools(server: McpServer): void {
       description:
         'ArchiMate 要素 1 件の「何を表すか」「実務での使い方」「混同されやすい要素との違い」を返す。名称・キーワードでも引ける。 / Return what one ArchiMate element represents, how to use it in practice, and which elements it is commonly confused with. Accepts ids, names, and keywords.',
       inputSchema: {
-        element: z.string().describe('要素 ID または名称(例: "business-process", "Application Component", "能力")'),
+        element: freeTextSchema(
+          '要素 ID または名称(例: "business-process", "Application Component", "能力")',
+          IDENTIFIER_LIMIT,
+        ),
         lang: langSchema,
       },
     },
     async ({ element, lang }) => {
       try {
         const l = lang as Lang;
+        const tooLong = checkFreeText(
+          [{ field: 'element', value: element, limit: IDENTIFIER_LIMIT, hint: HINTS.identifier }],
+          l,
+        );
+        if (tooLong) return tooLong;
         const query = element.trim();
         const direct = findArchiMateElement(query);
         if (direct) return textResult(renderElement(direct, l).join('\n'));
@@ -169,7 +191,11 @@ export function registerArchiMateReferenceTools(server: McpServer): void {
         if (candidates.length === 1) return textResult(renderElement(candidates[0], l).join('\n'));
         if (candidates.length > 1) {
           const out: string[] = [
-            msg(`「${query}」に一致する要素が複数あります。`, `Several elements match "${query}".`, l),
+            msg(
+              `「${capInline(query)}」に一致する要素が複数あります。`,
+              `Several elements match "${capInline(query)}".`,
+              l,
+            ),
             '',
           ];
           for (const candidate of candidates.slice(0, 12)) {
@@ -180,8 +206,8 @@ export function registerArchiMateReferenceTools(server: McpServer): void {
 
         return errorResult(
           msg(
-            `要素「${query}」が見つかりません。層ごとの一覧は \`list_archimate_elements\` で確認できます。`,
-            `Element "${query}" not found. Use \`list_archimate_elements\` to browse them by layer.`,
+            `要素「${capInline(query)}」が見つかりません。層ごとの一覧は \`list_archimate_elements\` で確認できます。`,
+            `Element "${capInline(query)}" not found. Use \`list_archimate_elements\` to browse them by layer.`,
             l,
           ),
         );

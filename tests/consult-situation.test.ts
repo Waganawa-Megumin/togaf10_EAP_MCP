@@ -25,6 +25,9 @@ import {
   situationAdvice,
   type SituationConditionId,
 } from '../src/knowledge/consulting.js';
+import { matchesKeyword } from '../src/knowledge/index.js';
+import { createEngagement } from '../src/engagement/model.js';
+import { saveEngagement, setCurrentEngagement } from '../src/engagement/store.js';
 
 interface ToolResult {
   content: { type: 'text'; text: string }[];
@@ -168,8 +171,9 @@ describe('consult: 二重否定 / double negatives', () => {
     // 「| 予算 | ... |」の行(= 予算を読み取ったという主張)が立っていないこと
     expect(read).not.toMatch(/\|\s*予算\s*\|/);
     expect(read).toMatch(/\|\s*期限\s*\|/);
-    // 判断していない軸として名前が挙がる
-    expect(read).toContain('記述が無いため判断していない観点');
+    // 判断していない軸として名前が挙がる。ただし「書かれていない」とは断定しない
+    expect(read).toContain('こちらでは読み取れなかった観点');
+    expect(read).not.toContain('記述が無いため');
 
     // 条件の見出しとして予算の判定が出ていないこと
     for (const id of ['budget-none', 'budget-tight', 'budget-ample'] as SituationConditionId[]) {
@@ -218,10 +222,14 @@ describe('consult: 条件の読み取り / condition detection', () => {
     expect(actions).toContain(conditionById('budget-none').actions[0]!.ja);
   });
 
-  it('says plainly when the text states no conditions at all', async () => {
+  it('says it could not read the constraints, without claiming they were not written', async () => {
     const text = await consult('顧客マスタがバラバラで困っている');
     const read = section(text, '## 読み取った状況');
-    expect(read).toContain('条件は文中に書かれていなかった');
+    // 「読み取れなかった」とは言うが、「書かれていなかった」とは断定しない。
+    // 利用者が書いたことを「書いていない」と言うのが一番の害になる。
+    expect(read).toContain('読み取れませんでした');
+    expect(read).toContain('こちらの読み落とし');
+    expect(read).not.toContain('書かれていなかった');
     expect(read).not.toMatch(/\|\s*予算\s*\|/);
   });
 });
@@ -338,5 +346,161 @@ describe('consult: 条件データの健全性 / condition data integrity', () =
       ),
     );
     expect(owners.size).toBe(advice.actions.length);
+  });
+});
+
+describe('consult: 数値表現の読み取り / reading numbers, not just set phrases', () => {
+  // 9 人のペルソナが独立に同じ切り分けをした:
+  // 「予算は限られている」は読めるのに「予算は 5 億円」は読めなかった。
+  const situation = '基幹刷新。予算は5億円、9月18日の経営会議で決裁、専任は3名';
+
+  it('reads the amount, the date and the headcount out of one sentence', () => {
+    const reading = readSituation(situation);
+    const kinds = reading.facts.map((f) => f.kind);
+    expect(kinds).toContain('budget');
+    expect(kinds).toContain('deadline');
+    expect(kinds).toContain('capacity');
+
+    const budget = reading.facts.find((f) => f.kind === 'budget');
+    expect(budget?.value).toBe(500_000_000);
+    expect(reading.facts.find((f) => f.kind === 'capacity')?.value).toBe(3);
+  });
+
+  it('does not call those axes unknown once the numbers are read', () => {
+    const reading = readSituation(situation);
+    expect(reading.unknownAxes).not.toContain('budget');
+    expect(reading.unknownAxes).not.toContain('time');
+    expect(reading.unknownAxes).not.toContain('capacity');
+  });
+
+  it('shows what wording each number came from', async () => {
+    const read = section(await consult(situation), '## 読み取った状況');
+    expect(read).toContain('5億円');
+    expect(read).toContain('9月18日');
+    expect(read).toContain('3名');
+    expect(read).toContain('5 億円');
+  });
+
+  it('turns the amount into advice that uses the amount', async () => {
+    const actions = section(await consult(situation), '## 推奨アクション');
+    // 5 億円 → 3〜5 本に割ると 1 本 1.25 億円、という刻み方まで返す
+    expect(actions).toContain('作業パッケージ');
+    expect(actions).toMatch(/1\.[0-9] 億円|1 億円/);
+  });
+
+  it('turns the date into backward-planned dates', async () => {
+    const actions = section(await consult(situation), '## 推奨アクション');
+    expect(actions).toMatch(/残り \d+ 日|既に過ぎている/);
+  });
+
+  it('reads full-width and kanji numerals too', () => {
+    for (const text of ['予算は５億円', '予算は五億円', '予算は 500,000,000 円']) {
+      const facts = readSituation(text).facts;
+      expect(facts.find((f) => f.kind === 'budget')?.value, text).toBe(500_000_000);
+    }
+  });
+
+  it('does not read dates or headcounts as money', () => {
+    const reading = readSituation('2026年4月に稼働予定で、対象部門は3部門ある');
+    expect(reading.facts.filter((f) => f.kind === 'budget')).toHaveLength(0);
+  });
+
+  it('reads sponsorship stated as "thin", not only as "no interest"', () => {
+    const ids = detectSituationConditions('経営の関与は薄い').map((c) => c.condition.id);
+    expect(ids).toContain('sponsor-absent');
+  });
+
+  it('rejects an oversized situation without echoing it back', async () => {
+    const huge = 'あ'.repeat(300_000);
+    const result = await consultTool({ situation: huge, lang: 'ja' });
+    expect(result.isError).toBe(true);
+    const text = result.content.map((c) => c.text).join('\n');
+    expect(text.length).toBeLessThan(1_000);
+    expect(text).toContain('20,000');
+    expect(text).toContain('300,000');
+    expect(text).not.toContain('あああああ');
+  });
+
+  it('survives one pathologically long token (regex build used to throw)', async () => {
+    const result = await consultTool({ situation: 'a'.repeat(100_000), lang: 'ja' });
+    expect(result.isError).toBe(true);
+    // 上限で弾かれるだけで、正規表現のクラッシュは起きない
+    expect(result.content.map((c) => c.text).join('\n')).not.toContain('Invalid regular expression');
+  });
+
+  it('matches long ASCII tokens without building a regex', () => {
+    expect(matchesKeyword('a'.repeat(100_000), 'a'.repeat(1_000))).toBe(true);
+    expect(matchesKeyword('nothing here', 'b'.repeat(1_000))).toBe(false);
+  });
+});
+
+describe('consult: 案件も読む / reading the engagement, not only the sentence', () => {
+  function startEngagement(): void {
+    const engagement = createEngagement({
+      name: '基幹刷新',
+      description: '予算は5億円が上限。9月18日の経営会議で決裁を取る',
+      scope: '受発注と在庫',
+      currentPhaseId: 'a',
+    });
+    engagement.actions.push({
+      id: 'act-1',
+      title: '投資委員会向けの資料を出す',
+      due: '2099-09-18',
+      status: 'todo',
+      priority: 'high',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    saveEngagement(engagement);
+    setCurrentEngagement(engagement.id);
+  }
+
+  it('reads description and scope as part of the situation', async () => {
+    startEngagement();
+    const text = await consult('データがバラバラで困っている');
+    const read = section(text, '## 読み取った状況');
+    expect(read).toContain('5億円');
+    expect(read).toContain('基幹刷新');
+  });
+
+  it('reads a registered action due date as a deadline', async () => {
+    startEngagement();
+    const text = await consult('データがバラバラで困っている');
+    expect(text).toMatch(/2099|残り \d+ 日/);
+  });
+
+  it('still works with no engagement at all', async () => {
+    const text = await consult('データがバラバラで困っている');
+    expect(text).toContain('## 読み取った状況');
+    expect(text).not.toContain('に登録済みの内容');
+  });
+});
+
+describe('consult: 言語 / language handling for the number reading', () => {
+  const en = 'Core system replacement. The budget is USD 5,000,000, the board decides on 2099-09-18, and 3 dedicated architects are assigned.';
+
+  it('reads amounts, dates and headcount from English too', () => {
+    const reading = readSituation(en);
+    const kinds = reading.facts.map((f) => f.kind);
+    expect(kinds).toContain('budget');
+    expect(kinds).toContain('deadline');
+    expect(kinds).toContain('capacity');
+    expect(reading.facts.find((f) => f.kind === 'budget')?.value).toBe(5_000_000);
+  });
+
+  it('puts no Japanese into the generated English sections', async () => {
+    const text = await consultTool({ situation: en, lang: 'en' });
+    const body = text.content.map((c) => c.text).join('\n');
+    for (const heading of ['## Recommended Actions', '## Questions to Ask Stakeholders', '## Next Step']) {
+      expect(section(body, heading), heading).not.toMatch(/[ぁ-んァ-ヶ一-龥]/);
+    }
+  });
+
+  it('works in ja / en / both without failing', async () => {
+    for (const lang of ['ja', 'en', 'both'] as const) {
+      const result = await consultTool({ situation: '予算は5億円、9月18日までに決裁、専任は3名', lang });
+      expect(result.isError, lang).not.toBe(true);
+      expect(result.content.map((c) => c.text).join('\n').length, lang).toBeGreaterThan(500);
+    }
   });
 });

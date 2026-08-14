@@ -99,7 +99,14 @@ async function main() {
 
   const child = spawn(process.execPath, [entry], {
     stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env, TOGAF_EAP_DATA_DIR: dataDir, TOGAF_EAP_DASHBOARD_PORT: '0' },
+    // TOGAF_EAP_NO_BROWSER: スモークテストは無人で走るので、ブラウザを開くツール
+    // (open_dashboard / open_start)を呼んでも実際のブラウザは起動させない。
+    env: {
+      ...process.env,
+      TOGAF_EAP_DATA_DIR: dataDir,
+      TOGAF_EAP_DASHBOARD_PORT: '0',
+      TOGAF_EAP_NO_BROWSER: '1',
+    },
   });
   child.stderr.setEncoding('utf8');
   child.stderr.on('data', (chunk) => {
