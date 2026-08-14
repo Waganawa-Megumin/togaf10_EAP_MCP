@@ -16,7 +16,16 @@ import { watch, type FSWatcher } from 'node:fs';
 import { existsSync, mkdirSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import type { Lang } from '../knowledge/index.js';
-import { getDataDir, loadEngagement, STATE_FILENAME, storeEvents } from '../engagement/store.js';
+import {
+  ENGAGEMENTS_DIRNAME,
+  getDataDir,
+  getEngagementsDir,
+  getStatePath,
+  INDEX_FILENAME,
+  loadEngagement,
+  STATE_FILENAME,
+  storeEvents,
+} from '../engagement/store.js';
 import { renderDashboardHtml } from './html.js';
 
 const HOST = '127.0.0.1';
@@ -27,7 +36,8 @@ interface RunningDashboard {
   port: number;
   lang: Lang;
   clients: Set<ServerResponse>;
-  watcher?: FSWatcher;
+  /** データディレクトリと engagements/ を別々に監視する(recursive は環境依存のため使わない) */
+  watchers: FSWatcher[];
   heartbeat: NodeJS.Timeout;
   onStoreChange: () => void;
 }
@@ -61,7 +71,7 @@ function handleRequest(dash: RunningDashboard, req: IncomingMessage, res: Server
       'content-type': 'application/json; charset=utf-8',
       'cache-control': 'no-store',
     });
-    res.end(JSON.stringify({ engagement, statePath: `${getDataDir()}/${STATE_FILENAME}` }));
+    res.end(JSON.stringify({ engagement, statePath: getStatePath() }));
     return;
   }
 
@@ -126,7 +136,7 @@ export interface DashboardInfo {
  * ポートは環境変数 TOGAF_EAP_DASHBOARD_PORT、未指定なら空きポート自動割当。
  */
 export async function startDashboard(lang: Lang = 'both'): Promise<DashboardInfo> {
-  const statePath = `${getDataDir()}/${STATE_FILENAME}`;
+  const statePath = getStatePath();
 
   if (running) {
     running.lang = lang;
@@ -145,6 +155,7 @@ export async function startDashboard(lang: Lang = 'both'): Promise<DashboardInfo
     port: 0,
     lang,
     clients,
+    watchers: [],
     heartbeat: setInterval(() => {
       for (const client of clients) {
         try {
@@ -177,18 +188,48 @@ export async function startDashboard(lang: Lang = 'both'): Promise<DashboardInfo
   // 同一プロセス内の保存を購読
   storeEvents.on('change', dash.onStoreChange);
 
-  // 外部からのファイル書き換えも監視する(ディレクトリ監視で rename にも追従)
+  // 外部からのファイル書き換えも監視する(ディレクトリ監視で rename にも追従)。
+  // 保存レイアウトは <dataDir>/index.json と <dataDir>/engagements/<id>.json の 2 階層なので、
+  // それぞれを監視する。fs.watch の recursive はプラットフォーム依存のため使わない。
   const dataDir = getDataDir();
+  const engagementsDir = getEngagementsDir();
+  let timer: NodeJS.Timeout | null = null;
+  const notify = (): void => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => broadcast(dash), 80);
+  };
+
   try {
     if (!existsSync(dataDir)) mkdirSync(dataDir, { recursive: true });
-    let timer: NodeJS.Timeout | null = null;
-    dash.watcher = watch(dataDir, (_event, filename) => {
-      if (filename && filename !== STATE_FILENAME) return;
-      if (timer) clearTimeout(timer);
-      timer = setTimeout(() => broadcast(dash), 80);
-    });
+    dash.watchers.push(
+      watch(dataDir, (_event, filename) => {
+        // 索引・旧レイアウトの状態ファイル・engagements ディレクトリ自体の変化を拾う
+        if (
+          filename &&
+          filename !== INDEX_FILENAME &&
+          filename !== STATE_FILENAME &&
+          filename !== ENGAGEMENTS_DIRNAME
+        ) {
+          return;
+        }
+        notify();
+      }),
+    );
   } catch {
     // 監視できない環境でも、同一プロセスの更新は storeEvents で反映される
+  }
+
+  try {
+    if (!existsSync(engagementsDir)) mkdirSync(engagementsDir, { recursive: true });
+    dash.watchers.push(
+      watch(engagementsDir, (_event, filename) => {
+        // 書き込み途中の一時ファイルは無視する
+        if (filename && filename.includes('.tmp-')) return;
+        notify();
+      }),
+    );
+  } catch {
+    // 同上
   }
 
   running = dash;
@@ -202,7 +243,7 @@ export function getDashboardInfo(): DashboardInfo | null {
     url: running.url,
     port: running.port,
     alreadyRunning: true,
-    statePath: `${getDataDir()}/${STATE_FILENAME}`,
+    statePath: getStatePath(),
   };
 }
 
@@ -213,7 +254,14 @@ export async function stopDashboard(): Promise<void> {
   running = null;
   storeEvents.removeListener('change', dash.onStoreChange);
   clearInterval(dash.heartbeat);
-  dash.watcher?.close();
+  for (const watcher of dash.watchers) {
+    try {
+      watcher.close();
+    } catch {
+      /* 既に閉じている */
+    }
+  }
+  dash.watchers.length = 0;
   for (const client of dash.clients) {
     try {
       client.end();

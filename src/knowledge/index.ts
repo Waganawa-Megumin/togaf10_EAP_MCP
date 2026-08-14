@@ -16,6 +16,8 @@ export { TECHNIQUES, findTechnique } from './techniques.js';
 export { DELIVERABLES, findDeliverable } from './deliverables.js';
 export { GLOSSARY, findTerm } from './glossary.js';
 export { CONSULT_RULES } from './consulting.js';
+export { VIEWPOINTS, findViewpoint, type Viewpoint } from './viewpoints.js';
+export { INDUSTRIES, findIndustry, type IndustryGuidance } from './industries.js';
 
 /** ASCII のみで構成されるか(単語境界マッチを使ってよいか)の判定 */
 function isAscii(s: string): boolean {

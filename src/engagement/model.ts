@@ -30,6 +30,12 @@ export type InfluenceLevel = (typeof INFLUENCE_LEVELS)[number];
 export const DELIVERABLE_STATUSES = ['not_started', 'drafting', 'review', 'approved', 'baselined'] as const;
 export type DeliverableStatus = (typeof DELIVERABLE_STATUSES)[number];
 
+export const WORK_PACKAGE_STATUSES = ['proposed', 'planned', 'in_progress', 'delivered', 'cancelled'] as const;
+export type WorkPackageStatus = (typeof WORK_PACKAGE_STATUSES)[number];
+
+export const ASSESSMENT_KINDS = ['maturity', 'readiness'] as const;
+export type AssessmentKind = (typeof ASSESSMENT_KINDS)[number];
+
 export interface PhaseProgress {
   phaseId: string;
   status: PhaseStatus;
@@ -113,6 +119,78 @@ export interface DeliverableProgress {
   updatedAt: string;
 }
 
+/**
+ * 移行アーキテクチャ(中間状態)。
+ * `standalone` は「ここで止めても事業が回るか」— フェーズ E の必須確認事項。
+ */
+export interface TransitionState {
+  id: string;
+  name: string;
+  /** ロードマップ上の並び順 */
+  order: number;
+  /** 到達目標時期。四半期表記を推奨(例: 2027-Q1) */
+  targetQuarter?: string;
+  /** その状態で実現している能力 */
+  capabilities: string[];
+  /** ここで止めても事業が回るか */
+  standalone: boolean;
+  /** 暫定的な仕組み(二重運用・暫定連携など) */
+  interim?: string;
+  /** 暫定の仕組みの廃棄計画と期限 */
+  disposalPlan?: string;
+  note?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** 作業パッケージ(ギャップを束ねた実行単位) */
+export interface WorkPackage {
+  id: string;
+  name: string;
+  description?: string;
+  status: WorkPackageStatus;
+  /** 属する移行アーキテクチャ(TransitionState.id) */
+  transitionId?: string;
+  phaseId?: string;
+  owner?: string;
+  /** 四半期表記(例: 2026-Q3) */
+  startQuarter?: string;
+  endQuarter?: string;
+  /** 先行する作業パッケージ ID */
+  dependsOn: string[];
+  /** 事業価値と実現容易性(優先順位付けの 2 軸) */
+  businessValue: Priority;
+  effort: Priority;
+  costEstimate?: string;
+  /** 実現する便益と、その刈り取り責任者 */
+  benefit?: string;
+  benefitOwner?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** 評価因子(現在水準 / 目標水準) */
+export interface AssessmentFactor {
+  name: string;
+  current: number;
+  target: number;
+  note?: string;
+}
+
+/** 成熟度評価 / 変革準備度評価の記録 */
+export interface Assessment {
+  id: string;
+  kind: AssessmentKind;
+  title: string;
+  /** 評価尺度の最大値(既定 5) */
+  scale: number;
+  factors: AssessmentFactor[];
+  summary?: string;
+  assessedAt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Engagement {
   id: string;
   name: string;
@@ -122,6 +200,8 @@ export interface Engagement {
   scope?: string;
   /** 現在注力しているフェーズ ID */
   currentPhaseId: string;
+  /** アーカイブ済み(一覧では既定で非表示) */
+  archived?: boolean;
   createdAt: string;
   updatedAt: string;
   phases: PhaseProgress[];
@@ -130,7 +210,40 @@ export interface Engagement {
   actions: Action[];
   stakeholders: Stakeholder[];
   deliverables: DeliverableProgress[];
+  transitions: TransitionState[];
+  workPackages: WorkPackage[];
+  assessments: Assessment[];
   notes: string[];
+}
+
+/** 複数エンゲージメントの索引 / Index entry for the multi-engagement store. */
+export interface EngagementIndexEntry {
+  id: string;
+  name: string;
+  client?: string;
+  industry?: string;
+  currentPhaseId: string;
+  archived: boolean;
+  updatedAt: string;
+}
+
+export interface EngagementIndex {
+  /** いま選択されているエンゲージメント ID */
+  currentId: string | null;
+  engagements: EngagementIndexEntry[];
+}
+
+/** エンゲージメントから索引エントリを作る */
+export function toIndexEntry(engagement: Engagement): EngagementIndexEntry {
+  return {
+    id: engagement.id,
+    name: engagement.name,
+    client: engagement.client,
+    industry: engagement.industry,
+    currentPhaseId: engagement.currentPhaseId,
+    archived: engagement.archived === true,
+    updatedAt: engagement.updatedAt,
+  };
 }
 
 /** 現在時刻を ISO 文字列で返す */
@@ -184,6 +297,9 @@ export function createEngagement(input: CreateEngagementInput): Engagement {
     actions: [],
     stakeholders: [],
     deliverables: [],
+    transitions: [],
+    workPackages: [],
+    assessments: [],
     notes: [],
   };
 }
@@ -238,6 +354,7 @@ export function normalizeEngagement(raw: unknown): Engagement | null {
     description: e.description,
     scope: e.scope,
     currentPhaseId: typeof e.currentPhaseId === 'string' ? e.currentPhaseId : 'a',
+    archived: e.archived === true,
     createdAt: typeof e.createdAt === 'string' ? e.createdAt : timestamp,
     updatedAt: timestamp,
     phases,
@@ -246,6 +363,9 @@ export function normalizeEngagement(raw: unknown): Engagement | null {
     actions: Array.isArray(e.actions) ? e.actions : [],
     stakeholders: Array.isArray(e.stakeholders) ? e.stakeholders : [],
     deliverables: Array.isArray(e.deliverables) ? e.deliverables : [],
+    transitions: Array.isArray(e.transitions) ? e.transitions : [],
+    workPackages: Array.isArray(e.workPackages) ? e.workPackages : [],
+    assessments: Array.isArray(e.assessments) ? e.assessments : [],
     notes: Array.isArray(e.notes) ? e.notes : [],
   };
 }

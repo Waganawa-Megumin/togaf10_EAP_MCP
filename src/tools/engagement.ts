@@ -25,7 +25,7 @@ import {
   type Risk,
   type Stakeholder,
 } from '../engagement/model.js';
-import { loadEngagement, saveEngagement } from '../engagement/store.js';
+import { deleteEngagement, loadEngagement, saveEngagement } from '../engagement/store.js';
 import { renderDashboardMarkdown } from '../dashboard/markdown.js';
 import { errorResult, langSchema, msg, textResult } from './common.js';
 
@@ -147,8 +147,8 @@ export function registerEngagementTools(server: McpServer): void {
       if (existing && !overwrite) {
         return errorResult(
           msg(
-            `既に案件「${existing.name}」が保存されています。上書きするには overwrite=true を指定してください(既存データは失われます)。参照だけなら get_engagement を使ってください。`,
-            `An engagement named "${existing.name}" already exists. Pass overwrite=true to replace it (the existing data is lost), or use get_engagement to read it.`,
+            `既に案件「${existing.name}」が選択されています。別の案件を並行して持つなら \`create_engagement\`、切り替えるなら \`switch_engagement\` を使ってください。この案件を破棄して作り直す場合のみ overwrite=true を指定します(既存データは失われます)。参照だけなら \`get_engagement\` です。`,
+            `The engagement "${existing.name}" is already selected. Use \`create_engagement\` to run another one alongside it, or \`switch_engagement\` to change the selection. Pass overwrite=true only to discard this engagement and start over (its data is lost). To just read it, use \`get_engagement\`.`,
             l,
           ),
         );
@@ -163,6 +163,10 @@ export function registerEngagementTools(server: McpServer): void {
           ),
         );
       }
+      // overwrite=true は「置き換え」。複数案件を保持できるようになったため、
+      // 削除せずに保存すると旧案件が一覧に residue として残り、説明文と実態が食い違う。
+      if (existing && overwrite) deleteEngagement(existing.id);
+
       const engagement = createEngagement({
         name,
         client,

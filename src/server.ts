@@ -6,7 +6,14 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { registerKnowledgeTools } from './tools/knowledge.js';
 import { registerConsultTool } from './tools/consult.js';
 import { registerEngagementTools } from './tools/engagement.js';
+import { registerEngagementListTools } from './tools/engagements.js';
 import { registerDashboardTools } from './tools/dashboard.js';
+import { registerAnalysisTools } from './tools/analysis.js';
+import { registerReviewTools } from './tools/review.js';
+import { registerRoadmapTools } from './tools/roadmap.js';
+import { registerExportTools } from './tools/export.js';
+import { registerPrompts } from './tools/prompts.js';
+import { registerResources } from './tools/resources.js';
 
 export const SERVER_NAME = 'togaf10-eap-mcp';
 export const SERVER_VERSION = '0.1.0';
@@ -30,10 +37,23 @@ export function createServer(): McpServer {
     { instructions: INSTRUCTIONS },
   );
 
+  // 知識・参照系
   registerKnowledgeTools(server);
+  // コンサルティング
   registerConsultTool(server);
+  // エンゲージメント(単数の作成/更新 + 複数案件の一覧・切替)
   registerEngagementTools(server);
+  registerEngagementListTools(server);
+  // 分析・レビュー・ロードマップ
+  registerAnalysisTools(server);
+  registerReviewTools(server);
+  registerRoadmapTools(server);
+  // ダッシュボードと書き出し
   registerDashboardTools(server);
+  registerExportTools(server);
+  // MCP prompts / resources
+  registerPrompts(server);
+  registerResources(server);
 
   return server;
 }

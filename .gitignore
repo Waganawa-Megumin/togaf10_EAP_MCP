@@ -4,3 +4,5 @@ dist/
 .DS_Store
 .togaf-eap/
 coverage/
+.dev-progress/
+.playwright-mcp/
