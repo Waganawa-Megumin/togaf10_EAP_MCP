@@ -6,7 +6,20 @@ dist/
 coverage/
 .dev-progress/
 .playwright-mcp/
-redteam-samples/
+
+# 各自の手元設定(有効な MCP サーバー名や許可設定が入る)。共有しない。
+# Per-developer local settings (enabled MCP servers, permission allowlist). Never shared.
+.claude/settings.local.json
+
+# 取り込み検証用の入力。既定は「公開しない」。
+# 第三者が発行した実物の文書(PDF 等)を置く場所なので、再配布できないものが混ざる。
+# docs/EXAMPLES.md から参照している架空のサンプルだけを名指しで公開する。
+# Ingest fixtures. Ignored by default: this directory also holds real third-party
+# documents that must not be redistributed. Only the fictional samples that
+# docs/EXAMPLES.md actually links to are un-ignored, by name.
+redteam-samples/*
+!redteam-samples/README.md
+!redteam-samples/security-report.md
 
 # 統計帯を切り落とす前のインフォグラフィック(手元にのみ保持)
 # 外したはずの古いツール件数が写っているため公開しない
