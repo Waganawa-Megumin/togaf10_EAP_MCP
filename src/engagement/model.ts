@@ -4,7 +4,7 @@
  * 1 つの「アーキテクチャ案件」の進行状況を表す。JSON でそのまま永続化される。
  */
 
-import { ADM_PHASES } from '../knowledge/index.js';
+import { ADM_PHASES, type Bilingual, type Lang } from '../knowledge/index.js';
 
 export const PHASE_STATUSES = ['not_started', 'in_progress', 'completed', 'skipped'] as const;
 export type PhaseStatus = (typeof PHASE_STATUSES)[number];
@@ -269,6 +269,243 @@ export function initialPhases(timestamp: string): PhaseProgress[] {
   }));
 }
 
+// ---------------------------------------------------------------------------
+// 入力長の上限 / Input length limits
+// ---------------------------------------------------------------------------
+
+/**
+ * 文字列フィールドの上限 / Per-field character limits.
+ *
+ * 上限が無いと、数万文字の案件名や関心事がそのまま JSON に保存され、
+ * 以降すべてのダッシュボード・表・書き出しが読めなくなる(1 セルが画面を埋める)。
+ * ここは**黙って切り詰めず、明確なエラーで弾く**。切り詰めると利用者は
+ * 何が失われたか分からないまま保存が完了してしまうため。
+ *
+ * `hint` には「ではどこに書けばよいか」を必ず入れる。上限を伝えるだけでは
+ * 利用者は同じ内容を貼り直すしかない。
+ */
+export interface TextFieldLimit {
+  /** 上限文字数 */
+  limit: number;
+  /** 超えたときの逃がし先 */
+  hint: Bilingual;
+}
+
+export const TEXT_LIMITS = {
+  /** 案件名。一覧・見出し・ファイル名に出るので短く */
+  name: {
+    limit: 200,
+    hint: {
+      ja: '短い呼び名を name に入れ、背景や詳細は description に書いてください。',
+      en: 'Put a short label in name and move the background and detail into description.',
+    },
+  },
+  client: {
+    limit: 200,
+    hint: {
+      ja: '組織名だけを client に入れ、補足は description に書いてください。',
+      en: 'Keep client to the organisation name and put anything else in description.',
+    },
+  },
+  industry: {
+    limit: 100,
+    hint: {
+      ja: '業界名だけを industry に入れてください(例: 銀行、製造)。',
+      en: 'Keep industry to the industry name alone (for example: banking, manufacturing).',
+    },
+  },
+  /** 表の 1 行になる見出し。長いと表が崩れる */
+  title: {
+    limit: 300,
+    hint: {
+      ja: '1 行で読める見出しにし、詳細は description / note 側に書いてください。',
+      en: 'Keep the title readable on one line and move the detail into description or note.',
+    },
+  },
+  /** ステークホルダーの関心事 1 件 */
+  concern: {
+    limit: 500,
+    hint: {
+      ja: '関心事は 1 件ずつ短く分けて登録し、長い経緯は approach に書いてください。',
+      en: 'Record concerns as short separate entries and put the long background into approach.',
+    },
+  },
+  /** 自由記述(説明・背景・対策・メモなど) */
+  text: {
+    limit: 4000,
+    hint: {
+      ja: 'この長さを超える内容は文書として別に保管し、link に場所を書いてください。',
+      en: 'Store anything longer as its own document and record where it lives in link.',
+    },
+  },
+} as const satisfies Record<string, TextFieldLimit>;
+
+/** `TEXT_LIMITS` に定義のある種別 */
+export type TextFieldKind = keyof typeof TEXT_LIMITS;
+
+/** 1 つの配列フィールドに入れられる要素数の上限(関心事・能力・依存など) */
+export const MAX_LIST_ITEMS = 100;
+
+/**
+ * 入力が上限を超えたときのエラー。
+ *
+ * MCP SDK はツールコールバックの例外を捕捉して `isError: true` の結果に変換するため、
+ * これを投げてもサーバーは落ちない。メッセージは利用者がそのまま読む前提で日英併記。
+ */
+export class EngagementInputError extends Error {
+  readonly field: string;
+  readonly limit: number;
+  readonly actual: number;
+
+  constructor(message: string, field: string, limit: number, actual: number) {
+    super(message);
+    this.name = 'EngagementInputError';
+    this.field = field;
+    this.limit = limit;
+    this.actual = actual;
+  }
+}
+
+/**
+ * 文字列フィールドの長さを検査する。超えていれば `EngagementInputError` を投げる。
+ *
+ * @param field 利用者に見せるフィールド名(例: `name`, `risks[0].title`)
+ * @param value 検査対象。undefined / null は「未指定」として通す
+ * @param kind  上限の種別。既定は `text`(自由記述)
+ */
+export function assertTextLimit(field: string, value: unknown, kind: TextFieldKind = 'text'): void {
+  if (value === undefined || value === null) return;
+  if (typeof value !== 'string') return;
+  const { limit, hint } = TEXT_LIMITS[kind];
+  const actual = value.length;
+  if (actual <= limit) return;
+  throw new EngagementInputError(
+    `入力が長すぎます: ${field} は ${limit} 文字までです(受け取った長さ: ${actual} 文字)。${hint.ja}` +
+      ` / Input too long: ${field} accepts at most ${limit} characters (received ${actual}). ${hint.en}`,
+    field,
+    limit,
+    actual,
+  );
+}
+
+/**
+ * 文字列配列の要素数と各要素の長さを検査する。
+ * 関心事のような「いくらでも足せる」項目が保存 JSON を壊さないようにする。
+ */
+export function assertTextListLimit(
+  field: string,
+  values: unknown,
+  kind: TextFieldKind = 'text',
+  maxItems: number = MAX_LIST_ITEMS,
+): void {
+  if (values === undefined || values === null) return;
+  if (!Array.isArray(values)) return;
+  if (values.length > maxItems) {
+    throw new EngagementInputError(
+      `項目が多すぎます: ${field} は ${maxItems} 件までです(受け取った件数: ${values.length} 件)。` +
+        '束ねるか、複数回に分けて登録してください。' +
+        ` / Too many entries: ${field} accepts at most ${maxItems} (received ${values.length}). Group them, or register them in several calls.`,
+      field,
+      maxItems,
+      values.length,
+    );
+  }
+  values.forEach((v, i) => assertTextLimit(`${field}[${i}]`, v, kind));
+}
+
+/** 案件の基本情報(名称・クライアント・概要・スコープ)をまとめて検査する */
+export function assertEngagementProfile(input: {
+  name?: unknown;
+  client?: unknown;
+  industry?: unknown;
+  description?: unknown;
+  scope?: unknown;
+}): void {
+  assertTextLimit('name', input.name, 'name');
+  assertTextLimit('client', input.client, 'client');
+  assertTextLimit('industry', input.industry, 'industry');
+  assertTextLimit('description', input.description, 'text');
+  assertTextLimit('scope', input.scope, 'text');
+}
+
+// ---------------------------------------------------------------------------
+// 出力量の上限 / Output size limits
+// ---------------------------------------------------------------------------
+
+/**
+ * 表 1 つあたりに出す最大件数 / How many rows one table may show.
+ *
+ * 関係者 60 名・リスク 60 件の案件では、全件を出すと 1 回の応答が数万文字になり、
+ * 会話がそれだけで埋まる(実測: `get_dashboard` 15,000 字 / 22KB、`stakeholder_matrix` 32KB)。
+ * 表示側はこの値で切り、切ったことと全件の見方を必ず添える。
+ *
+ * 上限は**ここ 1 か所**に置く。表ごとに別々の数字を直書きすると、
+ * 「どこまで出るのか」が利用者にも実装者にも分からなくなるため。
+ * 取り込み先(未適用): `dashboard/markdown.ts` の `renderDashboardMarkdown`
+ * (`compact` / `limit` を件数に応じて自動で立てる)、`tools/analysis.ts` の
+ * `stakeholder_matrix` / `risk_matrix` の一覧表。
+ */
+export const OUTPUT_LIMITS = {
+  /** 通常の表(リスク・アクション・関係者など) */
+  rows: 20,
+  /** 診断系ツールの「指摘」など、上位だけ見れば足りるもの */
+  highlights: 10,
+  /** 1 セルに入れる文字数 */
+  cell: 120,
+} as const;
+
+/** 上限で切った結果 / A list after the cap has been applied. */
+export interface CappedRows<T> {
+  rows: T[];
+  /** 元の件数 */
+  total: number;
+  /** 表示しなかった件数 */
+  hidden: number;
+  /** 切ったかどうか */
+  capped: boolean;
+}
+
+/**
+ * 一覧を上位 N 件に切る。切った件数を必ず返すので、呼び出し側は
+ * 「黙って切る」ことができない(`hidden` を無視すると型は通るが、
+ * `capNotice` を添えるのが本来の使い方)。
+ */
+export function capRows<T>(rows: readonly T[], limit: number = OUTPUT_LIMITS.rows): CappedRows<T> {
+  const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : OUTPUT_LIMITS.rows;
+  const all = Array.isArray(rows) ? rows : [];
+  if (all.length <= safeLimit) {
+    return { rows: [...all], total: all.length, hidden: 0, capped: false };
+  }
+  return {
+    rows: all.slice(0, safeLimit),
+    total: all.length,
+    hidden: all.length - safeLimit,
+    capped: true,
+  };
+}
+
+/**
+ * 切ったことを利用者に伝える 1 行を作る。切っていなければ空文字。
+ *
+ * @param capped   `capRows` の結果
+ * @param seeAll   全件を見る方法(ツール名と引数)。例: `{ ja: '全件は `get_engagement` に format="json" を渡す', en: ... }`
+ */
+export function capNotice(capped: CappedRows<unknown>, seeAll: Bilingual, lang: Lang = 'both'): string {
+  if (!capped.capped) return '';
+  const ja = `上位 ${capped.rows.length} 件を表示(全 ${capped.total} 件、残り ${capped.hidden} 件は非表示)。${seeAll.ja}`;
+  const en = `Showing the top ${capped.rows.length} of ${capped.total} (${capped.hidden} hidden). ${seeAll.en}`;
+  if (lang === 'ja') return ja;
+  if (lang === 'en') return en;
+  return `${ja} / ${en}`;
+}
+
+/** 1 セルが表を壊さない長さに収める(切ったことが分かる印を残す) */
+export function capCell(value: string, limit: number = OUTPUT_LIMITS.cell): string {
+  const flat = value.replace(/\r?\n+/g, ' ').trim();
+  if (flat.length <= limit) return flat;
+  return `${flat.slice(0, limit)}…(+${flat.length - limit})`;
+}
+
 export interface CreateEngagementInput {
   name: string;
   client?: string;
@@ -278,8 +515,12 @@ export interface CreateEngagementInput {
   currentPhaseId?: string;
 }
 
-/** 新しいエンゲージメントを作る */
+/**
+ * 新しいエンゲージメントを作る。
+ * 上限を超える入力は保存前に `EngagementInputError` で弾く(切り詰めない)。
+ */
 export function createEngagement(input: CreateEngagementInput): Engagement {
+  assertEngagementProfile(input);
   const timestamp = now();
   return {
     id: makeId('eng'),

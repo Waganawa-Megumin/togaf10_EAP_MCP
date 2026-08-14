@@ -17,6 +17,7 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { matchesKeyword, type Bilingual, type Lang } from '../knowledge/index.js';
 import {
+  TEXT_LIMITS,
   makeId,
   now,
   type ActionStatus,
@@ -48,8 +49,53 @@ const MAX_CANDIDATES_PER_KIND = 40;
 /** auto 出力で 1 種別あたり表に載せる件数 */
 const AUTO_ROWS_PER_KIND = 10;
 
+/** これを超えたら「入力が広すぎる」と警告する候補数(打ち切り前の総数) */
+const OVERLOAD_CANDIDATES = 100;
+
 /** 出典に添える原文の最大長 */
 const EVIDENCE_CHARS = 90;
+
+/** 受け付けるパスの最大長(主要な OS の PATH_MAX 相当。これを超えるパスは存在し得ない) */
+const MAX_PATH_CHARS = 1024;
+
+/**
+ * 台帳に保存する表題の長さ / How long an ingested title may be in the register.
+ *
+ * 表の 1 行に収まる長さで保存する。ここを超えた分は捨てるのではなく、
+ * **出典(ファイル名:行番号)から原文に戻れる**ようにしたうえで短くする。
+ * さらに `engagement/model.ts` の保存上限(`TEXT_LIMITS`)を超える候補は、
+ * 短縮して静かに入れるのではなく**取り込まずに一覧で報告する**。
+ * 数千字の 1 文が台帳に入ると、以降どの表もその 1 行で埋まるため。
+ */
+const TITLE_CAP: Record<ExtractKind, number> = {
+  risks: 120,
+  stakeholders: 80,
+  actions: 120,
+  systems: 160,
+  requirements: 160,
+};
+
+/** 台帳に保存できる長さの上限(リスク等は表題、システム・要件はメモとして入る) */
+function storeLimitOf(kind: ExtractKind): number {
+  return kind === 'systems' || kind === 'requirements' ? TEXT_LIMITS.text.limit : TEXT_LIMITS.title.limit;
+}
+
+/**
+ * 長すぎて取り込めない候補を数える。
+ * プレビュー(apply=false)と本適用で同じ判定を使い、「プレビューでは登録対象だったのに
+ * 実際には入らなかった」というずれを作らない。
+ */
+function countOversized(results: ExtractResult[]): number {
+  let count = 0;
+  for (const result of results) {
+    const limit = storeLimitOf(result.kind);
+    for (const c of result.candidates) {
+      if (c.confidence === 'low') continue;
+      if (cleanedLength(c.title) > limit) count += 1;
+    }
+  }
+  return count;
+}
 
 // ---------------------------------------------------------------------------
 // 小さな整形ヘルパ
@@ -84,6 +130,18 @@ function safeText(value: string, max = 160): string {
 /** Markdown の表セルに入れる。パイプは列区切りを壊すのでエスケープする。 */
 function safeCell(value: string, max = 80): string {
   return safeText(value, max).replace(/\|/g, '\\|');
+}
+
+/**
+ * 切り詰める前の長さ。`safeText` と同じ整形をしたうえで数える。
+ * 「切り詰めた」「長すぎるので取り込まない」の判定はこの長さで行う
+ * (整形後に数えないと、改行だらけの原文が実際より長く見える)。
+ */
+function cleanedLength(value: string): number {
+  return value
+    .replace(/[\u0000-\u001F\u007F]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim().length;
 }
 
 /** バイト数を読みやすくする */
@@ -241,18 +299,24 @@ const EXT_FORMAT: Record<string, DocFormat> = {
 const UNSUPPORTED: Record<string, Bilingual> = {
   '.pdf': {
     ja:
-      'PDF はバイナリのため依存なしでは本文を取り出せません。回避策: ' +
-      '`pdftotext -layout 元.pdf 出力.txt`(poppler)で .txt にしてから渡す。' +
-      'macOS なら `textutil` は PDF 非対応なので、poppler(`brew install poppler`)を使ってください。' +
-      '画像 PDF(スキャン)は OCR が必要で、そこは本ツールの範囲外です。',
+      'このツール自身は PDF を解析できません(依存を増やさない方針のため)。ただし **Claude Code / Claude Desktop は PDF を直接読めます**。' +
+      '最短の手順: クライアントに PDF を読ませ、その本文を `text` 引数で渡してください(`source` に "資料名 p.12-18" のように書くと出典が残ります)。' +
+      'クライアントを介さない場合は poppler で .txt 化して `path` で渡します。' +
+      '**企業の報告書は 2 段組が多く、その場合 `-layout` を付けると左右の段が 1 行に混ざって語が分断されます。まず `pdftotext 元.pdf 出力.txt`(オプションなし=読み順)を試してください。** ' +
+      '`-layout` が有効なのは表や帳票のように桁位置が意味を持つ場合だけです。' +
+      'スキャン画像の PDF は OCR が必要で、そこは本ツールの範囲外です。',
     en:
-      'PDF is binary and cannot be parsed without extra dependencies. Workaround: run ' +
-      '`pdftotext -layout input.pdf output.txt` (poppler) and pass the .txt file. ' +
+      'This tool cannot parse PDF itself (it ships no extra dependencies) — but **Claude Code / Claude Desktop can read PDFs directly**. ' +
+      'Fastest path: have your client read the PDF and pass the body via the `text` argument (use `source` for a label like "report.pdf p.12-18" so citations stay meaningful). ' +
+      'Without a client, convert with poppler and pass the .txt via `path`. ' +
+      '**Corporate reports are usually multi-column, and `-layout` interleaves the columns into single lines, splitting words. Start with plain `pdftotext input.pdf output.txt` (reading order).** ' +
+      'Reach for `-layout` only when column positions carry meaning, such as tables and forms. ' +
       'Scanned/image PDFs need OCR first, which is out of scope here.',
   },
   '.docx': {
     ja:
-      '.docx は ZIP + XML なので依存なしでは安全に展開できません。回避策: ' +
+      '.docx は ZIP + XML なので依存なしでは安全に展開できません。' +
+      '**Claude Code / Claude Desktop で開けるなら、その本文を `text` 引数で渡すのが最短です。** その他の回避策: ' +
       '`unzip -p 元.docx word/document.xml > 出力.xml` で XML を取り出して .xml として渡す' +
       '(段落の区切りが崩れ、表・コメント・変更履歴は失われます)。' +
       '精度を求めるなら Word で「書式なしテキスト(.txt)」に保存し直すのが確実です。',
@@ -268,7 +332,7 @@ const UNSUPPORTED: Record<string, Bilingual> = {
   '.xlsx': {
     ja:
       '.xlsx は ZIP + XML かつ文字列が共有テーブルに分離されているため、依存なしでは値を正しく復元できません。' +
-      '回避策: Excel / Numbers / LibreOffice で「CSV(UTF-8)」として書き出し、.csv として渡してください。' +
+      '**クライアントで開いて表を読ませ、その内容を `text` 引数で渡すのが最短です。** その他の回避策: Excel / Numbers / LibreOffice で「CSV(UTF-8)」として書き出し、.csv として渡してください。' +
       'シートごとに 1 ファイルにすると取り込み精度が上がります。',
     en:
       '.xlsx stores strings in a shared table inside a ZIP, so values cannot be recovered without dependencies. ' +
@@ -689,6 +753,140 @@ function cellAt(row: DelimitedRow, index: number): string {
 }
 
 // ---------------------------------------------------------------------------
+// 列の取り違え防止(見出しだけでなく「値」を見る)
+//
+// 台帳の列見出しは似た語を使い回す。「指摘番号」と「指摘事項」、「対策」と「対策前」。
+// 見出しの文字列一致だけで列を選ぶと、管理番号や評価値を本文として登録してしまう。
+// リスク台帳の「緩和策」欄に「高」「致命的」と書かれた表がそのまま委員会に出るのは事故なので、
+// 見出しに加えて **値そのもの** を見て列を決める。
+// ---------------------------------------------------------------------------
+
+/** レベル・評価値そのものか(「高」「致命的」「critical」)。これは対策の記述ではない。 */
+function isLevelWordOnly(value: string): boolean {
+  const v = value.trim().replace(/[()（）[\]【】\s]/g, '');
+  if (v.length === 0 || v.length > 8) return false;
+  return /^(?:致命的|クリティカル|緊急|最高|重大|甚大|深刻|重要|高|大|中|中程度|低|小|軽微|高い|低い|未評価|評価中|評価対象外|対象外|critical|severe|high|major|medium|moderate|low|minor|none|[HMLSABC])$/i.test(
+    v,
+  );
+}
+
+/** 日付・年度だけのセルか(「2026-10-31」「2026年10月」「FY2026 Q3」) */
+function isDateOnly(value: string): boolean {
+  const v = value.trim();
+  if (v.length === 0 || v.length > 24) return false;
+  return (
+    /^(?:FY)?\d{2,4}\s*[-/.年]\s*\d{1,2}\s*[月/.-]?\s*(?:\d{1,2}\s*日?)?$/i.test(v) ||
+    /^(?:FY)?\d{4}\s*年?度?\s*(?:Q[1-4]|上期|下期|第[1-4]四半期)$/i.test(v) ||
+    /^\d{4}\s*年?度?$/.test(v)
+  );
+}
+
+/** 「未定」「N/A」のような穴埋め値か。人名欄に入っていても人ではない。 */
+function isPlaceholderValue(value: string): boolean {
+  return /^(?:未定|未定義|未設定|未確定|未記入|未入力|未着手|なし|無し|該当なし|不明|空白|―|—|ー|-|‐|–|n\/?a|tbd|tbc|none|null|\?+)$/i.test(
+    value.trim(),
+  );
+}
+
+/** 台帳の「中身」らしいセルか(管理番号・日付・評価値・穴埋めを除く) */
+function isProseValue(value: string): boolean {
+  const v = value.trim();
+  if (v.length < 2) return false;
+  return !isIdLike(v) && !isDateOnly(v) && !isLevelWordOnly(v) && !isPlaceholderValue(v);
+}
+
+/** 列見出しの役割。タイトル列に選んではいけない列を弾くのに使う。 */
+const HEADER_ID_RE = /番号|項番|連番|管理番号|コード|^\s*No\.?\s*$|^\s*ID\s*$|＃|#|\bcode\b|\bindex\b|\bseq\b/i;
+const HEADER_DATE_RE = /期限|期日|日付|年月日|予定日|完了予定|締切|実施日|\bdue\b|\bdeadline\b|\bdate\b|\bschedule\b/i;
+const HEADER_STATUS_RE = /ステータス|状態|進捗|対応状況|\bstatus\b|\bprogress\b|\bstate\b/i;
+const HEADER_OWNER_RE = /担当|責任者|責任部門|所管|オーナー|部門|部署|所属|\bowner\b|\bassignee\b|\bresponsible\b|\bdepartment\b/i;
+/** 評価値(レベル)を入れる列 */
+const HEADER_LEVEL_RE =
+  /レベル|重要度|重大度|深刻度|影響度|発生可能性|発生確率|発生頻度|優先度|危険度|評価|格付|\bseverity\b|\blevel\b|\bpriority\b|\brating\b|\bimpact\b|\blikelihood\b|\bprobability\b|\bscore\b/i;
+/**
+ * 「対策前」「対策後」のように、対策そのものではなく**対策の前後のレベル**を表す列。
+ * ここを mitigation(対策の記述)と取り違えると、台帳の緩和策欄に「高」が並ぶ。
+ */
+const HEADER_LEVEL_PHASE_RE =
+  /(?:対策|対応|是正|軽減|緩和|措置|低減)\s*[（(]?\s*(?:前|後)|残存|\binherent\b|\bresidual\b|\bbefore\b|\bafter\b|pre-?mitigation|post-?mitigation/i;
+
+function headerMatches(header: string, res: RegExp[]): boolean {
+  return res.some((re) => re.test(header));
+}
+
+/** 列ごとの値の性質 */
+interface ColumnProfile {
+  index: number;
+  header: string;
+  /** 空でない値の数 */
+  filled: number;
+  /** そのうち「中身」らしい値の数 */
+  prose: number;
+  /** 値の平均文字数 */
+  avgLen: number;
+}
+
+function profileColumns(table: DocTable): ColumnProfile[] {
+  const out: ColumnProfile[] = [];
+  for (let i = 0; i < table.header.length; i += 1) {
+    let filled = 0;
+    let prose = 0;
+    let len = 0;
+    for (const row of table.rows) {
+      const v = cellAt(row, i);
+      if (v.length === 0) continue;
+      filled += 1;
+      len += v.length;
+      if (isProseValue(v)) prose += 1;
+    }
+    out.push({ index: i, header: table.header[i] ?? '', filled, prose, avgLen: filled === 0 ? 0 : len / filled });
+  }
+  return out;
+}
+
+/**
+ * 「中身の書いてある列」を選ぶ。
+ * 見出しが want に一致し、avoid に一致せず、値が管理番号・日付・レベル語ばかりでない列を採る。
+ * 監査指摘 CSV の「指摘番号 / 指摘事項」はどちらも "指摘" を含むため、値まで見ないと必ず取り違える。
+ */
+function pickProseColumn(profiles: ColumnProfile[], want: RegExp, avoid: RegExp[]): number {
+  let best = -1;
+  let bestScore = -1;
+  for (const p of profiles) {
+    if (!want.test(p.header)) continue;
+    if (headerMatches(p.header, avoid)) continue;
+    if (p.filled === 0) continue;
+    const proseRatio = p.prose / p.filled;
+    if (proseRatio < 0.5) continue;
+    const score = proseRatio * 100 + Math.min(p.avgLen, 60);
+    if (score > bestScore) {
+      bestScore = score;
+      best = p.index;
+    }
+  }
+  return best;
+}
+
+/** 見出しでは決められないときに、値が最も「本文らしい」列を選ぶ */
+function bestProseColumn(profiles: ColumnProfile[], avoid: RegExp[]): number {
+  let best = -1;
+  let bestScore = -1;
+  for (const p of profiles) {
+    if (headerMatches(p.header, avoid)) continue;
+    if (p.filled === 0) continue;
+    const proseRatio = p.prose / p.filled;
+    if (proseRatio < 0.6) continue;
+    if (p.avgLen < 5) continue;
+    const score = proseRatio * 100 + Math.min(p.avgLen, 60);
+    if (score > bestScore) {
+      bestScore = score;
+      best = p.index;
+    }
+  }
+  return best;
+}
+
+// ---------------------------------------------------------------------------
 // 表示用テキストの生成(read_document)
 // ---------------------------------------------------------------------------
 
@@ -865,16 +1063,30 @@ const KIND_LABEL: Record<ExtractKind, Bilingual> = {
   actions: { ja: 'アクション', en: 'Actions' },
 };
 
+/**
+ * 候補の確度。
+ * `low` は「文として成立していない断片」— 2 段組 PDF ダンプで語が分断された行など。
+ * 断片ほど高い確度が付く状態は誤りなので、low は表には出しても登録用 JSON には入れない。
+ */
+type Confidence = 'high' | 'medium' | 'low';
+
+const CONF_RANK: Record<Confidence, number> = { high: 0, medium: 1, low: 2 };
+
 interface Candidate {
   kind: ExtractKind;
   /** 出典行(doc.lineBasis 基準) */
   line: number;
   /** 候補の見出し */
   title: string;
-  /** 補足(対策・所属など) */
+  /** 補足(対策の記述・所属など) */
   detail?: string;
   level?: RiskLevel;
+  /** 対策後に残るレベル(「対策後」列があるときだけ) */
+  residualLevel?: RiskLevel;
+  /** レベル推定の根拠(どの列の何を見たか) */
+  levelBasis?: string;
   role?: string;
+  organization?: string;
   influence?: InfluenceLevel;
   due?: string;
   /** 期限らしき生の表記(ISO に落とせなかったもの) */
@@ -883,16 +1095,44 @@ interface Candidate {
   wording?: 'strong' | 'soft';
   owner?: string;
   /** 強い根拠があるか */
-  confidence: 'high' | 'medium';
+  confidence: Confidence;
   /** 出典の原文 */
   evidence: string;
-  /** 由来(表の列 / 本文) */
-  origin: 'table' | 'text';
+  /** 由来(表の列 / 見出し / 本文) */
+  origin: 'table' | 'heading' | 'text';
+}
+
+/** 拾わなかった / まとめた行。**黙って落とさない**ために必ず持ち回る。 */
+interface Dropped {
+  reason: 'duplicate' | 'placeholder' | 'idOnly';
+  title: string;
+  /** 対象の行番号(duplicate は「残した行, 落とした行…」の順) */
+  lines: number[];
 }
 
 const RISK_WORDS = [
   'リスク', '脅威', '懸念', '恐れ', 'おそれ', '脆弱性', 'インシデント', '危険', '可能性がある', '指摘',
   'risk', 'threat', 'vulnerability', 'exposure', 'incident', 'finding', 'concern',
+];
+
+/**
+ * 「リスク」という語を使わずに書かれたリスク。
+ *
+ * 相談メモや現状説明の文書には「リスク」の語はほとんど出てこない。出てくるのは
+ * 「2 回頓挫している」「保守要員が定年」「43 本のインターフェース」のような**状態**で、
+ * 読み手が危ないと判断する。語ではなく状態を拾わないと、いちばん相談されやすい
+ * 文書からリスクが 0 件になる。
+ * 明示語より弱い根拠なので、確度は high にしない。
+ */
+const RISK_STATE_WORDS = [
+  '未実施', '未定義', '未把握', '未適用', '未対応', '未整備', '未策定', '未評価', '未締結', '未承認',
+  '不備', '不足', '不明', '欠如', '形骸化', '違反', '逸脱', '未達',
+  'されていない', 'していない', 'できていない', '満たしていない', '確認できていない', '把握できていない',
+  '残存', '平文', '放置', '老朽', '陳腐化', 'ブラックボックス', '属人', '手作業', '手一杯',
+  '頓挫', '失敗', '中断', '遅延', '遅れて', '超過', '崩れ', '食い違', '矛盾', '慎重', '反対', '抵抗', '不満',
+  '定年', '離職', '枯渇', '困難', '逼迫', '失注', 'サポート終了', 'EOL', 'サポート切れ',
+  'not defined', 'not implemented', 'no longer supported', 'end of life', 'end-of-life', 'obsolete',
+  'missing', 'lack', 'shortage', 'backlog', 'overrun', 'delay', 'failed', 'workaround', 'manual process',
 ];
 
 const STAKEHOLDER_WORDS = [
@@ -1036,11 +1276,68 @@ function stripBullet(text: string): string {
   return text.replace(/^\s*(?:[-*・●○◆■□▪]|\d+[.)、]|\(\d+\)|[①-⑳])\s*/, '').trim();
 }
 
+/**
+ * 文として成立しているか。
+ *
+ * 2 段組の PDF をテキスト化すると、左右の段が 1 行に混ざり、語の断片が空白で
+ * 並んだだけの行が大量にできる(「UEM資産/脆弱性管理 ■SIEM、 AIラベリング」)。
+ * こうした断片は箇条書き記号で始まることが多く、**構造化された行=確度が高い**
+ * という素朴な規則だと確度が逆転する。述語・記号密度・空白の並びで先に弾く。
+ */
+function looksLikeSentence(text: string, structured: boolean): boolean {
+  const t = text.trim();
+  if (t.length < 10) return false;
+  // 大きな空白の連続は、段組が 1 行に潰れた痕跡
+  if (/[ 　]{3,}/.test(t)) return false;
+  if ((t.match(/[ 　]{2,}/g) ?? []).length >= 2) return false;
+  // 図中ラベルの羅列(記号だらけ)
+  if ((t.match(/[■□◆◇●○▲△▼※＊＞＜<>／|｜⇒→←↑↓]/g) ?? []).length >= 3) return false;
+  const jaPredicate =
+    /(?:です|ます|ました|である|であり|だっ|した|して|する|され|せず|ている|ていた|ない|なく|ある|あり|いる|れる|られ|でき|べき|こと|ため|可能性|必要|よう)/.test(t);
+  const enPredicate =
+    /\b(?:is|are|was|were|be|been|has|have|had|will|shall|must|should|can|could|may|might|does|did|lacks?|fails?|remains?|requires?|needs?)\b/i.test(t);
+  if (jaPredicate || enPredicate) return true;
+  // 体言止めの箇条書きは実務文書に普通に出てくるので、記号も空白も少ない行なら認める
+  return structured && t.length >= 12 && !/[ 　]{2,}/.test(t);
+}
+
+/**
+ * 本文由来の候補の確度を決める。
+ * - 文として成立していない断片は low(登録用 JSON に入れない)
+ * - 明示的な根拠語 + 箇条書き/番号付き行のときだけ high
+ * - 2 段組ダンプらしき入力では、行の構造そのものが信用できないので high を出さない
+ */
+function textConfidence(sentence: string, structured: boolean, strong: boolean, bleed: boolean): Confidence {
+  if (!looksLikeSentence(sentence, structured)) return 'low';
+  if (!strong) return 'medium';
+  if (!structured) return 'medium';
+  return bleed ? 'medium' : 'high';
+}
+
 interface ExtractContext {
   doc: LoadedDoc;
   /** 表として処理済みの行(本文側で二重に拾わない) */
   tableLines: Set<number>;
+  /** 2 段組 PDF ダンプらしき入力か(確度を上げない) */
+  bleed: boolean;
+  /** 拾わなかった行の記録 */
+  dropped: Dropped[];
 }
+
+/** タイトル列に選んではいけない列 */
+const AVOID_TITLE = [HEADER_ID_RE, HEADER_DATE_RE, HEADER_STATUS_RE, HEADER_LEVEL_RE, HEADER_LEVEL_PHASE_RE];
+
+/** リスク表の中で、レベルとして採用する優先順位。上から先に見る。 */
+const LEVEL_COL_PRIORITY: RegExp[] = [
+  /(?:対策|対応|是正|軽減|緩和|措置|低減)\s*[（(]?\s*前|\binherent\b|pre-?mitigation/i,
+  /重要度|重大度|深刻度|危険度|レベル|格付|\bseverity\b|\blevel\b|\brating\b/i,
+  /影響度|\bimpact\b/i,
+  /優先度|\bpriority\b/i,
+  /評価|\bscore\b/i,
+];
+
+/** 「対策後」= 残存リスクの列 */
+const RESIDUAL_COL_RE = /(?:対策|対応|是正|軽減|緩和|措置|低減)\s*[（(]?\s*後|残存|\bresidual\b|post-?mitigation/i;
 
 /** 表からの抽出 */
 function extractFromTables(ctx: ExtractContext, kind: ExtractKind, tables: DocTable[]): Candidate[] {
@@ -1049,39 +1346,100 @@ function extractFromTables(ctx: ExtractContext, kind: ExtractKind, tables: DocTa
     // 列見出しの行は本文としても拾わない(「リスク内容」という見出し自体はリスクではない)
     ctx.tableLines.add(table.headerLine);
     const header = table.header;
+    const profiles = profileColumns(table);
     let titleCol = -1;
     let extraCol = -1;
     let secondCol = -1;
+    /** リスク表の評価値の列(レベル推定の根拠として全部見せる) */
+    let levelCols: ColumnProfile[] = [];
+    let levelCol = -1;
+    let residualCol = -1;
+    let ownerCol = -1;
+    let dueCol = -1;
 
     if (kind === 'risks') {
-      titleCol = pickColumn(header, /リスク|脅威|指摘|事象|課題|risk|threat|finding|issue/i);
-      extraCol = pickColumn(header, /レベル|重要度|深刻度|影響度|優先度|評価|severity|level|priority|rating/i);
-      secondCol = pickColumn(header, /対策|対応|軽減|是正|mitigation|remediation|countermeasure|treatment/i);
-      // 「内容」だけの見出しは対応表でも使われる。深刻度の列がある表に限って本文列とみなす。
-      if (titleCol < 0 && extraCol >= 0) titleCol = pickColumn(header, /内容|詳細|description|detail/i);
+      titleCol = pickProseColumn(profiles, /リスク|脅威|指摘|所見|事象|課題|問題|懸念|risk|threat|finding|issue|concern/i, AVOID_TITLE);
+      levelCols = profiles.filter((p) => headerMatches(p.header, [HEADER_LEVEL_RE, HEADER_LEVEL_PHASE_RE]));
+      // 「内容」だけの見出しは対応表でも使われる。評価値の列がある表に限って本文列とみなす。
+      if (titleCol < 0 && levelCols.length > 0) {
+        titleCol = pickProseColumn(profiles, /内容|詳細|概要|description|detail|summary/i, AVOID_TITLE);
+      }
+      for (const re of LEVEL_COL_PRIORITY) {
+        const hit = levelCols.find((p) => re.test(p.header));
+        if (hit) {
+          levelCol = hit.index;
+          break;
+        }
+      }
+      if (levelCol < 0 && levelCols.length > 0) levelCol = levelCols[0].index;
+      residualCol = levelCols.find((p) => RESIDUAL_COL_RE.test(p.header))?.index ?? -1;
+      // mitigation に入れてよいのは「対策の記述」だけ。「対策前 / 対策後」は評価値の列なので必ず除く。
+      // 「対応」は「対応状況」「対応者」「対応前 / 対応後」とは別物なので、そこだけ除いて拾う
+      secondCol = pickProseColumn(
+        profiles,
+        /対策|対処|緩和|軽減|是正|改善策|措置|再発防止|対応(?!者|状況|前|後|期限|部門|部署|窓口)|treatment|mitigation|remediation|countermeasure|control/i,
+        [HEADER_LEVEL_PHASE_RE, HEADER_LEVEL_RE, HEADER_DATE_RE, HEADER_STATUS_RE, HEADER_ID_RE, HEADER_OWNER_RE],
+      );
+      // 台帳に担当・期限があるなら、リスク側にも残す(誰がいつまでに、が抜けたリスクは動かない)
+      ownerCol = pickColumn(header, /担当|責任者|所管|オーナー|owner|assignee/i);
+      dueCol = pickColumn(header, /期限|期日|完了予定|予定日|due|deadline|target/i);
     } else if (kind === 'stakeholders') {
-      titleCol = pickColumn(header, /氏名|名前|担当者|関係者|stakeholder|\bname\b|person/i);
+      titleCol = pickProseColumn(profiles, /氏名|名前|担当者|関係者|stakeholder|\bname\b|person/i, [
+        HEADER_ID_RE,
+        HEADER_DATE_RE,
+        HEADER_STATUS_RE,
+        HEADER_LEVEL_RE,
+      ]);
       extraCol = pickColumn(header, /役職|役割|職位|\brole\b|title|position/i);
       secondCol = pickColumn(header, /部門|組織|所属|会社|department|organization|division|company/i);
       // リスク管理表・課題表の「担当」列は、たいてい人か役職が入っている
-      if (titleCol < 0) titleCol = extraCol >= 0 ? extraCol : pickColumn(header, /担当|責任|owner|assignee/i);
+      if (titleCol < 0) {
+        titleCol =
+          extraCol >= 0
+            ? extraCol
+            : pickProseColumn(profiles, /担当|責任|owner|assignee/i, [HEADER_ID_RE, HEADER_DATE_RE, HEADER_STATUS_RE, HEADER_LEVEL_RE]);
+      }
     } else if (kind === 'systems') {
-      titleCol = pickColumn(header, /システム名|システム|サービス名|アプリ|application|\bsystem\b|\bhost\b|サーバ|node|名称/i);
+      titleCol = pickProseColumn(
+        profiles,
+        /システム名|システム|サービス名|アプリ|application|\bsystem\b|\bhost\b|サーバ|node|名称|対象/i,
+        [HEADER_ID_RE, HEADER_DATE_RE, HEADER_STATUS_RE, HEADER_LEVEL_RE],
+      );
       extraCol = pickColumn(header, /区分|種別|用途|category|type|環境|environment/i);
       secondCol = pickColumn(header, /所管|管理|担当|owner|運用/i);
     } else if (kind === 'requirements') {
-      titleCol = pickColumn(header, /要件|要求|条件|仕様|requirement|\breq\b/i);
+      titleCol = pickProseColumn(profiles, /要件|要求|条件|仕様|requirement|\breq\b/i, [
+        HEADER_ID_RE,
+        HEADER_DATE_RE,
+        HEADER_STATUS_RE,
+        HEADER_LEVEL_RE,
+      ]);
       extraCol = pickColumn(header, /区分|種別|必須|優先|priority|type|category/i);
       secondCol = pickColumn(header, /出典|根拠|source|reference|規程/i);
     } else {
       extraCol = pickColumn(header, /期限|期日|完了予定|予定日|due|deadline|target/i);
       secondCol = pickColumn(header, /担当|責任|owner|assignee|所管/i);
-      // 「リスク内容」が「対策」より前に来る表が多いので、動詞側の見出しを先に探す
-      titleCol = pickColumn(header, /対応|対策|アクション|タスク|是正|措置|改善|action|task|todo/i);
+      levelCol = pickColumn(header, HEADER_LEVEL_RE);
+      // 「リスク内容」が「対策」より前に来る表が多いので、動詞側の見出しを先に探す。
+      // 「是正期限」は日付の列であってアクションの表題ではないので AVOID_TITLE で弾く。
+      titleCol = pickProseColumn(profiles, /対応|対策|アクション|タスク|是正|措置|改善|施策|作業|action|task|todo/i, [
+        ...AVOID_TITLE,
+        HEADER_OWNER_RE,
+      ]);
       // 「項目」「内容」だけの見出しは指摘一覧・説明表でも使われる。
       // 期限か担当の列がある表(=誰かがやる前提の表)に限ってアクション表とみなす。
       if (titleCol < 0 && (extraCol >= 0 || secondCol >= 0)) {
-        titleCol = pickColumn(header, /内容|詳細|項目|description|item/i);
+        titleCol = pickProseColumn(profiles, /内容|詳細|項目|概要|description|item/i, [...AVOID_TITLE, HEADER_OWNER_RE]);
+      }
+      // 期限のある表なのに動詞側の見出しが無いことは多い(監査指摘一覧など)。
+      // その場合は「何について期限が切られているか」が書かれた列を値から選ぶ。
+      // ただし「期限」列があるだけの表(会議一覧など)まで拾わないよう、
+      // 担当・重要度・ステータスのどれかも備えた「追いかける表」に限る。
+      const looksTracked =
+        extraCol >= 0 &&
+        (secondCol >= 0 || levelCol >= 0 || profiles.some((p) => headerMatches(p.header, [HEADER_STATUS_RE])));
+      if (titleCol < 0 && looksTracked) {
+        titleCol = bestProseColumn(profiles, [...AVOID_TITLE, HEADER_OWNER_RE]);
       }
     }
     if (titleCol < 0) continue;
@@ -1092,7 +1450,15 @@ function extractFromTables(ctx: ExtractContext, kind: ExtractKind, tables: DocTa
       if (title === header[titleCol]) continue; // 繰り返しヘッダ
       ctx.tableLines.add(row.line);
       // "R-1" "A-01" "12" のような管理番号だけのセルは中身が無い(列の取り違え)
-      if (isIdLike(title)) continue;
+      if (isIdLike(title)) {
+        ctx.dropped.push({ reason: 'idOnly', title: safeText(title, 40), lines: [row.line] });
+        continue;
+      }
+      // 「未定」「N/A」は人でも作業でもない
+      if (isPlaceholderValue(title)) {
+        ctx.dropped.push({ reason: 'placeholder', title: safeText(title, 40), lines: [row.line] });
+        continue;
+      }
       const extra = cellAt(row, extraCol);
       const second = cellAt(row, secondCol);
       const evidence = row.cells.join(' | ');
@@ -1105,11 +1471,31 @@ function extractFromTables(ctx: ExtractContext, kind: ExtractKind, tables: DocTa
         origin: 'table',
       };
       if (kind === 'risks') {
-        base.level = inferRiskLevel(extra, true) ?? inferRiskLevel(`${title} ${extra}`, false);
-        if (second) base.detail = safeText(second, 140);
+        const levelCell = cellAt(row, levelCol);
+        base.level = inferRiskLevel(levelCell, true) ?? inferRiskLevel(`${title} ${levelCell}`, false);
+        const residualCell = cellAt(row, residualCol);
+        base.residualLevel = residualCell ? inferRiskLevel(residualCell, true) : undefined;
+        const basis = levelCols
+          .map((p) => ({ h: p.header.trim(), v: cellAt(row, p.index) }))
+          .filter((x) => x.v.length > 0)
+          .slice(0, 4)
+          .map((x) => `${x.h}=${x.v}`)
+          .join(' / ');
+        base.levelBasis = basis.length > 0 ? safeText(basis, 80) : undefined;
+        // 値がレベル語・日付・穴埋めなら、それは対策の記述ではない
+        if (second && isProseValue(second) && !isLevelWordOnly(second)) base.detail = safeText(second, 140);
+        const ownerCell = cellAt(row, ownerCol);
+        if (ownerCell && !isPlaceholderValue(ownerCell)) base.owner = safeText(ownerCell, 60);
+        const dueCell = cellAt(row, dueCol);
+        if (dueCell) {
+          const d = findDate(dueCell);
+          base.due = d.due;
+          base.dueRaw = d.raw;
+        }
       } else if (kind === 'stakeholders') {
-        base.role = extra ? safeText(extra, 60) : undefined;
-        base.detail = second ? safeText(second, 60) : undefined;
+        base.role = extra && !isPlaceholderValue(extra) ? safeText(extra, 60) : undefined;
+        base.organization = second && !isPlaceholderValue(second) ? safeText(second, 60) : undefined;
+        base.detail = base.organization;
         base.influence = inferInfluence(`${extra} ${title}`);
       } else if (kind === 'systems') {
         base.detail = [extra, second].filter((v) => v.length > 0).map((v) => safeText(v, 60)).join(' / ') || undefined;
@@ -1119,7 +1505,11 @@ function extractFromTables(ctx: ExtractContext, kind: ExtractKind, tables: DocTa
         const found = findDate(extra || evidence);
         base.due = found.due;
         base.dueRaw = found.raw;
-        base.owner = second ? safeText(second, 60) : undefined;
+        base.owner = second && !isPlaceholderValue(second) ? safeText(second, 60) : undefined;
+        // 重要度の列があるなら、優先度の初期値に使う(推定であることは表に明記する)
+        const levelCell = cellAt(row, levelCol);
+        base.level = levelCell ? inferRiskLevel(levelCell, true) : undefined;
+        if (base.level) base.levelBasis = safeText(`${(header[levelCol] ?? '').trim()}=${levelCell}`, 40);
       }
       out.push(base);
     }
@@ -1127,10 +1517,219 @@ function extractFromTables(ctx: ExtractContext, kind: ExtractKind, tables: DocTa
   return out;
 }
 
-/** 本文(行・文)からの抽出 */
-function extractFromText(ctx: ExtractContext, kind: ExtractKind): Candidate[] {
+// ---------------------------------------------------------------------------
+// 見出し(節)からの抽出
+//
+// 報告書の柱は本文ではなく**見出し**に書かれている。
+// 「### 3.1 特権 ID の棚卸しが 18 か月間未実施」は指摘そのものであり、
+// その直下の「責任部門 / 是正期限 / 是正責任者」が担当と期限になる。
+// 見出しを一律に読み飛ばすと、報告書のいちばん重要な部分だけが落ちる。
+// ---------------------------------------------------------------------------
+
+interface SectionField {
+  key: string;
+  value: string;
+  line: number;
+}
+
+interface DocSection {
+  level: number;
+  /** 記号・番号を落とした見出し */
+  title: string;
+  line: number;
+  /** 節の終わり(1 始まり・この行まで含む) */
+  end: number;
+  /** 上位見出しの文字列 */
+  ancestors: string[];
+  /** 直下の本文にある「キー: 値」 */
+  fields: SectionField[];
+  /** 下位見出しを持つ(=章の入れ物であって中身ではない) */
+  hasChildHeading: boolean;
+}
+
+/** 見出しの番号・記号を落とす */
+function cleanHeading(text: string): string {
+  return text
+    .replace(/^#{1,6}\s*/, '')
+    .replace(/^\s*[0-9０-９]+(?:[.\-－][0-9０-９]+)*[.．、)）]?\s+/, '')
+    .replace(/\s*#+\s*$/, '')
+    .trim();
+}
+
+/** ドキュメントの見出し構造を取り出す(Markdown / タグ除去後の HTML) */
+function findSections(doc: LoadedDoc): DocSection[] {
+  const heads: { level: number; raw: string; title: string; line: number }[] = [];
+  for (let i = 0; i < doc.lines.length; i += 1) {
+    const m = /^(#{1,6})\s+(\S.*)$/.exec(doc.lines[i].trim());
+    if (!m) continue;
+    const title = cleanHeading(m[2]);
+    if (title.length === 0) continue;
+    heads.push({ level: m[1].length, raw: m[2].trim(), title, line: i + 1 });
+  }
+  const sections: DocSection[] = [];
+  for (let i = 0; i < heads.length; i += 1) {
+    const h = heads[i];
+    // 次の「同じか浅い」見出しの直前までがこの節
+    let end = doc.lines.length;
+    for (let j = i + 1; j < heads.length; j += 1) {
+      if (heads[j].level <= h.level) {
+        end = heads[j].line - 1;
+        break;
+      }
+    }
+    const nextHeadLine = i + 1 < heads.length ? heads[i + 1].line : doc.lines.length + 1;
+    const bodyEnd = Math.min(end, nextHeadLine - 1);
+    const fields: SectionField[] = [];
+    for (let k = h.line; k < bodyEnd && k < doc.lines.length; k += 1) {
+      const fm = /^\s*([^\s:：|#][^:：|]{0,15})\s*[:：]\s*(\S.*)$/.exec(doc.lines[k]);
+      if (fm) fields.push({ key: fm[1].trim(), value: fm[2].trim(), line: k + 1 });
+      if (fields.length >= 12) break;
+    }
+    // 上位見出しを浅い方へたどる(1 階層につき 1 つだけ拾う)
+    const ancestors: string[] = [];
+    let need = h.level - 1;
+    for (let j = i - 1; j >= 0 && need >= 1; j -= 1) {
+      if (heads[j].level <= need) {
+        ancestors.unshift(heads[j].title);
+        need = heads[j].level - 1;
+      }
+    }
+    sections.push({
+      level: h.level,
+      title: h.title,
+      line: h.line,
+      end,
+      ancestors,
+      fields,
+      hasChildHeading: nextHeadLine <= end,
+    });
+  }
+  return sections;
+}
+
+/** 行番号から、その行を含む最も深い節を引く */
+function sectionLookup(sections: DocSection[]): (line: number) => DocSection | undefined {
+  return (line: number) => {
+    let best: DocSection | undefined;
+    for (const s of sections) {
+      if (line >= s.line && line <= s.end) {
+        if (!best || s.level > best.level) best = s;
+      }
+    }
+    return best;
+  };
+}
+
+/** 指摘・課題の節らしい語 */
+const FINDING_SECTION_RE = /指摘|所見|リスク|課題|問題|懸念|不備|違反|脆弱|インシデント|finding|issue|risk|gap|deficienc/i;
+/** 是正期限の欄 */
+const FIELD_DUE_RE = /是正期限|対応期限|改善期限|完了期限|対応予定|期限|期日|due|deadline/i;
+/** 責任者の欄 */
+const FIELD_PERSON_RE = /是正責任者|責任者|担当者|主管者|owner|responsible/i;
+/** 責任部門の欄 */
+const FIELD_DEPT_RE = /責任部門|担当部門|主管部門|所管|部門|部署|department/i;
+
+/** 穴埋め値でない最初の値 */
+function firstReal(...values: (string | undefined)[]): string | undefined {
+  for (const v of values) {
+    if (v && v.trim().length > 0 && !isPlaceholderValue(v)) return v.trim();
+  }
+  return undefined;
+}
+
+/**
+ * 見出しから候補を切り出す。
+ * 対象は「下位見出しを持たない節」= 実際の中身が書かれている節だけ。
+ * 章の入れ物(「3. 重大な指摘事項」)は表題であって指摘ではないので除く。
+ */
+function extractFromHeadings(ctx: ExtractContext, kind: ExtractKind, sections: DocSection[]): Candidate[] {
   const out: Candidate[] = [];
-  const seenSystem = new Map<string, Candidate>();
+  if (kind === 'systems' || kind === 'requirements') return out;
+
+  for (const s of sections) {
+    if (s.hasChildHeading) continue;
+    const dueField = s.fields.find((f) => FIELD_DUE_RE.test(f.key));
+    const person = s.fields.find((f) => FIELD_PERSON_RE.test(f.key));
+    const dept = s.fields.find((f) => FIELD_DEPT_RE.test(f.key));
+
+    if (kind === 'stakeholders') {
+      // 「責任部門: 調達部、法務部」「是正責任者: 山田(販売システム部)」は関係者そのもの
+      for (const field of [person, dept]) {
+        if (!field || isPlaceholderValue(field.value)) continue;
+        for (const part of field.value.split(/[、,／/]|および|及び/).slice(0, 4)) {
+          const nameRaw = part.trim();
+          if (nameRaw.length < 2 || isPlaceholderValue(nameRaw)) continue;
+          const paren = /^([^(（]{1,30})[(（]([^)）]{1,40})[)）]\s*$/.exec(nameRaw);
+          const name = paren ? paren[1].trim() : nameRaw;
+          const org = paren ? paren[2].trim() : undefined;
+          if (name.length < 2) continue;
+          out.push({
+            kind,
+            line: field.line,
+            title: safeText(name, 60),
+            role: safeText(field.key, 40),
+            organization: org ? safeText(org, 60) : undefined,
+            detail: org ? safeText(org, 60) : undefined,
+            influence: inferInfluence(`${field.key} ${name}`),
+            confidence: 'high',
+            evidence: `${s.title} | ${field.key}: ${field.value}`,
+            origin: 'heading',
+          });
+        }
+      }
+      continue;
+    }
+
+    // 是正期限が書かれた節は、語に関係なく「対応すべきこと」が書かれている
+    const qualifiedByField = Boolean(dueField);
+    // 「3. 重大な指摘事項」配下の「3.1 …」のように、上位の節が指摘の章なら中身も指摘
+    const qualifiedByContext =
+      s.level >= 3 && (FINDING_SECTION_RE.test(s.title) || s.ancestors.some((a) => FINDING_SECTION_RE.test(a)));
+    if (!qualifiedByField && !qualifiedByContext) continue;
+    if (s.title.length < 6) continue;
+
+    const owner = firstReal(person?.value, dept?.value);
+    const found = dueField ? findDate(dueField.value) : {};
+    const evidence = [s.title, ...s.fields.slice(0, 4).map((f) => `${f.key}: ${f.value}`)].join(' | ');
+
+    if (kind === 'risks') {
+      const levelSource = [s.title, ...s.ancestors].find((t) => inferRiskLevel(t, false));
+      out.push({
+        kind,
+        line: s.line,
+        title: safeText(s.title, 140),
+        level: levelSource ? inferRiskLevel(levelSource, false) : undefined,
+        levelBasis: levelSource
+          ? inline(`節見出し「${safeText(levelSource, 40)}」から`, `from section "${safeText(levelSource, 40)}"`, 'both')
+          : undefined,
+        owner: owner ? safeText(owner, 60) : undefined,
+        due: found.due,
+        dueRaw: found.raw,
+        confidence: qualifiedByField ? 'high' : 'medium',
+        evidence,
+        origin: 'heading',
+      });
+    } else if (kind === 'actions' && qualifiedByField) {
+      out.push({
+        kind,
+        line: s.line,
+        title: safeText(s.title, 140),
+        due: found.due,
+        dueRaw: found.raw,
+        owner: owner ? safeText(owner, 60) : undefined,
+        confidence: 'high',
+        evidence,
+        origin: 'heading',
+      });
+    }
+  }
+  return out;
+}
+
+/** 本文(行・文)からの抽出 */
+function extractFromText(ctx: ExtractContext, kind: ExtractKind, sections: DocSection[]): Candidate[] {
+  const out: Candidate[] = [];
+  const sectionAt = sectionLookup(sections);
 
   for (let i = 0; i < ctx.doc.lines.length; i += 1) {
     const lineNo = i + 1;
@@ -1146,13 +1745,25 @@ function extractFromText(ctx: ExtractContext, kind: ExtractKind): Candidate[] {
     for (const sentence of splitSentences(stripBullet(line))) {
       const lower = sentence.toLowerCase();
       if (kind === 'risks') {
-        if (!hasAny(lower, RISK_WORDS)) continue;
+        const explicit = hasAny(lower, RISK_WORDS);
+        // 「リスク」と書かれていなくても、危ない**状態**を述べた文は候補にする
+        const stated = !explicit && hasAny(lower, RISK_STATE_WORDS);
+        if (!explicit && !stated) continue;
+        const section = sectionAt(lineNo);
+        // 節見出しがレベルを語っているなら(「3. 重大な指摘事項」)、それを推定の根拠にする
+        const sectionLevel = section ? inferRiskLevel(section.title, false) : undefined;
+        const own = inferRiskLevel(sentence, false);
         out.push({
           kind,
           line: lineNo,
           title: safeText(sentence, 140),
-          level: inferRiskLevel(sentence, false),
-          confidence: structured ? 'high' : 'medium',
+          level: own ?? sectionLevel,
+          levelBasis: own
+            ? undefined
+            : sectionLevel && section
+              ? inline(`節見出し「${safeText(section.title, 40)}」から`, `from section "${safeText(section.title, 40)}"`, 'both')
+              : undefined,
+          confidence: textConfidence(sentence, structured, explicit, ctx.bleed),
           evidence: sentence,
           origin: 'text',
         });
@@ -1167,35 +1778,33 @@ function extractFromText(ctx: ExtractContext, kind: ExtractKind): Candidate[] {
           role: safeText(role, 60),
           influence: inferInfluence(role),
           detail: safeText(sentence, 140),
-          confidence: structured ? 'high' : 'medium',
+          confidence: textConfidence(sentence, structured, true, ctx.bleed),
           evidence: sentence,
           origin: 'text',
         });
       } else if (kind === 'systems') {
         if (!hasAny(lower, SYSTEM_WORDS)) continue;
         let name = '';
-        for (const re of SYSTEM_NAME_RES) {
-          const m = re.exec(sentence);
+        let named = false;
+        for (let r = 0; r < SYSTEM_NAME_RES.length; r += 1) {
+          const m = SYSTEM_NAME_RES[r].exec(sentence);
           if (m) {
             name = m[1].trim();
+            // 接尾語(〜システム / 〜基盤)が付く形は固有名の確度が高い。裸の大文字語は弱い。
+            named = r < 2;
             break;
           }
         }
         if (name.length < 2) continue;
-        const key = name.toLowerCase();
-        // 同じ名前は初出の行だけを候補にする(台帳では何度も出てくるため)
-        if (seenSystem.has(key)) continue;
-        const candidate: Candidate = {
+        out.push({
           kind,
           line: lineNo,
           title: safeText(name, 80),
           detail: safeText(sentence, 120),
-          confidence: structured ? 'high' : 'medium',
+          confidence: textConfidence(sentence, structured, named, ctx.bleed),
           evidence: sentence,
           origin: 'text',
-        };
-        seenSystem.set(key, candidate);
-        out.push(candidate);
+        });
       } else if (kind === 'requirements') {
         const strong = hasAny(lower, REQUIREMENT_STRONG) || /すること(?:[。、\s]|$)/.test(sentence);
         const weak = hasAny(lower, REQUIREMENT_WEAK);
@@ -1206,7 +1815,7 @@ function extractFromText(ctx: ExtractContext, kind: ExtractKind): Candidate[] {
           line: lineNo,
           title: safeText(sentence, 160),
           wording: strong ? 'strong' : 'soft',
-          confidence: strong ? 'high' : 'medium',
+          confidence: textConfidence(sentence, structured || strong, strong, ctx.bleed),
           evidence: sentence,
           origin: 'text',
         });
@@ -1223,7 +1832,7 @@ function extractFromText(ctx: ExtractContext, kind: ExtractKind): Candidate[] {
           title: safeText(sentence, 160),
           due: found.due,
           dueRaw: found.raw,
-          confidence: found.raw ? 'high' : 'medium',
+          confidence: textConfidence(sentence, structured || Boolean(found.raw), strong || Boolean(found.raw), ctx.bleed),
           evidence: sentence,
           origin: 'text',
         });
@@ -1233,17 +1842,38 @@ function extractFromText(ctx: ExtractContext, kind: ExtractKind): Candidate[] {
   return out;
 }
 
-/** 同じ内容の候補をまとめる */
-function dedupeCandidates(candidates: Candidate[]): Candidate[] {
-  const seen = new Set<string>();
-  const out: Candidate[] = [];
+/**
+ * 同じ内容の候補をまとめる。
+ * **まとめた事実は必ず呼び出し元に返す。** 台帳の行が黙って消えるのは、
+ * 消えたことに気づけないぶん、間違った行が残るより危ない。
+ */
+function dedupeCandidates(candidates: Candidate[]): { kept: Candidate[]; merged: Dropped[] } {
+  const seen = new Map<string, Candidate>();
+  const groups = new Map<string, number[]>();
+  const kept: Candidate[] = [];
   for (const c of candidates) {
     const key = `${c.kind}::${c.title.toLowerCase().replace(/\s+/g, '')}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(c);
+    const first = seen.get(key);
+    if (first) {
+      const lines = groups.get(key) ?? [first.line];
+      lines.push(c.line);
+      groups.set(key, lines);
+      // 落とす側に情報(期限・担当・レベル)があれば、残す側に寄せる
+      if (!first.due && c.due) first.due = c.due;
+      if (!first.dueRaw && c.dueRaw) first.dueRaw = c.dueRaw;
+      if (!first.owner && c.owner) first.owner = c.owner;
+      if (!first.level && c.level) first.level = c.level;
+      continue;
+    }
+    seen.set(key, c);
+    kept.push(c);
   }
-  return out;
+  const merged: Dropped[] = [];
+  for (const [key, lines] of groups) {
+    const c = seen.get(key);
+    merged.push({ reason: 'duplicate', title: c ? c.title : key, lines });
+  }
+  return { kept, merged };
 }
 
 interface ExtractResult {
@@ -1251,19 +1881,45 @@ interface ExtractResult {
   candidates: Candidate[];
   /** 上限で打ち切った件数 */
   truncated: number;
+  /** 打ち切り前の総数(入力が広すぎるかの判断に使う) */
+  totalBeforeCap: number;
+  /** 打ち切り前の確度の内訳(打ち切り後だけ数えると「270 件中 40 件」のように読めてしまう) */
+  tierCounts: Record<Confidence, number>;
+  /** まとめた / 拾わなかった行(黙って落とさないための記録) */
+  dropped: Dropped[];
 }
 
 /** 1 種別を抽出する */
-function extractKind(doc: LoadedDoc, tables: DocTable[], kind: ExtractKind): ExtractResult {
-  const ctx: ExtractContext = { doc, tableLines: new Set<number>() };
+function extractKind(doc: LoadedDoc, tables: DocTable[], sections: DocSection[], kind: ExtractKind, bleed: boolean): ExtractResult {
+  // 「是正期限: 2026年10月31日」のような欄は、見出し側の候補に担当・期限として
+  // 取り込み済み。本文としても拾うと「是正期限: …」という表題のアクションが増えるだけ。
+  const consumed = new Set<number>();
+  for (const s of sections) {
+    for (const f of s.fields) {
+      if (FIELD_DUE_RE.test(f.key) || FIELD_PERSON_RE.test(f.key) || FIELD_DEPT_RE.test(f.key)) consumed.add(f.line);
+    }
+  }
+  const ctx: ExtractContext = { doc, tableLines: consumed, bleed, dropped: [] };
   const fromTables = extractFromTables(ctx, kind, tables);
-  const fromText = extractFromText(ctx, kind);
-  const all = dedupeCandidates([...fromTables, ...fromText]).sort((a, b) => {
-    if (a.confidence !== b.confidence) return a.confidence === 'high' ? -1 : 1;
+  const fromHeadings = extractFromHeadings(ctx, kind, sections);
+  const fromText = extractFromText(ctx, kind, sections);
+  const deduped = dedupeCandidates([...fromTables, ...fromHeadings, ...fromText]);
+  const all = deduped.kept.sort((a, b) => {
+    const rank = CONF_RANK[a.confidence] - CONF_RANK[b.confidence];
+    if (rank !== 0) return rank;
     return a.line - b.line;
   });
   const kept = all.slice(0, MAX_CANDIDATES_PER_KIND);
-  return { kind, candidates: kept, truncated: all.length - kept.length };
+  const tierCounts: Record<Confidence, number> = { high: 0, medium: 0, low: 0 };
+  for (const c of all) tierCounts[c.confidence] += 1;
+  return {
+    kind,
+    candidates: kept,
+    truncated: all.length - kept.length,
+    totalBeforeCap: all.length,
+    tierCounts,
+    dropped: [...ctx.dropped, ...deduped.merged],
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1275,12 +1931,104 @@ function sourceRef(doc: LoadedDoc, line: number): string {
   return `${doc.fileName}:${line}`;
 }
 
+/**
+ * 拾わなかった / まとめた行を明示する。
+ * 「同じ日付が表題になっていたので 3 行が重複として消えた」ような事故は、
+ * 消えたことが見えないと気づけない。件数だけでなく**内容と行番号**を出す。
+ */
+function renderDropped(result: ExtractResult, lang: Lang): string[] {
+  if (result.dropped.length === 0) return [];
+  const parts: string[] = [];
+  const merged = result.dropped.filter((d) => d.reason === 'duplicate');
+  const ids = result.dropped.filter((d) => d.reason === 'idOnly');
+  const holes = result.dropped.filter((d) => d.reason === 'placeholder');
+  const droppedRows = merged.reduce((acc, d) => acc + d.lines.length - 1, 0) + ids.length + holes.length;
+  // 一覧は長くなりすぎないよう頭打ちにする。**打ち切ったなら「全部出す」と書いてはいけない**
+  // ので、見出しの文言も件数に応じて変える(「黙って落とさない」ための節が自分で嘘をつかないように)。
+  const listedMerged = Math.min(merged.length, 10);
+  const listedIds = Math.min(ids.length, 5);
+  const listedHoles = Math.min(holes.length, 5);
+  const hiddenEntries =
+    merged.length - listedMerged + (ids.length - listedIds) + (holes.length - listedHoles);
+  parts.push('');
+  parts.push(
+    `> ${
+      hiddenEntries === 0
+        ? inline(
+            `**この種別で ${droppedRows} 行を候補にしていません**(内訳は以下。黙って落とさないために全部出します)`,
+            `**${droppedRows} row(s) did not become candidates for this kind** — all of them are listed below so nothing disappears silently`,
+            lang,
+          )
+        : inline(
+            `**この種別で ${droppedRows} 行を候補にしていません**(件数が多いため、内訳は代表的なものだけ出します。残り ${hiddenEntries} 件は省略しました。全部見るには \`kind\` を 1 種別に絞るか、章・節を切り出した入力で再実行してください)`,
+            `**${droppedRows} row(s) did not become candidates for this kind** — too many to list, so only representative entries are shown below and ${hiddenEntries} more are omitted. To see them all, narrow \`kind\` to one value or re-run on a single section.`,
+            lang,
+          )
+    }`,
+  );
+  for (const d of merged.slice(0, 10)) {
+    parts.push(
+      `> - ${inline(
+        `表題が同じなので 1 件にまとめました: 「${safeCell(d.title, 60)}」 — 行 ${d.lines.join(', ')}(残したのは行 ${d.lines[0]})`,
+        `merged as one (identical title): "${safeCell(d.title, 60)}" — lines ${d.lines.join(', ')} (kept line ${d.lines[0]})`,
+        lang,
+      )}`,
+    );
+  }
+  if (merged.length > 10) {
+    parts.push(
+      `> - ${inline(
+        `…ほかに ${merged.length - 10} 件、同じ表題でまとめた行があります(表示は省略)`,
+        `…and ${merged.length - 10} more rows merged on an identical title (not listed)`,
+        lang,
+      )}`,
+    );
+  }
+  for (const d of ids.slice(0, 5)) {
+    parts.push(
+      `> - ${inline(
+        `管理番号だけのセルなので除外: 「${safeCell(d.title, 40)}」 — 行 ${d.lines.join(', ')}`,
+        `dropped, the cell holds only a reference number: "${safeCell(d.title, 40)}" — line ${d.lines.join(', ')}`,
+        lang,
+      )}`,
+    );
+  }
+  if (ids.length > 5) {
+    parts.push(
+      `> - ${inline(
+        `…ほかに ${ids.length - 5} 件、管理番号だけのセルがあります(表示は省略)`,
+        `…and ${ids.length - 5} more cells holding only a reference number (not listed)`,
+        lang,
+      )}`,
+    );
+  }
+  for (const d of holes.slice(0, 5)) {
+    parts.push(
+      `> - ${inline(
+        `「${safeCell(d.title, 30)}」は値が入っていないのと同じなので除外 — 行 ${d.lines.join(', ')}`,
+        `"${safeCell(d.title, 30)}" is a placeholder, not a value — line ${d.lines.join(', ')}`,
+        lang,
+      )}`,
+    );
+  }
+  if (holes.length > 5) {
+    parts.push(
+      `> - ${inline(
+        `…ほかに ${holes.length - 5} 件、「未定」などの穴埋め値の行があります(表示は省略)`,
+        `…and ${holes.length - 5} more rows holding a placeholder such as "未定" (not listed)`,
+        lang,
+      )}`,
+    );
+  }
+  return parts;
+}
+
 /** 候補を Markdown 表にする */
 function renderCandidateTable(doc: LoadedDoc, result: ExtractResult, lang: Lang, limit: number): string {
   const { kind, candidates } = result;
   const shown = candidates.slice(0, limit);
   if (shown.length === 0) {
-    return inline('該当なし。', 'No candidates found.', lang);
+    return [inline('該当なし。', 'No candidates found.', lang), ...renderDropped(result, lang)].join('\n');
   }
   const lineCol = inline('行', 'Line', lang);
   const confCol = inline('確度', 'Conf.', lang);
@@ -1289,12 +2037,25 @@ function renderCandidateTable(doc: LoadedDoc, result: ExtractResult, lang: Lang,
   let rows: string[][];
 
   if (kind === 'risks') {
-    header = [lineCol, inline('リスク候補', 'Risk candidate', lang), inline('レベル推定', 'Level (guess)', lang), inline('対策の記述', 'Stated mitigation', lang), confCol, evidenceCol];
+    // 所管・期限は原文に書いてあるときだけ列を出す(空列で幅を食わない)
+    const hasOwnerOrDue = shown.some((c) => c.owner || c.due || c.dueRaw);
+    header = [
+      lineCol,
+      inline('リスク候補', 'Risk candidate', lang),
+      inline('レベル推定(根拠)', 'Level (guess, basis)', lang),
+      inline('対策後', 'Residual', lang),
+      inline('記載された対策', 'Stated mitigation', lang),
+      ...(hasOwnerOrDue ? [inline('所管・期限(記載)', 'Owner / due (stated)', lang)] : []),
+      confCol,
+      evidenceCol,
+    ];
     rows = shown.map((c) => [
       String(c.line),
       safeCell(c.title, 70),
-      c.level ?? '—',
+      safeCell(c.levelBasis ? `${c.level ?? '—'} ← ${c.levelBasis}` : (c.level ?? '—'), 60),
+      c.residualLevel ?? '—',
       safeCell(c.detail ?? '', 40) || '—',
+      ...(hasOwnerOrDue ? [safeCell([c.owner, c.due ?? c.dueRaw].filter(Boolean).join(' / '), 40) || '—'] : []),
       c.confidence,
       safeCell(c.evidence, EVIDENCE_CHARS),
     ]);
@@ -1304,8 +2065,8 @@ function renderCandidateTable(doc: LoadedDoc, result: ExtractResult, lang: Lang,
       String(c.line),
       safeCell(c.title, 50),
       safeCell(c.role ?? '', 40) || '—',
-      // 所属は表の列から取れたときだけ。本文由来の detail は原文なので出さない。
-      (c.origin === 'table' ? safeCell(c.detail ?? '', 40) : '') || '—',
+      // 所属は表・見出しの欄から取れたときだけ。本文由来の detail は原文なので出さない。
+      safeCell(c.organization ?? '', 40) || '—',
       c.influence ?? '—',
       safeCell(c.evidence, EVIDENCE_CHARS),
     ]);
@@ -1333,12 +2094,24 @@ function renderCandidateTable(doc: LoadedDoc, result: ExtractResult, lang: Lang,
       safeCell(c.evidence, EVIDENCE_CHARS),
     ]);
   } else {
-    header = [lineCol, inline('アクション候補', 'Action candidate', lang), inline('期限候補', 'Due (guess)', lang), inline('担当候補', 'Owner (guess)', lang), confCol, evidenceCol];
+    const hasPriority = shown.some((c) => c.level);
+    header = [
+      lineCol,
+      inline('アクション候補', 'Action candidate', lang),
+      inline('期限候補', 'Due (guess)', lang),
+      inline('担当候補', 'Owner (guess)', lang),
+      ...(hasPriority ? [inline('優先度推定(根拠)', 'Priority (guess, basis)', lang)] : []),
+      confCol,
+      evidenceCol,
+    ];
     rows = shown.map((c) => [
       String(c.line),
       safeCell(c.title, 70),
       safeCell(c.due ?? c.dueRaw ?? '', 30) || '—',
       safeCell(c.owner ?? '', 30) || '—',
+      ...(hasPriority
+        ? [c.level ? safeCell(`${levelToPriority(c.level)}${c.levelBasis ? ` ← ${c.levelBasis}` : ''}`, 40) : '—']
+        : []),
       c.confidence,
       safeCell(c.evidence, EVIDENCE_CHARS),
     ]);
@@ -1366,6 +2139,7 @@ function renderCandidateTable(doc: LoadedDoc, result: ExtractResult, lang: Lang,
       ),
     );
   }
+  parts.push(...renderDropped(result, lang));
   parts.push('');
   const basisNote =
     doc.lineBasis === 'formatted'
@@ -1383,7 +2157,9 @@ interface RiskPayload {
   title: string;
   description?: string;
   level: RiskLevel;
+  residualLevel?: RiskLevel;
   status: RiskStatus;
+  owner?: string;
   mitigation?: string;
 }
 interface StakeholderPayload {
@@ -1397,6 +2173,7 @@ interface StakeholderPayload {
 }
 interface ActionPayload {
   title: string;
+  owner?: string;
   due?: string;
   status: ActionStatus;
   priority: Priority;
@@ -1416,46 +2193,59 @@ function levelToPriority(level: RiskLevel | undefined): Priority {
   return 'medium';
 }
 
-/** 抽出結果を update_engagement の入力形に変換する */
+/**
+ * 登録に回してよい候補か。
+ * 確度 low は「文として成立していない断片」なので、リスク台帳に入れてはいけない。
+ */
+function registrable(candidates: Candidate[]): Candidate[] {
+  return candidates.filter((c) => c.confidence !== 'low');
+}
+
+/** 抽出結果を update_engagement の入力形に変換する(確度 low は入れない) */
 function toUpdatePayload(doc: LoadedDoc, results: ExtractResult[]): UpdatePayload {
   const payload: UpdatePayload = {};
   const notes: string[] = [];
 
   for (const result of results) {
-    if (result.candidates.length === 0) continue;
+    const usable = registrable(result.candidates);
+    if (usable.length === 0) continue;
     const ref = (c: Candidate): string => `出典 / source: ${sourceRef(doc, c.line)}`;
+    const basis = (c: Candidate): string => (c.levelBasis ? ` [推定根拠 / basis: ${safeText(c.levelBasis, 80)}]` : '');
     if (result.kind === 'risks') {
-      payload.risks = result.candidates.map((c) => ({
+      payload.risks = usable.map((c) => ({
         title: safeText(c.title, 120),
-        description: `${safeText(c.evidence, 200)} (${ref(c)})`,
+        description: `${safeText(c.evidence, 200)} (${ref(c)})${basis(c)}`,
         level: c.level ?? 'medium',
+        residualLevel: c.residualLevel,
         status: 'open' as RiskStatus,
+        owner: c.owner ? safeText(c.owner, 60) : undefined,
         mitigation: c.detail ? safeText(c.detail, 160) : undefined,
       }));
     } else if (result.kind === 'stakeholders') {
-      payload.stakeholders = result.candidates.map((c) => ({
+      payload.stakeholders = usable.map((c) => ({
         name: safeText(c.title, 80),
         role: c.role ? safeText(c.role, 60) : undefined,
-        organization: c.detail && c.origin === 'table' ? safeText(c.detail, 60) : undefined,
+        organization: c.organization ? safeText(c.organization, 60) : undefined,
         influence: c.influence ?? 'medium',
         interest: 'medium' as InfluenceLevel,
         concerns: [safeText(c.evidence, 160)],
         approach: `要確認(自動抽出) / to be confirmed — ${ref(c)}`,
       }));
     } else if (result.kind === 'actions') {
-      payload.actions = result.candidates.map((c) => ({
+      payload.actions = usable.map((c) => ({
         title: safeText(c.title, 120),
+        owner: c.owner ? safeText(c.owner, 60) : undefined,
         due: c.due,
         status: 'todo' as ActionStatus,
-        priority: 'medium' as Priority,
-        note: `${c.dueRaw && !c.due ? `期限表記 / stated due: ${safeText(c.dueRaw, 40)} — ` : ''}${ref(c)}`,
+        priority: levelToPriority(c.level),
+        note: `${c.dueRaw && !c.due ? `期限表記 / stated due: ${safeText(c.dueRaw, 40)} — ` : ''}${ref(c)}${basis(c)}`,
       }));
     } else if (result.kind === 'systems') {
-      for (const c of result.candidates) {
+      for (const c of usable) {
         notes.push(`[システム / system] ${safeText(c.title, 80)} — ${ref(c)}`);
       }
     } else {
-      for (const c of result.candidates) {
+      for (const c of usable) {
         notes.push(`[要件候補 / requirement] ${safeText(c.title, 160)} — ${ref(c)}`);
       }
     }
@@ -1505,10 +2295,19 @@ function renderExtraction(
     inlineBi(KIND_LABEL[r.kind], lang),
     `\`${r.kind}\``,
     String(r.candidates.length + r.truncated),
-    String(r.candidates.filter((c) => c.confidence === 'high').length),
+    String(r.tierCounts.high),
+    String(r.tierCounts.medium),
+    String(r.tierCounts.low),
   ]);
   const summary = mdTable(
-    [inline('種別', 'Kind', lang), 'kind', inline('候補数', 'Candidates', lang), inline('うち確度高', 'High conf.', lang)],
+    [
+      inline('種別', 'Kind', lang),
+      'kind',
+      inline('候補数', 'Candidates', lang),
+      inline('高', 'high', lang),
+      inline('中', 'medium', lang),
+      inline('低(断片)', 'low (fragments)', lang),
+    ],
     summaryRows,
   );
   if (summary) {
@@ -1530,6 +2329,17 @@ function renderExtraction(
     (payload.risks?.length ?? 0) + (payload.stakeholders?.length ?? 0) + (payload.actions?.length ?? 0) + (payload.notes?.length ?? 0) > 0;
   out.push(`## ${inline('そのまま update_engagement に渡せる JSON', 'JSON ready for update_engagement', lang)}`);
   out.push('');
+  const lowCount = results.reduce((acc, r) => acc + r.candidates.filter((c) => c.confidence === 'low').length, 0);
+  if (lowCount > 0) {
+    out.push(
+      inline(
+        `確度 low の候補 ${lowCount} 件は、文として成立していない断片(2 段組の混線・図中ラベルなど)なので **この JSON には入れていません**。必要なら上の表から手で拾ってください。`,
+        `${lowCount} low-confidence candidate(s) are fragments (interleaved columns, diagram labels) and are **not included in this JSON**. Pick them from the table above by hand if you need them.`,
+        lang,
+      ),
+    );
+    out.push('');
+  }
   if (hasPayload) {
     out.push(
       inline(
@@ -1726,6 +2536,49 @@ function scanViewpoints(doc: LoadedDoc): ViewpointHit[] {
 // ツール登録
 // ---------------------------------------------------------------------------
 
+/**
+ * 手元にあるテキストから LoadedDoc を作る。
+ *
+ * このサーバーは Claude Code / Claude Desktop の中で動くため、**PDF や Word の
+ * 読み取りはホスト側が既にできる**。ホストが読んだ本文をそのまま渡せるように
+ * しておかないと、実務で最も多い入力形式(PDF)で機能が死ぬ。
+ * ファイル経由と同じ抽出エンジンを使うので、出典は「source:行番号」で残る。
+ */
+function loadFromText(text: string, sourceName: string): LoadResult {
+  const normalized = text.replace(/\r\n?/g, '\n');
+  if (normalized.trim().length === 0) {
+    return {
+      ok: false,
+      error: {
+        ja: 'text が空です。抽出したい本文を渡してください(PDF などはホスト側で読んだ本文をそのまま貼れます)。',
+        en: 'text is empty. Pass the body you want to mine (for a PDF, paste the text your client already read).',
+      },
+    };
+  }
+  const name = sourceName.trim().length > 0 ? sourceName.trim() : '(pasted text)';
+  return {
+    ok: true,
+    doc: {
+      path: name,
+      fileName: name,
+      // 渡された時点で書式は失われているので、素のテキストとして扱う
+      format: 'text',
+      ext: '',
+      bytes: Buffer.byteLength(normalized, 'utf8'),
+      encoding: 'utf-8',
+      raw: normalized,
+      lines: normalized.split('\n'),
+      lineBasis: 'file',
+      warnings: [
+        {
+          ja: '渡されたテキストを直接走査しています。行番号は渡された本文内の位置です(元ファイルのページ・行とは一致しないことがあります)。',
+          en: 'Scanning the text you passed. Line numbers refer to that text, which may not line up with the original file\'s pages or lines.',
+        },
+      ],
+    },
+  };
+}
+
 const pathSchema = z
   .string()
   .min(1)
@@ -1734,9 +2587,29 @@ const pathSchema = z
       'Absolute path of the file (must sit under the working directory, the data directory, or your home directory; hidden directories are excluded)',
   );
 
+const textSchema = z
+  .string()
+  .min(1)
+  .optional()
+  .describe(
+    'ファイルの代わりに直接渡す本文。**PDF / Word / Excel / メール本文など、クライアント側で既に読めているものはこちらで渡す**。' +
+    'path とはどちらか一方を指定する。 / ' +
+    'Body text to mine instead of a file. Use this for PDF/Word/Excel/email content your client has already read. ' +
+    'Pass either this or path, not both.',
+  );
+
+const sourceSchema = z
+  .string()
+  .optional()
+  .describe(
+    'text を渡すときの出典名(出典表示に使う。例: "csr2026j.pdf p.12-18") / ' +
+    'Label for the text you passed; it appears in the source column (e.g. "csr2026j.pdf p.12-18")',
+  );
+
 const kindSchema = z
   .enum(['risks', 'stakeholders', 'systems', 'requirements', 'actions', 'auto'])
-  .describe('抽出する種別。auto は全種別 / What to extract; "auto" runs every kind');
+  .default('auto')
+  .describe('抽出する種別。auto(既定)は全種別 / What to extract; "auto" (default) runs every kind');
 
 const maxCharsSchema = z
   .number()
@@ -1745,6 +2618,171 @@ const maxCharsSchema = z
   .max(2_000_000)
   .default(DEFAULT_MAX_CHARS)
   .describe('返す最大文字数(超えた分は切り詰めた旨を明示) / Maximum characters to return; truncation is always reported');
+
+/**
+ * path / text のどちらで渡されたかを解決する。
+ * 両方・どちらも無し、はここで弾く(zod では表現しづらいので実行時に検査する)。
+ */
+function resolveInput(path: string | undefined, text: string | undefined, source: string | undefined): LoadResult {
+  if (path && text) {
+    return {
+      ok: false,
+      error: {
+        ja: 'path と text は同時に指定できません。ファイルを読むなら path、手元の本文を渡すなら text のどちらか一方にしてください。',
+        en: 'Pass either path or text, not both: path to read a file, text to hand over content you already have.',
+      },
+    };
+  }
+  // 出典名は取り込んだ全項目の説明文に入り、パスは見つからなければエラー文にそのまま出る。
+  // どちらも長さの上限が無いと、1 回の呼び出しで保存 JSON と応答の両方が膨らむ。
+  if (source !== undefined && cleanedLength(source) > TEXT_LIMITS.title.limit) {
+    return {
+      ok: false,
+      error: {
+        ja:
+          `source が長すぎます(${cleanedLength(source).toLocaleString('en-US')} 文字、上限 ${TEXT_LIMITS.title.limit} 文字)。` +
+          'source は出典の短い呼び名です(例: "報告書.pdf p.12-18")。本文は text に渡してください。',
+        en:
+          `source is too long (${cleanedLength(source).toLocaleString('en-US')} characters, limit ${TEXT_LIMITS.title.limit}). ` +
+          'source is a short label for the origin (for example "report.pdf p.12-18"); the body belongs in text.',
+      },
+    };
+  }
+  if (path !== undefined && path.length > MAX_PATH_CHARS) {
+    return {
+      ok: false,
+      error: {
+        ja: `path が長すぎます(${path.length.toLocaleString('en-US')} 文字)。OS が扱えるパスの長さを超えているため、開くまでもなく失敗します。`,
+        en: `path is too long (${path.length.toLocaleString('en-US')} characters). No filesystem can hold a path this long, so it cannot be opened.`,
+      },
+    };
+  }
+  if (text !== undefined) return loadFromText(text, source ?? '(pasted text)');
+  if (path !== undefined) return loadDocument(path);
+  return {
+    ok: false,
+    error: {
+      ja:
+        'path も text も指定されていません。**手元にある資料をそのまま入れてください。** 使い方は 2 通りだけです。\n\n' +
+        '1) ファイルを読ませる(.txt .md .csv .tsv .json .html .xml):\n' +
+        '```json\n{ "path": "/絶対パス/監査指摘.csv", "kind": "auto" }\n```\n' +
+        '2) すでに読めている本文を貼る(**PDF / Word / Excel / メールはこちら**。クライアントが読んだ本文をそのまま渡す):\n' +
+        '```json\n{ "text": "…本文…", "source": "報告書.pdf p.12-18", "kind": "risks" }\n```\n\n' +
+        'kind は risks / stakeholders / systems / requirements / actions / auto(既定)。' +
+        'まず何が入っているか見たいだけなら `read_document` を、章立てから見たいなら `summarize_document_for_architecture` を先に呼んでください。',
+      en:
+        'Neither path nor text was given. **Feed it the document you already have.** There are only two ways in.\n\n' +
+        '1) Read a file (.txt .md .csv .tsv .json .html .xml):\n' +
+        '```json\n{ "path": "/absolute/path/audit-findings.csv", "kind": "auto" }\n```\n' +
+        '2) Paste content you can already see (**PDF / Word / Excel / email go here** — hand over the text your client read):\n' +
+        '```json\n{ "text": "…body…", "source": "report.pdf p.12-18", "kind": "risks" }\n```\n\n' +
+        'kind is one of risks / stakeholders / systems / requirements / actions / auto (default). ' +
+        'To just look at the content first, call `read_document`; to see it by viewpoint, call `summarize_document_for_architecture`.',
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 入力の品質チェックと、抽出の実行
+// ---------------------------------------------------------------------------
+
+interface InputQuality {
+  /** 2 段組が 1 行に混ざったダンプらしいか */
+  columnBleed: boolean;
+  bleedLines: number;
+  nonEmptyLines: number;
+  /** 該当行の例(先頭 5 件) */
+  sample: number[];
+}
+
+/**
+ * 2 段組 PDF をそのままテキスト化した入力を検出する。
+ *
+ * `pdftotext -layout` は桁位置を保つため、2 段組では左段と右段が 1 行に並ぶ。
+ * その結果、語が途中で分断された断片が大量にでき、抽出はノイズだらけになる。
+ * 検出したら「入力を直す方法」まで返す(直せる問題を黙って劣化した結果で返さない)。
+ */
+function assessInputQuality(doc: LoadedDoc): InputQuality {
+  let bleedLines = 0;
+  let nonEmptyLines = 0;
+  const sample: number[] = [];
+  for (let i = 0; i < doc.lines.length; i += 1) {
+    const t = doc.lines[i].trim();
+    if (t.length === 0) continue;
+    nonEmptyLines += 1;
+    if (t.length < 40) continue;
+    if ((t.match(/[ 　]{3,}/g) ?? []).length >= 2) {
+      bleedLines += 1;
+      if (sample.length < 5) sample.push(i + 1);
+    }
+  }
+  const columnBleed = nonEmptyLines >= 20 && bleedLines >= 10 && bleedLines / nonEmptyLines >= 0.05;
+  return { columnBleed, bleedLines, nonEmptyLines, sample };
+}
+
+interface Analysis {
+  results: ExtractResult[];
+  warnings: Bilingual[];
+  /** 打ち切り前の候補総数 */
+  total: number;
+  /** 表に出せる(=登録に回せる)候補数 */
+  usable: number;
+}
+
+/** 表・見出し・本文をまとめて走査し、警告まで組み立てる */
+function analyzeDocument(doc: LoadedDoc, kinds: ExtractKind[]): Analysis {
+  const tables = findTables(doc);
+  const sections = findSections(doc);
+  const quality = assessInputQuality(doc);
+  const results = kinds.map((k) => extractKind(doc, tables, sections, k, quality.columnBleed));
+  const warnings: Bilingual[] = [];
+
+  if (quality.columnBleed) {
+    warnings.push({
+      ja:
+        `**入力が 2 段組の PDF ダンプらしく見えます**(1 行の中に大きな空白が並ぶ行が ${quality.bleedLines} 行 / 本文 ${quality.nonEmptyLines} 行。例: ${quality.sample.join(', ')} 行目)。` +
+        '左右の段が 1 行に混ざっている可能性が高く、語が分断されるため候補がノイズだらけになります。' +
+        '**`pdftotext` を `-layout` なしで(=読み順で)再変換するか、対象の章・節だけを切り出して渡してください。** ' +
+        'この入力では行の構造そのものが信用できないため、本文由来の候補に確度 high は付けていません。',
+      en:
+        `**The input looks like a two-column PDF dump** (${quality.bleedLines} of ${quality.nonEmptyLines} non-empty lines contain wide internal gaps; e.g. lines ${quality.sample.join(', ')}). ` +
+        'Left and right columns are probably interleaved on the same line, which splits words and fills the candidate list with noise. ' +
+        '**Re-convert with plain `pdftotext` (no `-layout`, i.e. reading order), or pass only the section you care about.** ' +
+        'Because line structure cannot be trusted here, no text-derived candidate is marked high confidence.',
+    });
+  }
+
+  const total = results.reduce((acc, r) => acc + r.totalBeforeCap, 0);
+  if (total > OVERLOAD_CANDIDATES) {
+    warnings.push({
+      ja:
+        `候補が ${total} 件あり、絞り込みの役に立つ量を超えています。**入力が広すぎます。** ` +
+        '章・節を切り出して渡す(例: 「リスク」「指摘事項」の節だけを `text` で渡す)か、`kind` を 1 種別に絞って再実行してください。' +
+        `1 種別あたり ${MAX_CANDIDATES_PER_KIND} 件で打ち切っています。`,
+      en:
+        `${total} candidates were found — too many to be useful for triage. **The input is too broad.** ` +
+        'Pass a single section (e.g. only the risk or findings chapter via `text`), or narrow `kind` to one value. ' +
+        `Each kind is capped at ${MAX_CANDIDATES_PER_KIND}.`,
+    });
+  }
+
+  const ragged = tables.reduce((acc, t) => acc + t.ragged, 0);
+  if (ragged > 0) {
+    warnings.push({
+      ja: `表の列数が揃っていない行が ${ragged} 行あります。列のずれた行は取りこぼしている可能性があります。`,
+      en: `${ragged} table row(s) have an unexpected column count; those rows may have been missed.`,
+    });
+  }
+  if (tables.length === 0 && (doc.format === 'csv' || doc.format === 'tsv')) {
+    warnings.push({
+      ja: '表として解釈できませんでした(ヘッダ行が 1 列しかない、またはデータ行がない)。本文としてのみ走査しています。',
+      en: 'The file did not parse as a table (single-column header or no data rows); it was scanned as free text only.',
+    });
+  }
+
+  const usable = results.reduce((acc, r) => acc + registrable(r.candidates).length, 0);
+  return { results, warnings, total, usable };
+}
 
 /** ドキュメント読み込み失敗を errorResult に整形する */
 function loadError(error: Bilingual, lang: Lang): ReturnType<typeof errorResult> {
@@ -1839,44 +2877,33 @@ export function registerDocumentTools(server: McpServer): void {
       title: 'Extract engagement material from a document',
       description:
         '既存ドキュメント(報告書・台帳・管理表・議事録など)から、リスク / ステークホルダー / システム / 要件 / アクションの候補を' +
+        '決定的なヒューリスティクスで抽出する。**入力はファイル(path)でも、クライアントが既に読んだ本文(text)でもよい' +
+        '— PDF や Word はクライアント側で読んで text で渡すのが最短。** ' +
         '決定的なヒューリスティクスで抽出し、出典行番号付きの Markdown 表と update_engagement 用 JSON を返す。書き込みは行わない。 / ' +
         'Pull risk, stakeholder, system, requirement and action candidates out of an existing document using deterministic heuristics. ' +
         'Returns a Markdown table with source line numbers plus JSON for update_engagement. Nothing is written.',
       inputSchema: {
-        path: pathSchema,
+        path: pathSchema.optional(),
+        text: textSchema,
+        source: sourceSchema,
         kind: kindSchema,
         maxChars: maxCharsSchema,
         lang: langSchema,
       },
     },
-    async ({ path, kind, maxChars, lang }) => {
+    async ({ path, text: inputText, source, kind, maxChars, lang }) => {
       const l = lang as Lang;
       try {
-        const loaded = loadDocument(path);
+        const loaded = resolveInput(path, inputText, source);
         if (!loaded.ok) return loadError(loaded.error, l);
         const doc = loaded.doc;
-        const tables = findTables(doc);
         const kinds: ExtractKind[] = kind === 'auto' ? EXTRACT_KINDS : [kind];
-        const results = kinds.map((k) => extractKind(doc, tables, k));
-
-        const extraWarnings: Bilingual[] = [];
-        const ragged = tables.reduce((acc, t) => acc + t.ragged, 0);
-        if (ragged > 0) {
-          extraWarnings.push({
-            ja: `表の列数が揃っていない行が ${ragged} 行あります。列のずれた行は取りこぼしている可能性があります。`,
-            en: `${ragged} table row(s) have an unexpected column count; those rows may have been missed.`,
-          });
-        }
-        if (tables.length === 0 && (doc.format === 'csv' || doc.format === 'tsv')) {
-          extraWarnings.push({
-            ja: '表として解釈できませんでした(ヘッダ行が 1 列しかない、またはデータ行がない)。本文としてのみ走査しています。',
-            en: 'The file did not parse as a table (single-column header or no data rows); it was scanned as free text only.',
-          });
-        }
+        const analysis = analyzeDocument(doc, kinds);
+        const results = analysis.results;
 
         const total = results.reduce((acc, r) => acc + r.candidates.length, 0);
         const rowsPerKind = kind === 'auto' ? AUTO_ROWS_PER_KIND : MAX_CANDIDATES_PER_KIND;
-        let text = renderExtraction(doc, results, l, rowsPerKind, extraWarnings);
+        let text = renderExtraction(doc, results, l, rowsPerKind, analysis.warnings);
         if (text.length > maxChars) {
           text =
             `${text.slice(0, maxChars)}\n\n` +
@@ -1914,12 +2941,15 @@ export function registerDocumentTools(server: McpServer): void {
     {
       title: 'Ingest a document into the engagement',
       description:
-        '既存ドキュメントから抽出した候補を、現在のエンゲージメントに取り込む。既定(apply=false)はプレビューのみで一切書き込まない。' +
+        '既存ドキュメント(path)またはクライアントが読んだ本文(text)から抽出した候補を、現在のエンゲージメントに取り込む。' +
+        '既定(apply=false)はプレビューのみで一切書き込まない。' +
         'apply=true で実際に登録し、各項目に出典(ファイル名:行番号)を残す。同じ表題の既存項目はスキップする。 / ' +
         'Ingest candidates extracted from a document into the current engagement. The default (apply=false) previews only and writes nothing. ' +
         'With apply=true each item is stored with its source reference (file:line); entries whose title already exists are skipped.',
       inputSchema: {
-        path: pathSchema,
+        path: pathSchema.optional(),
+        text: textSchema,
+        source: sourceSchema,
         kind: kindSchema,
         apply: z
           .boolean()
@@ -1928,23 +2958,40 @@ export function registerDocumentTools(server: McpServer): void {
         lang: langSchema,
       },
     },
-    async ({ path, kind, apply, lang }) => {
+    async ({ path, text: inputText, source, kind, apply, lang }) => {
       const l = lang as Lang;
       try {
-        const loaded = loadDocument(path);
+        const loaded = resolveInput(path, inputText, source);
         if (!loaded.ok) return loadError(loaded.error, l);
         const doc = loaded.doc;
-        const tables = findTables(doc);
         const kinds: ExtractKind[] = kind === 'auto' ? EXTRACT_KINDS : [kind];
-        const results = kinds.map((k) => extractKind(doc, tables, k));
+        const analysis = analyzeDocument(doc, kinds);
+        const results = analysis.results;
         const total = results.reduce((acc, r) => acc + r.candidates.length, 0);
 
         if (!apply) {
-          const preview = renderExtraction(doc, results, l, kind === 'auto' ? AUTO_ROWS_PER_KIND : MAX_CANDIDATES_PER_KIND, []);
+          const preview = renderExtraction(
+            doc,
+            results,
+            l,
+            kind === 'auto' ? AUTO_ROWS_PER_KIND : MAX_CANDIDATES_PER_KIND,
+            analysis.warnings,
+          );
+          // 長すぎて入らない候補は apply=true でも入らない。ここで先に言う。
+          const tooLong = countOversized(results);
+          const willRegister = Math.max(0, analysis.usable - tooLong);
+          const tooLongJa =
+            tooLong > 0
+              ? ` うち ${tooLong} 件は原文が長すぎるため(表題の保存上限 ${TEXT_LIMITS.title.limit} 文字)取り込みません。原文を読んで要点だけを手で登録してください。`
+              : '';
+          const tooLongEn =
+            tooLong > 0
+              ? ` ${tooLong} of them are too long to store (a title holds at most ${TEXT_LIMITS.title.limit} characters) and will be left out; read the original and register the essential point by hand.`
+              : '';
           return textResult(
             `${preview}\n\n${msg(
-              `**プレビューのみです。まだ何も保存していません。** 内容を確認したうえで登録するなら apply=true で再実行してください(候補 ${total} 件)。`,
-              `**Preview only — nothing was written.** Re-run with apply=true once you have checked the candidates (${total} found).`,
+              `**プレビューのみです。まだ何も保存していません。** 内容を確認したうえで登録するなら apply=true で再実行してください(候補 ${total} 件、うち登録対象 ${willRegister} 件)。${tooLongJa}`,
+              `**Preview only — nothing was written.** Re-run with apply=true once you have checked the candidates (${total} found, ${willRegister} would be registered).${tooLongEn}`,
               l,
             )}`,
           );
@@ -1985,13 +3032,43 @@ export function registerDocumentTools(server: McpServer): void {
 
         const added: { kind: ExtractKind; id: string; label: string; source: string }[] = [];
         const skipped: { kind: ExtractKind; label: string }[] = [];
+        const lowSkipped: { kind: ExtractKind; label: string; source: string }[] = [];
+        /** 保存上限を超えていて台帳に入れなかったもの(黙って切り詰めない) */
+        const oversized: { kind: ExtractKind; label: string; source: string; length: number; limit: number }[] = [];
+        /** 表題が原文より短くなっているもの(全文は出典から辿れる) */
+        const shortened: { kind: ExtractKind; cap: number }[] = [];
 
         for (const result of results) {
           for (const c of result.candidates) {
             const source = sourceRef(doc, c.line);
+            // 断片は台帳に入れない。ただし「入れなかったこと」は必ず報告する。
+            if (c.confidence === 'low') {
+              lowSkipped.push({ kind: result.kind, label: safeText(c.title, 80), source });
+              continue;
+            }
+            // 長すぎる候補の扱い。取り込み全体は失敗させず、この 1 件だけ見送って報告する。
+            // 保存上限(TEXT_LIMITS)超え → 取り込まない。表題上限だけ超え → 短縮して取り込み、短縮を報告。
+            // いまの抽出器は候補表題を 160 字までに切っているので前者は通常起きないが、
+            // 台帳に入る直前のここが最後の境界なので、上限は抽出側の都合に依存させない。
+            const rawLength = cleanedLength(c.title);
+            const storeLimit = storeLimitOf(result.kind);
+            if (rawLength > storeLimit) {
+              oversized.push({
+                kind: result.kind,
+                label: safeCell(c.title, 60),
+                source,
+                length: rawLength,
+                limit: storeLimit,
+              });
+              continue;
+            }
+            // 台帳側で切るぶんと、抽出の時点で既に切られていたぶん(末尾の …)の両方を数える
+            if (rawLength > TITLE_CAP[result.kind] || c.title.trimEnd().endsWith('…')) {
+              shortened.push({ kind: result.kind, cap: TITLE_CAP[result.kind] });
+            }
             const sourceNote = `出典 / source: ${source}`;
             if (result.kind === 'risks') {
-              const title = safeText(c.title, 120);
+              const title = safeText(c.title, TITLE_CAP.risks);
               if (existingRisks.has(norm(title))) {
                 skipped.push({ kind: result.kind, label: title });
                 continue;
@@ -2001,16 +3078,20 @@ export function registerDocumentTools(server: McpServer): void {
               next.risks.push({
                 id,
                 title,
-                description: `${safeText(c.evidence, 200)} (${sourceNote})`,
+                description: `${safeText(c.evidence, 200)} (${sourceNote})${
+                  c.levelBasis ? ` [推定根拠 / basis: ${safeText(c.levelBasis, 80)}]` : ''
+                }`,
                 level: c.level ?? 'medium',
+                residualLevel: c.residualLevel,
                 status: 'open',
+                owner: c.owner ? safeText(c.owner, 60) : undefined,
                 mitigation: c.detail ? safeText(c.detail, 160) : undefined,
                 createdAt: timestamp,
                 updatedAt: timestamp,
               });
               added.push({ kind: result.kind, id, label: title, source });
             } else if (result.kind === 'stakeholders') {
-              const name = safeText(c.title, 80);
+              const name = safeText(c.title, TITLE_CAP.stakeholders);
               if (existingStakeholders.has(norm(name))) {
                 skipped.push({ kind: result.kind, label: name });
                 continue;
@@ -2021,7 +3102,7 @@ export function registerDocumentTools(server: McpServer): void {
                 id,
                 name,
                 role: c.role ? safeText(c.role, 60) : undefined,
-                organization: c.detail && c.origin === 'table' ? safeText(c.detail, 60) : undefined,
+                organization: c.organization ? safeText(c.organization, 60) : undefined,
                 influence: c.influence ?? 'medium',
                 interest: 'medium',
                 concerns: [safeText(c.evidence, 160)],
@@ -2031,7 +3112,7 @@ export function registerDocumentTools(server: McpServer): void {
               });
               added.push({ kind: result.kind, id, label: name, source });
             } else if (result.kind === 'actions') {
-              const title = safeText(c.title, 120);
+              const title = safeText(c.title, TITLE_CAP.actions);
               if (existingActions.has(norm(title))) {
                 skipped.push({ kind: result.kind, label: title });
                 continue;
@@ -2041,6 +3122,7 @@ export function registerDocumentTools(server: McpServer): void {
               next.actions.push({
                 id,
                 title,
+                owner: c.owner ? safeText(c.owner, 60) : undefined,
                 due: c.due,
                 status: 'todo',
                 priority: levelToPriority(c.level),
@@ -2051,7 +3133,7 @@ export function registerDocumentTools(server: McpServer): void {
               added.push({ kind: result.kind, id, label: title, source });
             } else {
               const prefix = result.kind === 'systems' ? '[システム / system]' : '[要件候補 / requirement]';
-              const note = `${prefix} ${safeText(c.title, 160)} — ${sourceNote}`;
+              const note = `${prefix} ${safeText(c.title, TITLE_CAP[result.kind])} — ${sourceNote}`;
               if (existingNotes.has(norm(note))) {
                 skipped.push({ kind: result.kind, label: safeText(c.title, 80) });
                 continue;
@@ -2077,8 +3159,20 @@ export function registerDocumentTools(server: McpServer): void {
         out.push(`# ${inline('ドキュメントを取り込みました', 'Document ingested', l)}: ${safeText(doc.fileName, 120)}`);
         out.push('');
         out.push(`- ${inline('案件', 'Engagement', l)}: ${safeText(saved.name, 80)} (\`${saved.id}\`)`);
-        out.push(`- ${inline('追加', 'Added', l)}: ${added.length} / ${inline('重複でスキップ', 'Skipped as duplicates', l)}: ${skipped.length}`);
+        out.push(
+          `- ${inline('追加', 'Added', l)}: ${added.length} / ${inline('重複でスキップ', 'Skipped as duplicates', l)}: ${skipped.length}` +
+            ` / ${inline('断片のため見送り', 'Held back as fragments', l)}: ${lowSkipped.length}` +
+            (oversized.length > 0
+              ? ` / ${inline('長すぎて見送り', 'Held back as too long', l)}: ${oversized.length}`
+              : ''),
+        );
         out.push('');
+        if (analysis.warnings.length > 0) {
+          out.push(`## ${inline('注意', 'Warnings', l)}`);
+          out.push('');
+          for (const w of analysis.warnings) out.push(`- ${inlineBi(w, l)}`);
+          out.push('');
+        }
         const addedTable = mdTable(
           [inline('種別', 'Kind', l), 'ID', inline('内容', 'Item', l), inline('出典', 'Source', l)],
           added.map((a) => [a.kind, `\`${a.id}\``, safeCell(a.label, 70), `\`${a.source}\``]),
@@ -2088,12 +3182,66 @@ export function registerDocumentTools(server: McpServer): void {
           out.push('');
           out.push(addedTable);
           out.push('');
+          if (shortened.length > 0) {
+            // 切り詰めたことは必ず言う。言わないと、台帳の表題が原文そのものだと思われる。
+            // 抽出の段階でも 1 文が長すぎれば切られているため、ここで「元は何文字だったか」は
+            // 分からない。分からない数字を書かず、原文への戻り方だけを示す。
+            const caps = [...new Set(shortened.map((s) => s.cap))].sort((a, b) => a - b).join(' / ');
+            out.push(
+              msg(
+                `このうち ${shortened.length} 件は表題が原文より短くなっています(台帳の上限 ${caps} 文字。抽出の時点で 1 文が長すぎて切られたものも含みます)。末尾の … が短縮の印です。原文は上の出典(ファイル名:行番号)を開いて確認してください。`,
+                `${shortened.length} of these ${shortened.length === 1 ? 'carries' : 'carry'} a title shorter than the original (the register holds ${caps} characters, and long single sentences are also cut during extraction). A trailing … marks the cut. Open the source reference (file:line) above for the original wording.`,
+                l,
+              ),
+            );
+            out.push('');
+          }
+        }
+        if (oversized.length > 0) {
+          out.push(
+            `## ${inline('長すぎるため取り込まなかったもの', 'Not ingested — too long', l)}`,
+          );
+          out.push('');
+          out.push(
+            msg(
+              '短縮して登録すると、原文と台帳のどちらが正しいのか後から分からなくなります。原文を読んで、要点だけを `update_engagement` で手で登録してください。',
+              'Storing a shortened version would leave nobody able to tell later which wording is authoritative. Read the original and register the essential point by hand with `update_engagement`.',
+              l,
+            ),
+          );
+          out.push('');
+          for (const o of oversized.slice(0, 10)) {
+            out.push(
+              `- ${o.kind}: ${o.label} — ${inline(
+                `${o.length.toLocaleString('en-US')} 文字(上限 ${o.limit} 文字)`,
+                `${o.length.toLocaleString('en-US')} characters (limit ${o.limit})`,
+                l,
+              )} (\`${o.source}\`)`,
+            );
+          }
+          if (oversized.length > 10) out.push(`- … +${oversized.length - 10}`);
+          out.push('');
         }
         if (skipped.length > 0) {
           out.push(`## ${inline('スキップ(同じ表題が既にある)', 'Skipped (title already present)', l)}`);
           out.push('');
           for (const s of skipped.slice(0, 20)) out.push(`- ${s.kind}: ${safeCell(s.label, 90)}`);
           if (skipped.length > 20) out.push(`- … +${skipped.length - 20}`);
+          out.push('');
+        }
+        if (lowSkipped.length > 0) {
+          out.push(`## ${inline('登録しなかったもの(確度 low = 文として成立していない断片)', 'Not registered (low confidence — not a well-formed statement)', l)}`);
+          out.push('');
+          out.push(
+            msg(
+              '断片をそのまま台帳に入れると、後から誰も直せません。必要なものは原文を見て手で登録してください。',
+              'Fragments in a register can never be cleaned up later. Register the ones you need by hand, from the original text.',
+              l,
+            ),
+          );
+          out.push('');
+          for (const s of lowSkipped.slice(0, 15)) out.push(`- ${s.kind}: ${safeCell(s.label, 80)} (\`${s.source}\`)`);
+          if (lowSkipped.length > 15) out.push(`- … +${lowSkipped.length - 15}`);
           out.push('');
         }
         out.push(humanCheckNotice(l));
@@ -2128,12 +3276,15 @@ export function registerDocumentTools(server: McpServer): void {
     {
       title: 'Summarize a document from an architecture standpoint',
       description:
-        '既存ドキュメントを「アーキテクチャとして何を読み取るべきか」の観点で棚卸しする。観点ごとに該当箇所(行番号付き)を返し、' +
+        '既存ドキュメント(path)またはクライアントが読んだ本文(text)を「アーキテクチャとして何を読み取るべきか」の観点で棚卸しする。' +
+        '観点ごとに該当箇所(行番号付き)を返し、' +
         '記載が見当たらない観点は「誰に聞くか」まで示す。要約そのものではなく、解釈のための構造化素材を返す。 / ' +
         'Inventory a document against architecture viewpoints: matched excerpts with line numbers per viewpoint, plus what to do about the ' +
         'viewpoints the document never covers. Returns structured material for interpretation rather than a prose summary.',
       inputSchema: {
-        path: pathSchema,
+        path: pathSchema.optional(),
+        text: textSchema,
+        source: sourceSchema,
         focus: z
           .string()
           .optional()
@@ -2141,10 +3292,10 @@ export function registerDocumentTools(server: McpServer): void {
         lang: langSchema,
       },
     },
-    async ({ path, focus, lang }) => {
+    async ({ path, text: inputText, source, focus, lang }) => {
       const l = lang as Lang;
       try {
-        const loaded = loadDocument(path);
+        const loaded = resolveInput(path, inputText, source);
         if (!loaded.ok) return loadError(loaded.error, l);
         const doc = loaded.doc;
         const extraKeywords = (focus ?? '')

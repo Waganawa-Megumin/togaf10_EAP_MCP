@@ -4,16 +4,25 @@
 
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { ADM_PHASES, findDeliverable, findPhase, text, type Lang } from '../knowledge/index.js';
+import { ADM_PHASES, findDeliverable, findPhase, text, type Bilingual, type Lang } from '../knowledge/index.js';
 import {
   ACTION_STATUSES,
   DECISION_STATUSES,
   DELIVERABLE_STATUSES,
+  EngagementInputError,
   INFLUENCE_LEVELS,
+  OUTPUT_LIMITS,
   PHASE_STATUSES,
   PRIORITIES,
   RISK_LEVELS,
   RISK_STATUSES,
+  TEXT_LIMITS,
+  assertEngagementProfile,
+  assertTextLimit,
+  assertTextListLimit,
+  capCell,
+  capNotice,
+  capRows,
   createEngagement,
   makeId,
   now,
@@ -24,10 +33,190 @@ import {
   type Engagement,
   type Risk,
   type Stakeholder,
+  type TextFieldKind,
 } from '../engagement/model.js';
 import { deleteEngagement, loadEngagement, saveEngagement } from '../engagement/store.js';
 import { renderDashboardMarkdown } from '../dashboard/markdown.js';
-import { errorResult, langSchema, msg, textResult } from './common.js';
+// 絞り込みの引数名は get_dashboard と 1 か所で共有する(案内文と実際の引数がずれないため)
+import { dashboardCompactSchema, dashboardLimitSchema } from './dashboard.js';
+import { errorResult, langSchema, msg, textResult, type ToolResult } from './common.js';
+
+// ---------------------------------------------------------------------------
+// 入力長の検査 / Input length guards
+//
+// 上限は `engagement/model.ts` に 1 か所だけ置いてあるが、**保存の直前では手遅れ**。
+// `update_engagement` は `createEngagement` を通らず、`saveEngagement` が索引を作るのは
+// ファイルを書いた後なので、モデル側からは止められない(実測: name に 10 万字を渡すと
+// index.json が 100,216 文字、応答が 101,015 文字になった)。
+// そのため**ハンドラの冒頭**、状態を読む前に検査してここで弾く。
+//
+// ここのヘルパは engagements.ts / roadmap.ts / documents.ts からも使う。
+// `tools/common.ts` は他の作業と衝突するため触らず、この 1 か所に集約している。
+// ---------------------------------------------------------------------------
+
+/** 上限超過の文面。**入力そのものは絶対に載せない**(会話が入力で埋まるため) */
+function tooLongMessage(field: string, limit: number, actual: number, hint: Bilingual, lang: Lang): string {
+  return msg(
+    `入力が長すぎます: ${field} は ${limit} 文字までですが ${actual.toLocaleString('en-US')} 文字ありました。${hint.ja}`,
+    `Input too long: ${field} accepts at most ${limit} characters but received ${actual.toLocaleString('en-US')}. ${hint.en}`,
+    lang,
+  );
+}
+
+/** 件数超過の文面 */
+function tooManyMessage(field: string, limit: number, actual: number, lang: Lang): string {
+  return msg(
+    `項目が多すぎます: ${field} は ${limit} 件までですが ${actual.toLocaleString('en-US')} 件ありました。何回かに分けて渡してください。`,
+    `Too many entries: ${field} accepts at most ${limit} but received ${actual.toLocaleString('en-US')}. Send them in several calls.`,
+    lang,
+  );
+}
+
+/**
+ * 上限を超えたときの逃がし先。`TEXT_LIMITS` の hint は保存する内容(表題・説明)向けなので、
+ * ID・フェーズ・四半期のような「決まった形の短い値」にはこちらを使う。
+ * 上限の話だけして「ではどう直すのか」を書かないと、利用者は同じ値を貼り直すしかない。
+ */
+export const ID_HINT: Bilingual = {
+  ja: 'ID は登録時に発行される短い文字列です。`get_engagement` / `get_roadmap` で一覧を確認してください。',
+  en: 'An id is the short string issued when the entry was created; list them with `get_engagement` or `get_roadmap`.',
+};
+
+export const PHASE_HINT: Bilingual = {
+  ja: 'フェーズは短い ID(a〜h など)で指定します。`list_adm_phases` で一覧を確認してください。',
+  en: 'A phase is given as a short id (a to h); list them with `list_adm_phases`.',
+};
+
+export const QUARTER_HINT: Bilingual = {
+  ja: '時期は四半期表記(例: 2027-Q1)で書きます。',
+  en: 'Timing is written as a quarter, for example 2027-Q1.',
+};
+
+/**
+ * 文字列 1 件の上限検査。問題があれば利用者向けの文面、無ければ null。
+ *
+ * `hint` を渡すと逃がし先の文言を差し替えられる(ID など、種別の既定 hint が合わない場合)。
+ * `EngagementInputError` 以外はここでは握りつぶさず投げ直す。呼び出し側の
+ * ハンドラは全体を try/catch しているため、MCP サーバーは落ちない。
+ */
+export function checkText(
+  field: string,
+  value: unknown,
+  kind: TextFieldKind,
+  lang: Lang,
+  hint: Bilingual = TEXT_LIMITS[kind].hint,
+): string | null {
+  try {
+    assertTextLimit(field, value, kind);
+    return null;
+  } catch (error) {
+    if (error instanceof EngagementInputError) {
+      return tooLongMessage(error.field, error.limit, error.actual, hint, lang);
+    }
+    throw error;
+  }
+}
+
+/** 文字列配列の件数と各要素の長さを検査する */
+export function checkTextList(
+  field: string,
+  values: unknown,
+  kind: TextFieldKind,
+  lang: Lang,
+  hint: Bilingual = TEXT_LIMITS[kind].hint,
+): string | null {
+  try {
+    assertTextListLimit(field, values, kind);
+    return null;
+  } catch (error) {
+    if (error instanceof EngagementInputError) {
+      // 件数超過は field がそのまま、長さ超過は field[i] になる
+      return error.field === field
+        ? tooManyMessage(error.field, error.limit, error.actual, lang)
+        : tooLongMessage(error.field, error.limit, error.actual, hint, lang);
+    }
+    throw error;
+  }
+}
+
+/** オブジェクト配列の件数だけを検査する(各要素の中身は呼び出し側で個別に見る) */
+export function checkCount(field: string, values: unknown, lang: Lang): string | null {
+  try {
+    assertTextListLimit(field, values);
+    return null;
+  } catch (error) {
+    if (error instanceof EngagementInputError) {
+      return tooManyMessage(error.field, error.limit, error.actual, lang);
+    }
+    throw error;
+  }
+}
+
+/** フィールド名から `TEXT_LIMITS` の種別を引く(案件の基本情報用) */
+const PROFILE_KIND: Record<string, TextFieldKind> = {
+  name: 'name',
+  client: 'client',
+  industry: 'industry',
+  description: 'text',
+  scope: 'text',
+};
+
+/** 案件の基本情報(名称・クライアント・業界・概要・スコープ)をまとめて検査する */
+export function checkProfile(
+  input: { name?: unknown; client?: unknown; industry?: unknown; description?: unknown; scope?: unknown },
+  lang: Lang,
+): string | null {
+  try {
+    assertEngagementProfile(input);
+    return null;
+  } catch (error) {
+    if (error instanceof EngagementInputError) {
+      const kind = PROFILE_KIND[error.field] ?? 'text';
+      return tooLongMessage(error.field, error.limit, error.actual, TEXT_LIMITS[kind].hint, lang);
+    }
+    throw error;
+  }
+}
+
+/** 検査を順に走らせ、最初に見つかった問題を返す(遅延評価なので無駄な文面を作らない) */
+export function runChecks(checks: (() => string | null)[]): string | null {
+  for (const check of checks) {
+    const problem = check();
+    if (problem) return problem;
+  }
+  return null;
+}
+
+/**
+ * 上限超過をツールのエラー応答に整える。
+ * 「保存していない」ことを必ず添える — これが無いと、利用者は一部だけ書き込まれたのかを疑う。
+ */
+export function limitErrorResult(problem: string, lang: Lang): ToolResult {
+  return errorResult(
+    `${problem}\n\n${msg(
+      'この呼び出しでは何も保存していません。長さを直してもう一度同じ内容を渡してください。',
+      'Nothing was saved by this call. Shorten the field and send the same request again.',
+      lang,
+    )}`,
+  );
+}
+
+/** 想定外の例外をツールのエラー応答に整える(ハンドラから例外を投げないための最後の受け皿) */
+export function unexpectedErrorResult(tool: string, error: unknown, lang: Lang): ToolResult {
+  const detail = capCell(error instanceof Error ? error.message : String(error), 200);
+  return errorResult(
+    msg(
+      `\`${tool}\` の処理中に想定外のエラーが発生しました: ${detail}。保存内容は変わっていない可能性が高いので、\`get_engagement\` で現状を確認してください。`,
+      `\`${tool}\` hit an unexpected error: ${detail}. The stored data is most likely unchanged; check it with \`get_engagement\`.`,
+      lang,
+    ),
+  );
+}
+
+/** エラー文に差し込む利用者入力の短縮(60 字 + 残り字数) */
+function echo(value: string): string {
+  return capCell(value, 60);
+}
 
 /** フェーズ参照を正規化する。未知の値は undefined。 */
 function resolvePhaseId(value: string | undefined): string | undefined {
@@ -109,7 +298,7 @@ function upsert<T extends { id: string; updatedAt: string }>(
 ): string | null {
   if (input.id) {
     const found = list.find((x) => x.id === input.id);
-    if (!found) return `${kind}: id "${input.id}" not found`;
+    if (!found) return `${kind}: id "${echo(input.id)}" not found`;
     apply(found);
     found.updatedAt = now();
     changes.updated.push(`${kind} ${labelOf(found)}`);
@@ -143,52 +332,64 @@ export function registerEngagementTools(server: McpServer): void {
     },
     async ({ name, client, industry, description, scope, currentPhase, overwrite, lang }) => {
       const l = lang as Lang;
-      const existing = loadEngagement();
-      if (existing && !overwrite) {
-        return errorResult(
-          msg(
-            `既に案件「${existing.name}」が選択されています。別の案件を並行して持つなら \`create_engagement\`、切り替えるなら \`switch_engagement\` を使ってください。この案件を破棄して作り直す場合のみ overwrite=true を指定します(既存データは失われます)。参照だけなら \`get_engagement\` です。`,
-            `The engagement "${existing.name}" is already selected. Use \`create_engagement\` to run another one alongside it, or \`switch_engagement\` to change the selection. Pass overwrite=true only to discard this engagement and start over (its data is lost). To just read it, use \`get_engagement\`.`,
-            l,
-          ),
-        );
-      }
-      const phaseId = resolvePhaseId(currentPhase);
-      if (currentPhase && !phaseId) {
-        return errorResult(
-          msg(
-            `フェーズ「${currentPhase}」が見つかりません。利用可能: ${ADM_PHASES.map((p) => p.id).join(', ')}`,
-            `Phase "${currentPhase}" not found. Available: ${ADM_PHASES.map((p) => p.id).join(', ')}`,
-            l,
-          ),
-        );
-      }
-      // overwrite=true は「置き換え」。複数案件を保持できるようになったため、
-      // 削除せずに保存すると旧案件が一覧に residue として残り、説明文と実態が食い違う。
-      if (existing && overwrite) deleteEngagement(existing.id);
+      try {
+        // 上限検査は状態を読む前に済ませる。ここを通れば createEngagement は投げない。
+        const problem = runChecks([
+          () => checkProfile({ name, client, industry, description, scope }, l),
+          () => checkText('currentPhase', currentPhase, 'title', l, PHASE_HINT),
+        ]);
+        if (problem) return limitErrorResult(problem, l);
 
-      const engagement = createEngagement({
-        name,
-        client,
-        industry,
-        description,
-        scope,
-        currentPhaseId: phaseId ?? 'a',
-      });
-      // 開始フェーズは進行中にしておく
-      const startPhase = engagement.phases.find((p) => p.phaseId === engagement.currentPhaseId);
-      if (startPhase) startPhase.status = 'in_progress';
-      const saved = saveEngagement(engagement);
+        const existing = loadEngagement();
+        if (existing && !overwrite) {
+          return errorResult(
+            msg(
+              `既に案件「${echo(existing.name)}」が選択されています。別の案件を並行して持つなら \`create_engagement\`、切り替えるなら \`switch_engagement\` を使ってください。この案件を破棄して作り直す場合のみ overwrite=true を指定します(既存データは失われます)。参照だけなら \`get_engagement\` です。`,
+              `The engagement "${echo(existing.name)}" is already selected. Use \`create_engagement\` to run another one alongside it, or \`switch_engagement\` to change the selection. Pass overwrite=true only to discard this engagement and start over (its data is lost). To just read it, use \`get_engagement\`.`,
+              l,
+            ),
+          );
+        }
+        const phaseId = resolvePhaseId(currentPhase);
+        if (currentPhase && !phaseId) {
+          return errorResult(
+            msg(
+              `フェーズ「${echo(currentPhase)}」が見つかりません。利用可能: ${ADM_PHASES.map((p) => p.id).join(', ')}`,
+              `Phase "${echo(currentPhase)}" not found. Available: ${ADM_PHASES.map((p) => p.id).join(', ')}`,
+              l,
+            ),
+          );
+        }
+        // overwrite=true は「置き換え」。複数案件を保持できるようになったため、
+        // 削除せずに保存すると旧案件が一覧に residue として残り、説明文と実態が食い違う。
+        if (existing && overwrite) deleteEngagement(existing.id);
 
-      const out: string[] = [];
-      out.push(msg(`# 案件を開始しました: ${saved.name}`, `# Engagement started: ${saved.name}`, l));
-      out.push('');
-      out.push(`- ID: \`${saved.id}\``);
-      const cur = findPhase(saved.currentPhaseId);
-      if (cur) out.push(`- ${msg('現在フェーズ', 'Current phase', l)}: ${cur.code}. ${text(cur.name, l)}`);
-      out.push('');
-      out.push(renderDashboardMarkdown(saved, l));
-      return textResult(out.join('\n'));
+        const engagement = createEngagement({
+          name,
+          client,
+          industry,
+          description,
+          scope,
+          currentPhaseId: phaseId ?? 'a',
+        });
+        // 開始フェーズは進行中にしておく
+        const startPhase = engagement.phases.find((p) => p.phaseId === engagement.currentPhaseId);
+        if (startPhase) startPhase.status = 'in_progress';
+        const saved = saveEngagement(engagement);
+
+        const out: string[] = [];
+        out.push(msg(`# 案件を開始しました: ${saved.name}`, `# Engagement started: ${saved.name}`, l));
+        out.push('');
+        out.push(`- ID: \`${saved.id}\``);
+        const cur = findPhase(saved.currentPhaseId);
+        if (cur) out.push(`- ${msg('現在フェーズ', 'Current phase', l)}: ${cur.code}. ${text(cur.name, l)}`);
+        out.push('');
+        out.push(renderDashboardMarkdown(saved, l));
+        return textResult(out.join('\n'));
+      } catch (error) {
+        // CLAUDE.md: ハンドラは例外を投げない。SDK 任せにすると文面が制御できない。
+        return unexpectedErrorResult('start_engagement', error, l);
+      }
     },
   );
 
@@ -197,13 +398,15 @@ export function registerEngagementTools(server: McpServer): void {
     {
       title: 'Get the current engagement',
       description:
-        '保存されているエンゲージメントの内容を返す。format="json" を指定すると生の JSON を返す。 / Return the stored engagement; pass format="json" for the raw JSON.',
+        '保存されているエンゲージメントの内容を返す。format="json" を指定すると生の JSON を全件返す。Markdown では登録件数が多いと各表を上位のみに自動で絞り(切った旨と全件の見方を必ず表示)、compact=false で全件、limit で件数を変えられる。 / Return the stored engagement; pass format="json" for the complete raw JSON. In Markdown, large engagements have each table trimmed to its top rows automatically (always saying so and how to see the rest); pass compact=false for every row or limit to change how many.',
       inputSchema: {
         format: z.enum(['markdown', 'json']).default('markdown').describe('出力形式 / Output format'),
+        compact: dashboardCompactSchema,
+        limit: dashboardLimitSchema,
         lang: langSchema,
       },
     },
-    async ({ format, lang }) => {
+    async ({ format, compact, limit, lang }) => {
       const l = lang as Lang;
       const engagement = loadEngagement();
       if (!engagement) {
@@ -215,8 +418,16 @@ export function registerEngagementTools(server: McpServer): void {
           ),
         );
       }
-      if (format === 'json') return textResult(JSON.stringify(engagement, null, 2));
-      return textResult(renderDashboardMarkdown(engagement, l));
+      try {
+        // json は「全件の見方」として案内している経路なので、絞り込みを一切かけない
+        if (format === 'json') return textResult(JSON.stringify(engagement, null, 2));
+        return textResult(renderDashboardMarkdown(engagement, l, { compact, limit }));
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        return errorResult(
+          msg(`案件の表示に失敗しました: ${detail}`, `Failed to render the engagement: ${detail}`, l),
+        );
+      }
     },
   );
 
@@ -258,269 +469,356 @@ export function registerEngagementTools(server: McpServer): void {
     },
     async (input) => {
       const l = input.lang as Lang;
-      const current = loadEngagement();
-      if (!current) {
-        return errorResult(
-          msg(
-            'エンゲージメントが未作成です。先に `start_engagement` を実行してください。',
-            'No engagement yet. Run `start_engagement` first.',
-            l,
-          ),
-        );
-      }
+      try {
+        // --- 上限検査 ---
+        // 読み込みも変更もする前に、渡された全フィールドの長さと件数を見る。
+        // 1 か所でも超えていたら何も書かずに返す(部分的に保存された状態を作らない)。
+        const problem = runChecks([
+          () => checkProfile(input, l),
+          () => checkText('currentPhase', input.currentPhase, 'title', l, PHASE_HINT),
+          () => checkCount('phases', input.phases, l),
+          () => checkCount('risks', input.risks, l),
+          () => checkCount('decisions', input.decisions, l),
+          () => checkCount('actions', input.actions, l),
+          () => checkCount('stakeholders', input.stakeholders, l),
+          () => checkCount('deliverables', input.deliverables, l),
+          () => checkTextList('notes', input.notes, 'text', l),
+          () => checkTextList('removeIds', input.removeIds, 'title', l, ID_HINT),
+          ...(input.phases ?? []).flatMap((p, i) => [
+            () => checkText(`phases[${i}].phase`, p.phase, 'title', l, PHASE_HINT),
+            () => checkText(`phases[${i}].note`, p.note, 'text', l),
+          ]),
+          ...(input.risks ?? []).flatMap((r, i) => [
+            () => checkText(`risks[${i}].id`, r.id, 'title', l, ID_HINT),
+            () => checkText(`risks[${i}].title`, r.title, 'title', l),
+            () => checkText(`risks[${i}].description`, r.description, 'text', l),
+            () => checkText(`risks[${i}].owner`, r.owner, 'title', l),
+            () => checkText(`risks[${i}].mitigation`, r.mitigation, 'text', l),
+            () => checkText(`risks[${i}].phase`, r.phase, 'title', l, PHASE_HINT),
+          ]),
+          ...(input.decisions ?? []).flatMap((d, i) => [
+            () => checkText(`decisions[${i}].id`, d.id, 'title', l, ID_HINT),
+            () => checkText(`decisions[${i}].title`, d.title, 'title', l),
+            () => checkText(`decisions[${i}].context`, d.context, 'text', l),
+            () => checkText(`decisions[${i}].decision`, d.decision, 'text', l),
+            () => checkText(`decisions[${i}].rationale`, d.rationale, 'text', l),
+            () => checkText(`decisions[${i}].decidedBy`, d.decidedBy, 'title', l),
+            () => checkText(`decisions[${i}].phase`, d.phase, 'title', l, PHASE_HINT),
+          ]),
+          ...(input.actions ?? []).flatMap((a, i) => [
+            () => checkText(`actions[${i}].id`, a.id, 'title', l, ID_HINT),
+            () => checkText(`actions[${i}].title`, a.title, 'title', l),
+            () => checkText(`actions[${i}].owner`, a.owner, 'title', l),
+            () => checkText(`actions[${i}].due`, a.due, 'title', l),
+            () => checkText(`actions[${i}].note`, a.note, 'text', l),
+            () => checkText(`actions[${i}].phase`, a.phase, 'title', l, PHASE_HINT),
+          ]),
+          ...(input.stakeholders ?? []).flatMap((s, i) => [
+            () => checkText(`stakeholders[${i}].id`, s.id, 'title', l, ID_HINT),
+            () => checkText(`stakeholders[${i}].name`, s.name, 'title', l),
+            () => checkText(`stakeholders[${i}].role`, s.role, 'title', l),
+            () => checkText(`stakeholders[${i}].organization`, s.organization, 'title', l),
+            () => checkTextList(`stakeholders[${i}].concerns`, s.concerns, 'concern', l),
+            () => checkText(`stakeholders[${i}].approach`, s.approach, 'text', l),
+          ]),
+          ...(input.deliverables ?? []).flatMap((d, i) => [
+            () => checkText(`deliverables[${i}].id`, d.id, 'title', l, ID_HINT),
+            () => checkText(`deliverables[${i}].deliverableId`, d.deliverableId, 'title', l, ID_HINT),
+            () => checkText(`deliverables[${i}].name`, d.name, 'title', l),
+            () => checkText(`deliverables[${i}].owner`, d.owner, 'title', l),
+            () => checkText(`deliverables[${i}].link`, d.link, 'title', l),
+            () => checkText(`deliverables[${i}].note`, d.note, 'text', l),
+            () => checkText(`deliverables[${i}].phase`, d.phase, 'title', l, PHASE_HINT),
+          ]),
+        ]);
+        if (problem) return limitErrorResult(problem, l);
 
-      const e: Engagement = current;
-      const changes: ChangeLog = { added: [], updated: [], removed: [] };
-      const problems: string[] = [];
-      const timestamp = now();
-
-      if (input.name) { e.name = input.name; changes.updated.push('name'); }
-      if (input.client !== undefined) { e.client = input.client; changes.updated.push('client'); }
-      if (input.industry !== undefined) { e.industry = input.industry; changes.updated.push('industry'); }
-      if (input.description !== undefined) { e.description = input.description; changes.updated.push('description'); }
-      if (input.scope !== undefined) { e.scope = input.scope; changes.updated.push('scope'); }
-
-      if (input.currentPhase) {
-        const id = resolvePhaseId(input.currentPhase);
-        if (!id) problems.push(`currentPhase: "${input.currentPhase}" not found`);
-        else {
-          e.currentPhaseId = id;
-          changes.updated.push(`currentPhase → ${findPhase(id)?.code ?? id}`);
+        const current = loadEngagement();
+        if (!current) {
+          return errorResult(
+            msg(
+              'エンゲージメントが未作成です。先に `start_engagement` を実行してください。',
+              'No engagement yet. Run `start_engagement` first.',
+              l,
+            ),
+          );
         }
-      }
 
-      for (const p of input.phases ?? []) {
-        const id = resolvePhaseId(p.phase);
-        if (!id) {
-          problems.push(`phases: "${p.phase}" not found`);
-          continue;
-        }
-        let entry = e.phases.find((x) => x.phaseId === id);
-        if (!entry) {
-          entry = { phaseId: id, status: p.status, updatedAt: timestamp };
-          e.phases.push(entry);
-        }
-        entry.status = p.status;
-        if (p.note !== undefined) entry.note = p.note;
-        entry.updatedAt = timestamp;
-        changes.updated.push(`phase ${findPhase(id)?.code ?? id} → ${p.status}`);
-      }
+        const e: Engagement = current;
+        const changes: ChangeLog = { added: [], updated: [], removed: [] };
+        const problems: string[] = [];
+        const timestamp = now();
 
-      for (const r of input.risks ?? []) {
-        const err = upsert<Risk>(
-          e.risks,
-          r,
-          () =>
-            r.title
-              ? {
-                  id: makeId('risk'),
-                  title: r.title,
-                  level: r.level ?? 'medium',
-                  status: r.status ?? 'open',
-                  createdAt: timestamp,
-                  updatedAt: timestamp,
-                }
-              : null,
-          (item) => {
-            if (r.title !== undefined) item.title = r.title;
-            if (r.description !== undefined) item.description = r.description;
-            if (r.level !== undefined) item.level = r.level;
-            if (r.residualLevel !== undefined) item.residualLevel = r.residualLevel;
-            if (r.status !== undefined) item.status = r.status;
-            if (r.owner !== undefined) item.owner = r.owner;
-            if (r.mitigation !== undefined) item.mitigation = r.mitigation;
-            if (r.phase !== undefined) item.phaseId = resolvePhaseId(r.phase);
-          },
-          changes,
-          'risk',
-          (item) => `"${item.title}" (\`${item.id}\`)`,
-        );
-        if (err) problems.push(err);
-      }
+        if (input.name) { e.name = input.name; changes.updated.push('name'); }
+        if (input.client !== undefined) { e.client = input.client; changes.updated.push('client'); }
+        if (input.industry !== undefined) { e.industry = input.industry; changes.updated.push('industry'); }
+        if (input.description !== undefined) { e.description = input.description; changes.updated.push('description'); }
+        if (input.scope !== undefined) { e.scope = input.scope; changes.updated.push('scope'); }
 
-      for (const d of input.decisions ?? []) {
-        const err = upsert<Decision>(
-          e.decisions,
-          d,
-          () =>
-            d.title && d.decision
-              ? {
-                  id: makeId('dec'),
-                  title: d.title,
-                  decision: d.decision,
-                  status: d.status ?? 'proposed',
-                  createdAt: timestamp,
-                  updatedAt: timestamp,
-                }
-              : null,
-          (item) => {
-            if (d.title !== undefined) item.title = d.title;
-            if (d.context !== undefined) item.context = d.context;
-            if (d.decision !== undefined) item.decision = d.decision;
-            if (d.rationale !== undefined) item.rationale = d.rationale;
-            if (d.status !== undefined) item.status = d.status;
-            if (d.decidedBy !== undefined) item.decidedBy = d.decidedBy;
-            if (d.phase !== undefined) item.phaseId = resolvePhaseId(d.phase);
-          },
-          changes,
-          'decision',
-          (item) => `"${item.title}" (\`${item.id}\`)`,
-        );
-        if (err) problems.push(err);
-      }
-
-      for (const a of input.actions ?? []) {
-        const err = upsert<Action>(
-          e.actions,
-          a,
-          () =>
-            a.title
-              ? {
-                  id: makeId('act'),
-                  title: a.title,
-                  status: a.status ?? 'todo',
-                  priority: a.priority ?? 'medium',
-                  createdAt: timestamp,
-                  updatedAt: timestamp,
-                }
-              : null,
-          (item) => {
-            if (a.title !== undefined) item.title = a.title;
-            if (a.owner !== undefined) item.owner = a.owner;
-            if (a.due !== undefined) item.due = a.due;
-            if (a.status !== undefined) item.status = a.status;
-            if (a.priority !== undefined) item.priority = a.priority;
-            if (a.note !== undefined) item.note = a.note;
-            if (a.phase !== undefined) item.phaseId = resolvePhaseId(a.phase);
-          },
-          changes,
-          'action',
-          (item) => `"${item.title}" (\`${item.id}\`)`,
-        );
-        if (err) problems.push(err);
-      }
-
-      for (const s of input.stakeholders ?? []) {
-        const err = upsert<Stakeholder>(
-          e.stakeholders,
-          s,
-          () =>
-            s.name
-              ? {
-                  id: makeId('stk'),
-                  name: s.name,
-                  influence: s.influence ?? 'medium',
-                  interest: s.interest ?? 'medium',
-                  concerns: s.concerns ?? [],
-                  createdAt: timestamp,
-                  updatedAt: timestamp,
-                }
-              : null,
-          (item) => {
-            if (s.name !== undefined) item.name = s.name;
-            if (s.role !== undefined) item.role = s.role;
-            if (s.organization !== undefined) item.organization = s.organization;
-            if (s.influence !== undefined) item.influence = s.influence;
-            if (s.interest !== undefined) item.interest = s.interest;
-            if (s.concerns !== undefined) item.concerns = s.concerns;
-            if (s.approach !== undefined) item.approach = s.approach;
-          },
-          changes,
-          'stakeholder',
-          (item) => `"${item.name}" (\`${item.id}\`)`,
-        );
-        if (err) problems.push(err);
-      }
-
-      for (const d of input.deliverables ?? []) {
-        const known = d.deliverableId ? findDeliverable(d.deliverableId) : undefined;
-        if (d.deliverableId && !known) {
-          problems.push(`deliverables: knowledge-base id "${d.deliverableId}" not found`);
-        }
-        const err = upsert<DeliverableProgress>(
-          e.deliverables,
-          d,
-          () => {
-            const name = d.name ?? (known ? text(known.name, 'ja') : undefined);
-            return name
-              ? {
-                  id: makeId('dlv'),
-                  name,
-                  status: d.status ?? 'not_started',
-                  createdAt: timestamp,
-                  updatedAt: timestamp,
-                }
-              : null;
-          },
-          (item) => {
-            if (d.name !== undefined) item.name = d.name;
-            if (known) {
-              item.deliverableId = known.id;
-              if (!d.phase && known.createdInPhaseIds.length > 0 && !item.phaseId) {
-                item.phaseId = known.createdInPhaseIds[0];
-              }
-            }
-            if (d.status !== undefined) item.status = d.status;
-            if (d.owner !== undefined) item.owner = d.owner;
-            if (d.link !== undefined) item.link = d.link;
-            if (d.note !== undefined) item.note = d.note;
-            if (d.phase !== undefined) item.phaseId = resolvePhaseId(d.phase);
-          },
-          changes,
-          'deliverable',
-          (item) => `"${item.name}" (\`${item.id}\`)`,
-        );
-        if (err) problems.push(err);
-      }
-
-      if (input.notes && input.notes.length > 0) {
-        e.notes.push(...input.notes);
-        changes.added.push(`${input.notes.length} note(s)`);
-      }
-
-      for (const id of input.removeIds ?? []) {
-        let removed = false;
-        const lists: [keyof Engagement, { id: string }[]][] = [
-          ['risks', e.risks],
-          ['decisions', e.decisions],
-          ['actions', e.actions],
-          ['stakeholders', e.stakeholders],
-          ['deliverables', e.deliverables],
-        ];
-        for (const [kind, list] of lists) {
-          const index = list.findIndex((x) => x.id === id);
-          if (index >= 0) {
-            list.splice(index, 1);
-            changes.removed.push(`${String(kind)} \`${id}\``);
-            removed = true;
-            break;
+        if (input.currentPhase) {
+          const id = resolvePhaseId(input.currentPhase);
+          if (!id) problems.push(`currentPhase: "${echo(input.currentPhase)}" not found`);
+          else {
+            e.currentPhaseId = id;
+            changes.updated.push(`currentPhase → ${findPhase(id)?.code ?? id}`);
           }
         }
-        if (!removed) problems.push(`removeIds: "${id}" not found`);
-      }
 
-      const saved = saveEngagement(e);
-      const progress = summarizeProgress(saved);
+        for (const p of input.phases ?? []) {
+          const id = resolvePhaseId(p.phase);
+          if (!id) {
+            problems.push(`phases: "${echo(p.phase)}" not found`);
+            continue;
+          }
+          let entry = e.phases.find((x) => x.phaseId === id);
+          if (!entry) {
+            entry = { phaseId: id, status: p.status, updatedAt: timestamp };
+            e.phases.push(entry);
+          }
+          entry.status = p.status;
+          if (p.note !== undefined) entry.note = p.note;
+          entry.updatedAt = timestamp;
+          changes.updated.push(`phase ${findPhase(id)?.code ?? id} → ${p.status}`);
+        }
 
-      const out: string[] = [];
-      out.push(msg('# エンゲージメントを更新しました', '# Engagement updated', l));
-      out.push('');
-      if (changes.added.length > 0) out.push(`- ${msg('追加', 'Added', l)}: ${changes.added.join(', ')}`);
-      if (changes.updated.length > 0) out.push(`- ${msg('更新', 'Updated', l)}: ${changes.updated.join(', ')}`);
-      if (changes.removed.length > 0) out.push(`- ${msg('削除', 'Removed', l)}: ${changes.removed.join(', ')}`);
-      if (changes.added.length + changes.updated.length + changes.removed.length === 0) {
-        out.push(`- ${msg('変更なし', 'No changes applied', l)}`);
-      }
-      if (problems.length > 0) {
+        for (const r of input.risks ?? []) {
+          const err = upsert<Risk>(
+            e.risks,
+            r,
+            () =>
+              r.title
+                ? {
+                    id: makeId('risk'),
+                    title: r.title,
+                    level: r.level ?? 'medium',
+                    status: r.status ?? 'open',
+                    createdAt: timestamp,
+                    updatedAt: timestamp,
+                  }
+                : null,
+            (item) => {
+              if (r.title !== undefined) item.title = r.title;
+              if (r.description !== undefined) item.description = r.description;
+              if (r.level !== undefined) item.level = r.level;
+              if (r.residualLevel !== undefined) item.residualLevel = r.residualLevel;
+              if (r.status !== undefined) item.status = r.status;
+              if (r.owner !== undefined) item.owner = r.owner;
+              if (r.mitigation !== undefined) item.mitigation = r.mitigation;
+              if (r.phase !== undefined) item.phaseId = resolvePhaseId(r.phase);
+            },
+            changes,
+            'risk',
+            (item) => `"${echo(item.title)}" (\`${item.id}\`)`,
+          );
+          if (err) problems.push(err);
+        }
+
+        for (const d of input.decisions ?? []) {
+          const err = upsert<Decision>(
+            e.decisions,
+            d,
+            () =>
+              d.title && d.decision
+                ? {
+                    id: makeId('dec'),
+                    title: d.title,
+                    decision: d.decision,
+                    status: d.status ?? 'proposed',
+                    createdAt: timestamp,
+                    updatedAt: timestamp,
+                  }
+                : null,
+            (item) => {
+              if (d.title !== undefined) item.title = d.title;
+              if (d.context !== undefined) item.context = d.context;
+              if (d.decision !== undefined) item.decision = d.decision;
+              if (d.rationale !== undefined) item.rationale = d.rationale;
+              if (d.status !== undefined) item.status = d.status;
+              if (d.decidedBy !== undefined) item.decidedBy = d.decidedBy;
+              if (d.phase !== undefined) item.phaseId = resolvePhaseId(d.phase);
+            },
+            changes,
+            'decision',
+            (item) => `"${echo(item.title)}" (\`${item.id}\`)`,
+          );
+          if (err) problems.push(err);
+        }
+
+        for (const a of input.actions ?? []) {
+          const err = upsert<Action>(
+            e.actions,
+            a,
+            () =>
+              a.title
+                ? {
+                    id: makeId('act'),
+                    title: a.title,
+                    status: a.status ?? 'todo',
+                    priority: a.priority ?? 'medium',
+                    createdAt: timestamp,
+                    updatedAt: timestamp,
+                  }
+                : null,
+            (item) => {
+              if (a.title !== undefined) item.title = a.title;
+              if (a.owner !== undefined) item.owner = a.owner;
+              if (a.due !== undefined) item.due = a.due;
+              if (a.status !== undefined) item.status = a.status;
+              if (a.priority !== undefined) item.priority = a.priority;
+              if (a.note !== undefined) item.note = a.note;
+              if (a.phase !== undefined) item.phaseId = resolvePhaseId(a.phase);
+            },
+            changes,
+            'action',
+            (item) => `"${echo(item.title)}" (\`${item.id}\`)`,
+          );
+          if (err) problems.push(err);
+        }
+
+        for (const s of input.stakeholders ?? []) {
+          const err = upsert<Stakeholder>(
+            e.stakeholders,
+            s,
+            () =>
+              s.name
+                ? {
+                    id: makeId('stk'),
+                    name: s.name,
+                    influence: s.influence ?? 'medium',
+                    interest: s.interest ?? 'medium',
+                    concerns: s.concerns ?? [],
+                    createdAt: timestamp,
+                    updatedAt: timestamp,
+                  }
+                : null,
+            (item) => {
+              if (s.name !== undefined) item.name = s.name;
+              if (s.role !== undefined) item.role = s.role;
+              if (s.organization !== undefined) item.organization = s.organization;
+              if (s.influence !== undefined) item.influence = s.influence;
+              if (s.interest !== undefined) item.interest = s.interest;
+              if (s.concerns !== undefined) item.concerns = s.concerns;
+              if (s.approach !== undefined) item.approach = s.approach;
+            },
+            changes,
+            'stakeholder',
+            (item) => `"${echo(item.name)}" (\`${item.id}\`)`,
+          );
+          if (err) problems.push(err);
+        }
+
+        for (const d of input.deliverables ?? []) {
+          const known = d.deliverableId ? findDeliverable(d.deliverableId) : undefined;
+          if (d.deliverableId && !known) {
+            problems.push(`deliverables: knowledge-base id "${echo(d.deliverableId)}" not found`);
+          }
+          const err = upsert<DeliverableProgress>(
+            e.deliverables,
+            d,
+            () => {
+              const name = d.name ?? (known ? text(known.name, 'ja') : undefined);
+              return name
+                ? {
+                    id: makeId('dlv'),
+                    name,
+                    status: d.status ?? 'not_started',
+                    createdAt: timestamp,
+                    updatedAt: timestamp,
+                  }
+                : null;
+            },
+            (item) => {
+              if (d.name !== undefined) item.name = d.name;
+              if (known) {
+                item.deliverableId = known.id;
+                if (!d.phase && known.createdInPhaseIds.length > 0 && !item.phaseId) {
+                  item.phaseId = known.createdInPhaseIds[0];
+                }
+              }
+              if (d.status !== undefined) item.status = d.status;
+              if (d.owner !== undefined) item.owner = d.owner;
+              if (d.link !== undefined) item.link = d.link;
+              if (d.note !== undefined) item.note = d.note;
+              if (d.phase !== undefined) item.phaseId = resolvePhaseId(d.phase);
+            },
+            changes,
+            'deliverable',
+            (item) => `"${echo(item.name)}" (\`${item.id}\`)`,
+          );
+          if (err) problems.push(err);
+        }
+
+        if (input.notes && input.notes.length > 0) {
+          e.notes.push(...input.notes);
+          changes.added.push(`${input.notes.length} note(s)`);
+        }
+
+        for (const id of input.removeIds ?? []) {
+          let removed = false;
+          const lists: [keyof Engagement, { id: string }[]][] = [
+            ['risks', e.risks],
+            ['decisions', e.decisions],
+            ['actions', e.actions],
+            ['stakeholders', e.stakeholders],
+            ['deliverables', e.deliverables],
+          ];
+          for (const [kind, list] of lists) {
+            const index = list.findIndex((x) => x.id === id);
+            if (index >= 0) {
+              list.splice(index, 1);
+              changes.removed.push(`${String(kind)} \`${id}\``);
+              removed = true;
+              break;
+            }
+          }
+          if (!removed) problems.push(`removeIds: "${echo(id)}" not found`);
+        }
+
+        const saved = saveEngagement(e);
+        const progress = summarizeProgress(saved);
+
+        const out: string[] = [];
+        out.push(msg('# エンゲージメントを更新しました', '# Engagement updated', l));
         out.push('');
-        out.push(`**${msg('警告', 'Warnings', l)}**`);
-        for (const p of problems) out.push(`- ${p}`);
+        // 1 回の呼び出しで 100 件まで更新できるので、変更一覧も警告も上限で切る。
+        // 切ったことは capNotice が必ず書く(黙って落とさない)。
+        const seeAll: Bilingual = {
+          ja: '全件は `get_engagement` で確認してください。',
+          en: 'See them all with `get_engagement`.',
+        };
+        const pushChanges = (heading: string, items: string[]): void => {
+          if (items.length === 0) return;
+          const capped = capRows(items, OUTPUT_LIMITS.rows);
+          out.push(`- ${heading}: ${capped.rows.join(', ')}`);
+          const notice = capNotice(capped, seeAll, l);
+          if (notice) out.push(`  - ${notice}`);
+        };
+        pushChanges(msg('追加', 'Added', l), changes.added);
+        pushChanges(msg('更新', 'Updated', l), changes.updated);
+        pushChanges(msg('削除', 'Removed', l), changes.removed);
+        if (changes.added.length + changes.updated.length + changes.removed.length === 0) {
+          out.push(`- ${msg('変更なし', 'No changes applied', l)}`);
+        }
+        if (problems.length > 0) {
+          out.push('');
+          out.push(`**${msg('警告', 'Warnings', l)}**`);
+          const capped = capRows(problems, OUTPUT_LIMITS.highlights);
+          for (const p of capped.rows) out.push(`- ${p}`);
+          const notice = capNotice(capped, {
+            ja: '残りも同じ種類の問題です。上を直してから再実行してください。',
+            en: 'The rest are the same kind of problem; fix these and run it again.',
+          }, l);
+          if (notice) out.push(`- ${notice}`);
+        }
+        out.push('');
+        out.push(`${msg('進捗', 'Progress', l)}: ${progress.percent}% (${progress.completed}/${progress.total - progress.skipped})`);
+        out.push('');
+        out.push(renderDashboardMarkdown(saved, l));
+        return textResult(out.join('\n'));
+      } catch (error) {
+        // CLAUDE.md: ハンドラは例外を投げない。
+        return unexpectedErrorResult('update_engagement', error, l);
       }
-      out.push('');
-      out.push(`${msg('進捗', 'Progress', l)}: ${progress.percent}% (${progress.completed}/${progress.total - progress.skipped})`);
-      out.push('');
-      out.push(renderDashboardMarkdown(saved, l));
-      return textResult(out.join('\n'));
     },
   );
 }

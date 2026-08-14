@@ -79,7 +79,38 @@ function isInside(parent: string, child: string): boolean {
  * 「要素が見つかりません」になる。
  */
 function normalizeName(value: string): string {
-  return String(value ?? '').replace(/\s+/g, ' ').trim();
+  // Unicode 合成の違い(濁点が分かれている等)も吸収する。
+  // 分解形で渡された名前は見た目が同じでも別文字列なので、ここで揃えないと照合が外れる。
+  return String(value ?? '')
+    .normalize('NFC')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * 照合専用の緩いキー。全角/半角(NFKC)・大文字小文字・空白の有無を吸収する。
+ * 表示名をこれで置き換えてはいけない(あくまで突き合わせ用)。
+ *   例: `ＡＢＣ 受注` / `abc受注` / `ABC 受注` → 同じキー
+ */
+function looseKey(value: string): string {
+  return normalizeName(value).normalize('NFKC').toLowerCase().replace(/\s+/g, '');
+}
+
+/**
+ * 最後の手段の照合キー。記号・句読点・中黒・長音まで落とす。
+ *   例: 「サーバ / サーバー」「受注管理(仮) / 受注管理」
+ * 取り違えの危険があるので、これで当たったときは必ず「吸収した」と報告すること。
+ */
+function fuzzyKey(value: string): string {
+  return looseKey(value).replace(/[\p{P}\p{S}ー]/gu, '');
+}
+
+/** 別名キーを順に見て、最初に中身のある文字列を返す */
+function firstText(...values: (string | undefined)[]): string {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim().length > 0) return value;
+  }
+  return '';
 }
 
 /**
@@ -442,6 +473,34 @@ for (const entry of RELATION_TYPES) {
   // Archi の CSV は `AssociationRelationship` 表記なので、そちらでも受け付ける
   RELATION_TYPE_INDEX.set(normalizeTypeKey(`${entry.name}Relationship`), entry.name);
 }
+// 動詞形・英国綴りもよく書かれる。弾いて関係を落とすより受けた方が実害が無い。
+const RELATION_TYPE_ALIASES: Record<string, string> = {
+  realizes: 'Realization',
+  realize: 'Realization',
+  realises: 'Realization',
+  realisation: 'Realization',
+  serves: 'Serving',
+  serve: 'Serving',
+  triggers: 'Triggering',
+  trigger: 'Triggering',
+  flows: 'Flow',
+  flowto: 'Flow',
+  accesses: 'Access',
+  influences: 'Influence',
+  assigns: 'Assignment',
+  assignedto: 'Assignment',
+  aggregates: 'Aggregation',
+  composes: 'Composition',
+  composedof: 'Composition',
+  specializes: 'Specialization',
+  specialises: 'Specialization',
+  specialisation: 'Specialization',
+  associates: 'Association',
+  associatedwith: 'Association',
+};
+for (const [alias, name] of Object.entries(RELATION_TYPE_ALIASES)) {
+  RELATION_TYPE_INDEX.set(normalizeTypeKey(alias), name);
+}
 
 /** 要素タイプ名を正規化する。未知なら undefined。 */
 function resolveElementType(value: string): string | undefined {
@@ -497,12 +556,36 @@ interface ModelRelation {
   targetId: string;
 }
 
+/** 参照文字列をどの厳しさで解決できたか */
+type MatchKind = 'none' | 'exact' | 'loose' | 'fuzzy';
+
+interface FindResult {
+  /** 該当した要素(複数なら曖昧) */
+  matches: ModelElement[];
+  /** どの段階で当たったか。exact 以外は「吸収した」と利用者に伝える */
+  how: MatchKind;
+}
+
+/** 索引(キー → 要素の配列)に 1 件足す。キーが空になる場合は索引に入れない。 */
+function push(index: Map<string, ModelElement[]>, key: string, element: ModelElement): void {
+  if (key.length === 0) return;
+  const list = index.get(key);
+  if (list) {
+    if (!list.includes(element)) list.push(element);
+  } else {
+    index.set(key, [element]);
+  }
+}
+
 /** 要素・関係を重複なく貯める入れ物 */
 class ArchiMateModel {
   readonly elements: ModelElement[] = [];
   readonly relations: ModelRelation[] = [];
   private readonly byKey = new Map<string, ModelElement>();
   private readonly byName = new Map<string, ModelElement[]>();
+  // 表記ゆれ用の索引。登録時と検索時で必ず同じ関数(looseKey / fuzzyKey)を通す。
+  private readonly byLoose = new Map<string, ModelElement[]>();
+  private readonly byFuzzy = new Map<string, ModelElement[]>();
   private readonly relationKeys = new Set<string>();
 
   /** 同じ タイプ+名前 は 1 要素に畳む */
@@ -530,10 +613,9 @@ class ArchiMateModel {
     };
     this.elements.push(element);
     this.byKey.set(key, element);
-    const lower = name.toLowerCase();
-    const list = this.byName.get(lower);
-    if (list) list.push(element);
-    else this.byName.set(lower, [element]);
+    push(this.byName, name.toLowerCase(), element);
+    push(this.byLoose, looseKey(name), element);
+    push(this.byFuzzy, fuzzyKey(name), element);
     return element;
   }
 
@@ -556,26 +638,88 @@ class ArchiMateModel {
 
   /**
    * 参照文字列から要素を探す。
-   * `名前` / `Type:名前` / 生成済み ID のいずれでも引ける。
+   * `名前` / `Type:名前` / `Type:` を全角コロンで書いた場合 / 生成済み ID のいずれでも引ける。
+   *
+   * 照合は 3 段階。厳しい順に試し、当たった段階を返す:
+   *   exact … 空白を畳んだ名前が一致(大文字小文字は無視)
+   *   loose … 全角/半角・空白の有無まで無視して一致
+   *   fuzzy … さらに記号・中黒・長音を落として一致(最後の手段。呼び出し側で必ず報告する)
+   *
    * 同名が複数あるときは複数返す(呼び出し側で曖昧さを報告する)。
    */
-  find(ref: string): ModelElement[] {
+  find(ref: string): FindResult {
     // 登録時と同じ正規化を通す。ここを `trim()` だけにすると、
     // 改行や連続空白を含む名前が `elements` と一字一句同じでも解決できなくなる。
     const trimmed = normalizeName(ref);
-    if (trimmed.length === 0) return [];
-    const colon = trimmed.indexOf(':');
+    if (trimmed.length === 0) return { matches: [], how: 'none' };
+
+    // `Type:名前`(全角コロン `：` も受ける)。型が読めた場合だけ前置きとして扱う。
+    const colon = trimmed.search(/[:：]/);
     if (colon > 0) {
       const type = resolveElementType(trimmed.slice(0, colon));
       if (type) {
-        const found = this.byKey.get(`${type}|${normalizeName(trimmed.slice(colon + 1))}`);
-        // 見つからなければ、名前自体に `:` を含むものとして探し直す
-        if (found) return [found];
+        const rest = normalizeName(trimmed.slice(colon + 1));
+        const found = this.byKey.get(`${type}|${rest}`);
+        if (found) return { matches: [found], how: 'exact' };
+        const loose = this.elements.filter((e) => e.type === type && looseKey(e.name) === looseKey(rest));
+        if (loose.length > 0) return { matches: loose, how: 'loose' };
+        const fuzzy = this.elements.filter((e) => e.type === type && fuzzyKey(e.name) === fuzzyKey(rest));
+        if (fuzzy.length > 0) return { matches: fuzzy, how: 'fuzzy' };
+        // ここで諦めず、名前自体に `:` を含むものとして下の段階へ落ちる
       }
     }
+
     const byId = this.elements.find((e) => e.id === trimmed);
-    if (byId) return [byId];
-    return this.byName.get(trimmed.toLowerCase()) ?? [];
+    if (byId) return { matches: [byId], how: 'exact' };
+
+    const exact = this.byName.get(trimmed.toLowerCase());
+    if (exact && exact.length > 0) return { matches: [...exact], how: 'exact' };
+
+    const loose = this.byLoose.get(looseKey(trimmed));
+    if (loose && loose.length > 0) return { matches: [...loose], how: 'loose' };
+
+    const fuzzy = this.byFuzzy.get(fuzzyKey(trimmed));
+    if (fuzzy && fuzzy.length > 0) return { matches: [...fuzzy], how: 'fuzzy' };
+
+    // 自動生成の要素は長い名前を `…` で詰めている(shorten)。
+    // 元の全文で参照されたときに拾えるよう、前方一致でも探す。
+    const key = looseKey(trimmed);
+    if (key.length >= 4) {
+      const truncated = this.elements.filter((e) => {
+        if (!e.name.endsWith('…')) return false;
+        const head = looseKey(e.name.slice(0, -1));
+        return head.length >= 4 && key.startsWith(head);
+      });
+      if (truncated.length > 0) return { matches: truncated, how: 'fuzzy' };
+    }
+
+    return { matches: [], how: 'none' };
+  }
+
+  /** 見つからなかった参照に対して、近そうな要素名を `Type:名前` の形で返す */
+  suggest(ref: string, limit = 4): string[] {
+    const key = fuzzyKey(ref);
+    if (key.length === 0) return [];
+    const scored: { label: string; score: number }[] = [];
+    for (const e of this.elements) {
+      const candidate = fuzzyKey(e.name);
+      if (candidate.length === 0) continue;
+      let score = 0;
+      if (candidate.startsWith(key) || key.startsWith(candidate)) score = 3;
+      else if (candidate.includes(key) || key.includes(candidate)) score = 2;
+      else {
+        const n = Math.min(2, key.length, candidate.length);
+        if (n > 0 && candidate.slice(0, n) === key.slice(0, n)) score = 1;
+      }
+      if (score > 0) scored.push({ label: `${e.type}:${e.name}`, score });
+    }
+    scored.sort((a, b) => b.score - a.score || a.label.localeCompare(b.label));
+    return scored.slice(0, limit).map((s) => s.label);
+  }
+
+  /** 候補が 1 つも挙がらないときに見せる「いま使える要素名」 */
+  sample(limit = 6): string[] {
+    return this.elements.slice(0, limit).map((e) => `${e.type}:${e.name}`);
   }
 }
 
@@ -1018,11 +1162,22 @@ const elementInput = z.object({
   documentation: z.string().optional().describe('説明。Archi の Documentation 欄に入る / Documentation text'),
 });
 
+/**
+ * 関係の入力。`source`/`target` が正式だが、`from`/`to` でも受ける。
+ * 別名を弾くと「関係を渡したのに 1 本も出ない」という一番たちの悪い失敗になるため、
+ * 現場でよく書かれる書き方はすべて受けて、内部で 1 つに寄せる。
+ */
 const relationInput = z.object({
-  source: z.string().min(1).describe('関係元の要素名(同名が複数あるときは `Type:名前`) / Source element name'),
-  target: z.string().min(1).describe('関係先の要素名 / Target element name'),
+  source: z
+    .string()
+    .optional()
+    .describe('関係元の要素名(同名が複数あるときは `Type:名前`)。`from` でも可 / Source element name; `from` also accepted'),
+  target: z.string().optional().describe('関係先の要素名。`to` でも可 / Target element name; `to` also accepted'),
+  from: z.string().optional().describe('`source` の別名 / Alias of `source`'),
+  to: z.string().optional().describe('`target` の別名 / Alias of `target`'),
   type: z.string().min(1).describe('関係タイプ(例: Realization, Serving, Triggering) / Relationship type'),
   name: z.string().optional().describe('関係のラベル / Optional label on the relationship'),
+  documentation: z.string().optional().describe('関係の説明 / Documentation text for the relationship'),
 });
 
 type ElementInput = z.infer<typeof elementInput>;
@@ -1042,6 +1197,14 @@ interface BuiltModel {
   modelDoc: string;
   slug: string;
   notes: string[];
+  /** 入力で指定された関係の件数(エンゲージメント自動生成分は含まない) */
+  relationsRequested: number;
+  /** そのうち実際に書き出せた件数 */
+  relationsFromInput: number;
+  /** 書き出せなかった関係の理由(利用者にそのまま見せる) */
+  warnings: string[];
+  /** 表記ゆれなどを自動で吸収した箇所(黙って直さず必ず見せる) */
+  adjustments: string[];
 }
 
 /** 入力とエンゲージメントからモデルを組み立てる */
@@ -1091,71 +1254,150 @@ function buildModel(args: BuildArgs): Resolved<BuiltModel> {
     };
   }
 
-  // 関係(要素名で解決する)
-  const problems: string[] = [];
+  // --- 関係(要素名で解決する) ---
+  //
+  // ここで 1 件でも落ちたら必ず利用者に見せる。以前は 1 件でも解決できないと
+  // 全体をエラーにしていたが、逆に「関係を渡していない扱い」で 0 件のまま
+  // 静かに書き出される経路(別名キーなど)があり、Archi に取り込むまで気づけなかった。
+  // 方針: 解決できたものは書き出し、落ちたものは理由と候補を添えて警告に積む。
+  const warnings: string[] = [];
+  const adjustments: string[] = [];
+  let relationsFromInput = 0;
+
+  /**
+   * 警告に出す 1 本の見た目。どの関係の話かが一目で分かるようにする。
+   * `both` で日英を並べるため、ja/en を別々に組む(組み上がった文をさらに label に通すと
+   * 「target / target」のような二重表示になる)。長い名前は詰める。
+   */
+  const arrowFor = (src: string, tgt: string, type: string): Bilingual => {
+    const build = (missing: string): string =>
+      `\`${shorten(src, 40) || missing}\` --${shorten(type, 30) || missing}--> \`${shorten(tgt, 40) || missing}\``;
+    return { ja: build('(未指定)'), en: build('(not given)') };
+  };
+
+  /** 見つからなかった参照に候補を添える */
+  const hintFor = (ref: string): Bilingual => {
+    const suggestions = model.suggest(ref);
+    if (suggestions.length > 0) {
+      const list = suggestions.map((s) => `\`${s}\``).join(' / ');
+      return { ja: `候補: ${list}`, en: `Did you mean: ${list}` };
+    }
+    const sample = model.sample();
+    if (sample.length === 0) return { ja: '', en: '' };
+    const list = sample.map((s) => `\`${s}\``).join(' / ');
+    return { ja: `いま登録されている要素: ${list}`, en: `Elements currently in the model: ${list}` };
+  };
+
   for (const input of args.relations) {
-    const type = resolveRelationType(input.type);
+    // `from`/`to` で書かれていても取りこぼさない
+    const sourceRef = firstText(input.source, input.from);
+    const targetRef = firstText(input.target, input.to);
+    const rawType = asText(input.type);
+    const arrow = arrowFor(sourceRef, targetRef, rawType);
+
+    if (sourceRef.length === 0 || targetRef.length === 0) {
+      warnings.push(
+        label(
+          `${arrow.ja}: source / target が空です。両方に要素名(または \`from\` / \`to\`)を入れてください。`,
+          `${arrow.en}: source / target is empty. Give both an element name (\`from\` / \`to\` are accepted too).`,
+          lang,
+        ),
+      );
+      continue;
+    }
+
+    const type = resolveRelationType(rawType);
     if (!type) {
-      const suggestions = suggestTypes(input.type, RELATION_TYPE_INDEX);
-      problems.push(
+      const suggestions = suggestTypes(rawType, RELATION_TYPE_INDEX);
+      const tail = suggestions.length > 0 ? ` → ${suggestions.join(', ')} ?` : '';
+      warnings.push(
         label(
-          `関係タイプが不明: \`${input.type}\`${suggestions.length > 0 ? ` → ${suggestions.join(', ')} ?` : ''}`,
-          `Unknown relationship type: \`${input.type}\`${suggestions.length > 0 ? ` → ${suggestions.join(', ')} ?` : ''}`,
+          `${arrow.ja}: 関係タイプが不明です${tail}。\`list_archimate_types\` の relationsOnly で使える名前を確認してください。`,
+          `${arrow.en}: unknown relationship type${tail}. Call \`list_archimate_types\` with \`relationsOnly\` for the valid names.`,
           lang,
         ),
       );
       continue;
     }
-    const sources = model.find(input.source);
-    const targets = model.find(input.target);
-    if (sources.length === 0 || targets.length === 0) {
-      const missing = sources.length === 0 ? input.source : input.target;
-      problems.push(
+
+    const sourceHit = model.find(sourceRef);
+    const targetHit = model.find(targetRef);
+
+    if (sourceHit.matches.length === 0 || targetHit.matches.length === 0) {
+      const side = sourceHit.matches.length === 0 ? 'source' : 'target';
+      const missingRef = sourceHit.matches.length === 0 ? sourceRef : targetRef;
+      const shownRef = shorten(missingRef, 60);
+      const hint = hintFor(missingRef);
+      warnings.push(
         label(
-          `要素が見つかりません: \`${missing}\`(先に elements に追加するか、名前を一致させてください)`,
-          `Element not found: \`${missing}\` (add it to elements first, or match the name exactly)`,
+          `${arrow.ja}: ${side} の \`${shownRef}\` が要素と一致しません。${hint.ja}`,
+          `${arrow.en}: ${side} \`${shownRef}\` does not match any element. ${hint.en}`,
           lang,
         ),
       );
       continue;
     }
-    if (sources.length > 1 || targets.length > 1) {
-      const ambiguous = sources.length > 1 ? sources : targets;
+
+    if (sourceHit.matches.length > 1 || targetHit.matches.length > 1) {
+      const ambiguous = sourceHit.matches.length > 1 ? sourceHit.matches : targetHit.matches;
       const first = ambiguous[0];
-      problems.push(
+      const options = ambiguous.map((e) => `\`${e.type}:${e.name}\``).join(' / ');
+      warnings.push(
         label(
-          `同名の要素が複数あります: \`${first ? first.name : ''}\`。\`Type:名前\`(例: \`${ambiguous.map((e) => e.type).join(':… / ')}:…\`)で指定してください。`,
-          `Several elements share the name \`${first ? first.name : ''}\`. Disambiguate with \`Type:Name\` (types: ${ambiguous.map((e) => e.type).join(', ')}).`,
+          `${arrow.ja}: \`${first ? first.name : ''}\` と呼べる要素が複数あります。\`Type:名前\` で指定してください(${options})。`,
+          `${arrow.en}: several elements answer to \`${first ? first.name : ''}\`. Disambiguate with \`Type:Name\` (${options}).`,
           lang,
         ),
       );
       continue;
     }
-    const source = sources[0];
-    const target = targets[0];
+
+    const source = sourceHit.matches[0];
+    const target = targetHit.matches[0];
     if (!source || !target) continue;
+
+    // 表記ゆれを吸収した場合は黙って直さず、何を何に寄せたかを見せる
+    for (const [ref, hit, element] of [
+      [sourceRef, sourceHit, source],
+      [targetRef, targetHit, target],
+    ] as [string, FindResult, ModelElement][]) {
+      if (hit.how === 'loose' || hit.how === 'fuzzy') {
+        const shown = `\`${shorten(ref, 40)}\` → \`${element.type}:${shorten(element.name, 40)}\``;
+        adjustments.push(
+          label(
+            `表記ゆれとして ${shown} に対応づけました${hit.how === 'fuzzy' ? '(記号・長音の違いまで無視した照合)' : ''}。違う要素なら名前を揃えてください。`,
+            `Matched ${shown}${hit.how === 'fuzzy' ? ' (ignoring punctuation and long-vowel marks)' : ''}. If that is the wrong element, align the names.`,
+            lang,
+          ),
+        );
+      }
+    }
+
     if (source.id === target.id) {
-      // 黙って捨てると「指定したのに図に出ない」になるので、入力の誤りとして返す
-      problems.push(
+      // 黙って捨てると「指定したのに図に出ない」になるので、必ず警告に残す
+      warnings.push(
         label(
-          `自分自身への関係は書き出せません: \`${source.name}\`(\`${type}\`)。source と target を別の要素にしてください。`,
-          `A relationship from an element to itself is not exported: \`${source.name}\` (\`${type}\`). Point source and target at different elements.`,
+          `${arrow.ja}: 自分自身への関係は書き出せません(\`${source.type}:${source.name}\`)。source と target を別の要素にしてください。`,
+          `${arrow.en}: a relationship from an element to itself is not exported (\`${source.type}:${source.name}\`). Point source and target at different elements.`,
           lang,
         ),
       );
       continue;
     }
-    model.addRelation(type, source, target, input.name ?? '');
-  }
-  if (problems.length > 0) {
-    return {
-      ok: false,
-      error: label(
-        `関係を解決できませんでした。\n${problems.map((p) => `- ${p}`).join('\n')}`,
-        `Could not resolve the relationships.\n${problems.map((p) => `- ${p}`).join('\n')}`,
-        lang,
-      ),
-    };
+
+    const added = model.addRelation(type, source, target, input.name ?? '', input.documentation ?? '');
+    // 二重指定は「落ちた関係」ではない。同じ線が既に 1 本出力に入っているので、
+    // warnings(=書き出されていない)に混ぜると件数も文面も嘘になる。調整として報告する。
+    relationsFromInput += 1;
+    if (!added) {
+      adjustments.push(
+        label(
+          `${arrow.ja}: 同じ関係が二重に指定されていたので 1 本にまとめました(出力には 1 本入っています)。`,
+          `${arrow.en}: this relationship was given twice, so it was merged (a single copy is in the output).`,
+          lang,
+        ),
+      );
+    }
   }
 
   if (model.elements.length === 0) {
@@ -1188,6 +1430,10 @@ function buildModel(args: BuildArgs): Resolved<BuiltModel> {
       modelDoc,
       slug: slugify(args.modelName ?? engagement?.name ?? '') || 'archimate',
       notes,
+      relationsRequested: args.relations.length,
+      relationsFromInput,
+      warnings,
+      adjustments,
     },
   };
 }
@@ -1229,6 +1475,123 @@ function elementPreview(model: ArchiMateModel, lang: Lang, limit = 20): string[]
   return out;
 }
 
+/**
+ * 「関係: 0」とだけ書かない。0 なら必ず理由まで書く。
+ * ここが素っ気ないと、Archi に取り込んで初めて線が無いことに気づく羽目になる。
+ */
+function relationSummary(built: BuiltModel, lang: Lang): string {
+  const total = built.model.relations.length;
+  const requested = built.relationsRequested;
+  const dropped = requested - built.relationsFromInput;
+
+  if (total === 0) {
+    if (requested === 0) {
+      return `0 ${label(
+        '— relations を渡していないため、Archi 上では要素がばらばらに配置されます(線は 1 本も引かれません)',
+        '— no relations were passed, so the elements land in Archi unconnected (not a single line is drawn)',
+        lang,
+      )}`;
+    }
+    return `0 ${label(
+      `— 指定された ${requested} 件はいずれも書き出せませんでした(下の「関係の警告」を参照)`,
+      `— none of the ${requested} relationships given could be exported (see "Relationship warnings" below)`,
+      lang,
+    )}`;
+  }
+  if (dropped > 0) {
+    return `${total} ${label(
+      `— ただし指定 ${requested} 件のうち ${dropped} 件は書き出せていません(下の「関係の警告」を参照)`,
+      `— but ${dropped} of the ${requested} relationships given were not exported (see "Relationship warnings" below)`,
+      lang,
+    )}`;
+  }
+  return String(total);
+}
+
+/**
+ * 関係まわりの警告・自動吸収・0 本のときの手当てを 1 か所で組み立てる。
+ * 出力の先頭側(ファイル一覧より前)に置いて、見落とせないようにする。
+ */
+function relationReport(built: BuiltModel, lang: Lang): string[] {
+  const out: string[] = [];
+
+  if (built.warnings.length > 0) {
+    out.push('');
+    out.push(`## ${label('関係の警告', 'Relationship warnings', lang)}`);
+    out.push('');
+    out.push(
+      label(
+        `次の関係は書き出されていません。${built.warnings.length} 件。ファイルには含まれないので、Archi 上でも線は引かれません。`,
+        `The following relationships were not exported (${built.warnings.length}). They are absent from the files, so no line appears in Archi either.`,
+        lang,
+      ),
+    );
+    out.push('');
+    for (const w of built.warnings) out.push(`- ${w}`);
+  }
+
+  if (built.relationsRequested === 0 && built.model.relations.length === 0) {
+    out.push('');
+    out.push(`## ${label('関係を 1 本も渡していません', 'No relationships were given', lang)}`);
+    out.push('');
+    out.push(
+      label(
+        '関係を渡していないため、Archi 上では要素がばらばらに配置されます。要素だけのモデルは、取り込んでも「箱が並んだだけ」で読めません。',
+        'With no relationships, the elements land in Archi unconnected. A model of boxes with no lines cannot be read once imported.',
+        lang,
+      ),
+    );
+    out.push('');
+    out.push(
+      bulletLine(
+        '- 線を引くには `relations` を渡す: `{"source": "受注処理", "target": "受注サービス", "type": "Realization"}`',
+        '- To draw lines, pass `relations`: `{"source": "Order Handling", "target": "Order Service", "type": "Realization"}`',
+        lang,
+      ),
+    );
+    out.push(
+      bulletLine(
+        '- `source` / `target` は要素名(`from` / `to` でも可)。使える関係タイプは `list_archimate_types` で確認できる',
+        '- `source` / `target` take element names (`from` / `to` work too). `list_archimate_types` lists the relationship types.',
+        lang,
+      ),
+    );
+  }
+
+  if (built.adjustments.length > 0) {
+    out.push('');
+    // 表記ゆれ・別名キー・二重指定のまとめ、いずれも「黙って直した」ことの開示なので 1 か所に出す
+    out.push(`## ${label('自動で調整した点', 'Adjustments applied', lang)}`);
+    out.push('');
+    for (const a of [...new Set(built.adjustments)]) out.push(`- ${a}`);
+  }
+
+  return out;
+}
+
+/**
+ * `relations` の別名 `relationships` を吸収する。
+ * ArchiMate 側の用語が relationship なので実際によく書かれる。
+ * zod は未知のキーを黙って捨てるため、受け口を作らないと「関係 0 本・警告なし」になる。
+ */
+function mergeRelationInputs(
+  relations: RelationInput[] | undefined,
+  relationships: RelationInput[] | undefined,
+  lang: Lang,
+): { relations: RelationInput[]; note?: string } {
+  const primary = asArray(relations);
+  const alias = asArray(relationships);
+  if (alias.length === 0) return { relations: primary };
+  return {
+    relations: [...primary, ...alias],
+    note: label(
+      `\`relationships\` に ${alias.length} 件ありました。\`relations\` の別名として受け付けています(正式なキーは \`relations\`)。`,
+      `Found ${alias.length} entries under \`relationships\`; accepted as an alias of \`relations\` (the documented key is \`relations\`).`,
+      lang,
+    ),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // ツール登録
 // ---------------------------------------------------------------------------
@@ -1242,7 +1605,16 @@ export function registerArchiMateExportTools(server: McpServer): void {
         'ArchiMate モデルを Archi の CSV インポート形式(elements.csv / relations.csv / properties.csv)で書き出す。`fromEngagement: true` にすると、現在のエンゲージメントのステークホルダー・関心事・移行状態・能力・作業パッケージ・便益・成果物を自動で要素化する。出力後に Archi での取り込み手順を返す。 / Export an ArchiMate model in the CSV layout Archi imports (elements.csv, relations.csv, properties.csv). With `fromEngagement: true` the current engagement (stakeholders, concerns, plateaus, capabilities, work packages, benefits, deliverables) is turned into elements automatically. The reply includes the Archi import steps.',
       inputSchema: {
         elements: z.array(elementInput).default([]).describe('書き出す要素 / Elements to export'),
-        relations: z.array(relationInput).default([]).describe('要素間の関係。source/target は要素名で指定 / Relationships between elements, referenced by name'),
+        relations: z
+          .array(relationInput)
+          .default([])
+          .describe(
+            '要素間の関係。source/target は要素名(elements の name か fromEngagement で生成された名前)で指定する。渡さないと Archi 上で要素がばらばらに並ぶ / Relationships between elements, referenced by element name. Without them the elements land in Archi unconnected',
+          ),
+        relationships: z
+          .array(relationInput)
+          .optional()
+          .describe('`relations` の別名(どちらで書いても同じ) / Alias of `relations`'),
         fromEngagement: z
           .boolean()
           .default(false)
@@ -1256,11 +1628,13 @@ export function registerArchiMateExportTools(server: McpServer): void {
         lang: langSchema,
       },
     },
-    async ({ elements, relations, fromEngagement, modelName, outputDir, overwrite, lang }) => {
+    async ({ elements, relations, relationships, fromEngagement, modelName, outputDir, overwrite, lang }) => {
       const l = lang as Lang;
       try {
-        const built = buildModel({ elements, relations, fromEngagement, modelName, lang: l });
+        const merged = mergeRelationInputs(relations, relationships, l);
+        const built = buildModel({ elements, relations: merged.relations, fromEngagement, modelName, lang: l });
         if (!built.ok) return errorResult(built.error);
+        if (merged.note) built.value.adjustments.unshift(merged.note);
 
         const dir = resolveOutputDir(outputDir, built.value.slug, l);
         if (!dir.ok) return errorResult(dir.error);
@@ -1276,9 +1650,10 @@ export function registerArchiMateExportTools(server: McpServer): void {
         out.push('');
         out.push(`- ${label('モデル名', 'Model', l)}: ${built.value.modelName}`);
         out.push(`- ${label('出力先', 'Output directory', l)}: \`${dir.value}\``);
-        out.push(
-          `- ${label('要素', 'Elements', l)}: ${model.elements.length} / ${label('関係', 'Relationships', l)}: ${model.relations.length}`,
-        );
+        out.push(`- ${label('要素', 'Elements', l)}: ${model.elements.length}`);
+        out.push(`- ${label('関係', 'Relationships', l)}: ${relationSummary(built.value, l)}`);
+        // 関係の警告は見落とされないよう、ファイル一覧より前に出す
+        out.push(...relationReport(built.value, l));
         out.push('');
         out.push(...writtenTable(written.value, l));
         out.push('');
@@ -1372,7 +1747,16 @@ export function registerArchiMateExportTools(server: McpServer): void {
         'ArchiMate モデルを Open Exchange File 形式(XML)で書き出す。Archi 以外のツールとも交換できる標準的なファイル形式。入力は export_archimate_csv と同じ。 / Export an ArchiMate model as an Open Exchange File (XML), the interchange format other ArchiMate tools also read. Same inputs as export_archimate_csv.',
       inputSchema: {
         elements: z.array(elementInput).default([]).describe('書き出す要素 / Elements to export'),
-        relations: z.array(relationInput).default([]).describe('要素間の関係 / Relationships between elements'),
+        relations: z
+          .array(relationInput)
+          .default([])
+          .describe(
+            '要素間の関係。source/target は要素名で指定する。渡さないと `<relationships>` が空になり、取り込んでも線が引かれない / Relationships between elements, referenced by element name. Without them `<relationships>` is empty and no line is drawn',
+          ),
+        relationships: z
+          .array(relationInput)
+          .optional()
+          .describe('`relations` の別名(どちらで書いても同じ) / Alias of `relations`'),
         fromEngagement: z
           .boolean()
           .default(false)
@@ -1387,11 +1771,13 @@ export function registerArchiMateExportTools(server: McpServer): void {
         lang: langSchema,
       },
     },
-    async ({ elements, relations, fromEngagement, modelName, fileName, outputDir, overwrite, lang }) => {
+    async ({ elements, relations, relationships, fromEngagement, modelName, fileName, outputDir, overwrite, lang }) => {
       const l = lang as Lang;
       try {
-        const built = buildModel({ elements, relations, fromEngagement, modelName, lang: l });
+        const merged = mergeRelationInputs(relations, relationships, l);
+        const built = buildModel({ elements, relations: merged.relations, fromEngagement, modelName, lang: l });
         if (!built.ok) return errorResult(built.error);
+        if (merged.note) built.value.adjustments.unshift(merged.note);
 
         // ファイル名は 1 階層のみ許可(ディレクトリ区切りを含めさせない)
         const requested = (fileName ?? '').trim();
@@ -1421,9 +1807,10 @@ export function registerArchiMateExportTools(server: McpServer): void {
         out.push('');
         out.push(`- ${label('モデル名', 'Model', l)}: ${built.value.modelName}`);
         out.push(`- ${label('ファイル', 'File', l)}: \`${filePath}\``);
-        out.push(
-          `- ${label('要素', 'Elements', l)}: ${model.elements.length} / ${label('関係', 'Relationships', l)}: ${model.relations.length}`,
-        );
+        out.push(`- ${label('要素', 'Elements', l)}: ${model.elements.length}`);
+        out.push(`- ${label('関係', 'Relationships', l)}: ${relationSummary(built.value, l)}`);
+        // 関係の警告は見落とされないよう、ファイル一覧より前に出す
+        out.push(...relationReport(built.value, l));
         out.push('');
         out.push(...writtenTable(written.value, l));
         out.push('');

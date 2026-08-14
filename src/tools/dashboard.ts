@@ -7,8 +7,30 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Lang } from '../knowledge/index.js';
 import { loadEngagement } from '../engagement/store.js';
 import { renderDashboardMarkdown } from '../dashboard/markdown.js';
-import { openBrowser, startDashboard } from '../dashboard/httpServer.js';
+import { browserSuppressed, openBrowser, startDashboard } from '../dashboard/httpServer.js';
 import { errorResult, langSchema, msg, textResult } from './common.js';
+
+/**
+ * 表の絞り込み指定 / How much of each table to show.
+ * `get_dashboard` と `get_engagement` で同じ引数名にする(片方にしか無い引数を案内文に書くと、
+ * 利用者はその通りに呼べない)。
+ */
+export const dashboardCompactSchema = z
+  .boolean()
+  .optional()
+  .describe(
+    '各表を上位のみに絞る。未指定なら件数が多いときだけ自動で絞る。全件を出すには false を指定する / Trim each table to its top rows. Omit to let large engagements trim automatically; pass false to force every row.',
+  );
+
+export const dashboardLimitSchema = z
+  .number()
+  .int()
+  .min(1)
+  .max(1000)
+  .optional()
+  .describe(
+    '1 表あたりの表示件数(既定 20、compact=true のときは 5)。指定するとその件数で絞る / Rows per table (default 20; 5 when compact=true). Supplying it turns trimming on at that size.',
+  );
 
 export function registerDashboardTools(server: McpServer): void {
   server.registerTool(
@@ -16,11 +38,28 @@ export function registerDashboardTools(server: McpServer): void {
     {
       title: 'Get the dashboard as Markdown',
       description:
-        '現在のエンゲージメント状態を、会話内表示・コピペ・印刷に適した Markdown ダッシュボードとして返す。 / Return the current engagement as a Markdown dashboard suited to reading in chat, copying, and printing.',
-      inputSchema: { lang: langSchema },
+        '現在のエンゲージメント状態を、会話内表示・コピペ・印刷に適した Markdown ダッシュボードとして返す。登録件数が多い案件では各表を上位のみに自動で絞り(切った旨と全件の見方を必ず表示)、compact=false で全件、limit で件数を変えられる。 / Return the current engagement as a Markdown dashboard suited to reading in chat, copying, and printing. On large engagements each table is trimmed to its top rows automatically (always saying so and how to see the rest); pass compact=false for every row or limit to change how many.',
+      inputSchema: {
+        lang: langSchema,
+        compact: dashboardCompactSchema,
+        limit: dashboardLimitSchema,
+      },
     },
-    async ({ lang }) => {
-      return textResult(renderDashboardMarkdown(loadEngagement(), lang as Lang));
+    async ({ lang, compact, limit }) => {
+      try {
+        return textResult(
+          renderDashboardMarkdown(loadEngagement(), lang as Lang, { compact, limit }),
+        );
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        return errorResult(
+          msg(
+            `ダッシュボードの生成に失敗しました: ${detail}`,
+            `Failed to render the dashboard: ${detail}`,
+            lang as Lang,
+          ),
+        );
+      }
     },
   );
 
@@ -61,6 +100,14 @@ export function registerDashboardTools(server: McpServer): void {
         );
         if (!open) {
           out.push(`- ${msg('ブラウザは開いていません(open=false)', 'Browser not launched (open=false)', l)}`);
+        } else if (browserSuppressed()) {
+          out.push(
+            `- ${msg(
+              'ブラウザは開いていません(環境変数 TOGAF_EAP_NO_BROWSER が設定されています)。上の URL を手で開いてください。',
+              'Browser not launched (TOGAF_EAP_NO_BROWSER is set). Open the URL above manually.',
+              l,
+            )}`,
+          );
         }
         out.push('');
         if (!engagement) {

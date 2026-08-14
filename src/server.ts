@@ -2,6 +2,7 @@
  * MCP サーバーの生成と全ツールの登録 / MCP server construction and tool registration.
  */
 
+import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { registerKnowledgeTools } from './tools/knowledge.js';
 import { registerConsultTool } from './tools/consult.js';
@@ -24,6 +25,7 @@ import { registerGuideTools } from './tools/guide.js';
 import { registerSecurityTools } from './tools/security.js';
 import { registerDocumentTools } from './tools/documents.js';
 import { registerLlmTools } from './tools/llm.js';
+import { registerSourceTools } from './tools/sources.js';
 
 export const SERVER_NAME = 'togaf10-eap-mcp';
 export const SERVER_VERSION = '0.2.0';
@@ -40,12 +42,52 @@ const INSTRUCTIONS = `TOGAF 10 EAP MCP — TOGAF Standard 10th Edition (Enterpri
 
 An unofficial TOGAF-based consulting server. Start with \`consult\` for situational advice, use the reference tools for specifics, track work with the engagement tools, and show progress with the Markdown or live browser dashboard. Not affiliated with The Open Group; the knowledge base is original summary material, not a reproduction of the standard.`;
 
+/**
+ * 全ツールの入力スキーマを strict にする。
+ *
+ * SDK の既定では、生シェイプ(`{ a: z.string() }`)は `z.object()` に包まれ、
+ * **未知のキーは黙って捨てられる**。そのため `relations` を `relationships` と
+ * 打ち間違えても「関係 0 件」の空の結果が返るだけで、原因が利用者に分からない。
+ * ここで一括して `.strict()` を付け、綴り違いをその場でエラーとして返す。
+ *
+ * 各ツール側は生シェイプのまま書けるので、型推論(引数の型付け)は一切変わらない。
+ */
+function strictifyToolSchemas(server: McpServer): void {
+  type ToolConfig = { inputSchema?: unknown } & Record<string, unknown>;
+  const original = server.registerTool.bind(server) as (
+    name: string,
+    config: ToolConfig,
+    cb: unknown,
+  ) => unknown;
+
+  (server as unknown as { registerTool: unknown }).registerTool = (
+    name: string,
+    config: ToolConfig,
+    cb: unknown,
+  ) => {
+    const shape = config?.inputSchema;
+    // 生シェイプ(プレーンオブジェクト)のときだけ包む。既に Zod スキーマなら触らない。
+    const isRawShape =
+      shape !== null &&
+      typeof shape === 'object' &&
+      !('_def' in (shape as object)) &&
+      !('_zod' in (shape as object));
+    if (isRawShape) {
+      const strict = z.object(shape as z.ZodRawShape).strict();
+      return original(name, { ...config, inputSchema: strict }, cb);
+    }
+    return original(name, config, cb);
+  };
+}
+
 /** 全ツールを登録した McpServer を返す */
 export function createServer(): McpServer {
   const server = new McpServer(
     { name: SERVER_NAME, version: SERVER_VERSION },
     { instructions: INSTRUCTIONS },
   );
+
+  strictifyToolSchemas(server);
 
   // 入口: 何をすればいいか分からない人はここから
   registerGuideTools(server);
@@ -73,6 +115,8 @@ export function createServer(): McpServer {
   // 既存ドキュメントの取り込みと、任意の Claude API 連携
   registerDocumentTools(server);
   registerLlmTools(server);
+  // 知識の鮮度と一次情報への導線
+  registerSourceTools(server);
   // MCP prompts / resources
   registerPrompts(server);
   registerResources(server);

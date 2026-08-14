@@ -741,7 +741,9 @@ export function registerExportTools(server: McpServer): void {
         );
       }
 
-      const markdown = renderDashboardMarkdown(engagement, l);
+      // ファイルに書き出すものは全件。会話に載せる get_dashboard と違って
+      // 長さの制約が無く、途中で切れた成果物を配ってしまうほうが害が大きい。
+      const markdown = renderDashboardMarkdown(engagement, l, { compact: false });
       const content =
         format === 'markdown'
           ? markdown
@@ -820,7 +822,9 @@ export function registerExportTools(server: McpServer): void {
       }
 
       const name = engagementName ?? loadEngagement()?.name;
-      const content = renderDeliverableTemplate(found, l, name);
+      // 案件が選択されていれば登録済みデータを雛形に流し込む
+      // (Excel への手転記が残るという所見への対応。案件が無ければ従来どおり空の雛形)
+      const content = renderDeliverableTemplate(found, l, name, loadEngagement());
 
       let target: string;
       if (outputPath === undefined) {

@@ -963,6 +963,40 @@ function serviceIdFor(layer: LayerId): string | undefined {
   return undefined;
 }
 
+/**
+ * その層で「内側の振る舞い」を置くのに使う要素の ID。
+ * 担い手と受動要素の間に 1 枚挟むときの推奨先として使う。
+ */
+function internalBehaviorIdFor(layer: LayerId): string | undefined {
+  if (layer === 'business') return 'business-process';
+  if (layer === 'application') return 'application-function';
+  if (layer === 'technology') return 'technology-function';
+  return undefined;
+}
+
+/**
+ * 満たすべきことを表す動機要素。中核層の要素がこれを Realization するのは正しい向き
+ * (具体 → 抽象)。Goal は測定の議論があるため別ルールで扱う。
+ */
+const INTENT_TARGET_IDS = new Set(['requirement', 'constraint', 'outcome']);
+
+/**
+ * 動機層の中の抽象度の梯子。Realization は「具体 → 抽象」なので、この数字が
+ * 増える向き(要件・制約 → 原則 → 成果 → 目標)にしか引けない。
+ * Driver / Stakeholder / Assessment はここに載らない = 実現する側にも
+ * される側にもならない要素なので、下の NOT_REALIZABLE で別に弾く。
+ */
+const MOTIVATION_LADDER: Record<string, number> = {
+  constraint: 1,
+  requirement: 1,
+  principle: 2,
+  outcome: 3,
+  goal: 4,
+};
+
+/** 実現の端点にならない動機要素。関係を持たせるなら Association / Influence */
+const MOTIVATION_NOT_REALIZABLE = new Set(['stakeholder', 'driver', 'assessment']);
+
 /** 入れ子の実体として全体・部分を構成できる構造要素 */
 const STRUCTURAL_CONTAINERS = new Set([
   'node',
@@ -996,10 +1030,108 @@ const ASPECT_LABEL: Record<Aspect, Bilingual> = {
 
 const RULES: Rule[] = [
   // --- Realization ---
+  // Realization は「具体 → 抽象」の一方向。始点が具体、終点が約束・意図の側に来る。
+  // 担い手(active)が振る舞いを行う関係は Realization ではなく Assignment なので、
+  // ここで先に潰しておく。以降のルールは上から順に評価される(先勝ち)。
+  {
+    // Artifact は Application Component / System Software の「実体としての形」。
+    // 受動要素から担い手への Realization が成立する数少ない例外。
+    id: 'realization-artifact-to-active',
+    test: (s, t, r) =>
+      r.id === 'realization' &&
+      s.id === 'artifact' &&
+      t.aspect === 'active' &&
+      (t.layer === 'application' || t.layer === 'technology'),
+    judge: (s, t) => ({
+      verdict: 'ok',
+      reason: {
+        ja: `${s.name} は ${t.name} の「実体としての形」なので、実現として自然。配置の議論(どのノードに何が載るか)へ素直に繋がる。`,
+        en: `${s.name} is the concrete form ${t.name} takes, so realization fits. It also leads cleanly into the deployment conversation.`,
+      },
+      alternatives: [
+        {
+          ja: `配置まで示すなら Node → (Assignment) → ${s.name} を足すと、障害時の影響範囲が上まで辿れる。`,
+          en: `Add Node → (Assignment) → ${s.name} to complete the deployment story and make outage impact traceable upward.`,
+        },
+      ],
+    }),
+  },
+  {
+    // 意図(動機層)は実行側に実現される側。逆向きに引かれている。
+    id: 'realization-from-motivation-reversed',
+    test: (s, t, r) => r.id === 'realization' && s.aspect === 'motivation' && t.aspect !== 'motivation',
+    judge: (s, t) => ({
+      verdict: 'likely-wrong',
+      reason: {
+        ja: `向きが逆。Realization は「具体 → 抽象」で読むので、意図である ${s.name} は実現する側ではなく実現される側。今の向きだと「${s.name} という要求が ${t.name} を作り出している」と読める。`,
+        en: `The direction is inverted. Realization reads concrete-to-abstract, so ${s.name} — an intent — is what gets realized, not what does the realizing. As drawn it says the requirement produces ${t.name}.`,
+      },
+      alternatives: [
+        {
+          ja: `${t.name} → (Realization) → ${s.name} に引き直す。「この実装がこの要求を満たしている」と読めるようになり、要件の追跡表がそのまま作れる。`,
+          en: `Redraw as ${t.name} → (Realization) → ${s.name}. It then reads "this implementation satisfies that intent", and the traceability matrix falls out of the model.`,
+        },
+        {
+          ja: `${s.name} が ${t.name} の設計を縛っているという意味なら、Influence(正負を添える)か、図に描かず注記に落とす。`,
+          en: `If the point is that ${s.name} constrains how ${t.name} is designed, use Influence with a positive or negative qualifier, or move the claim to a note.`,
+        },
+      ],
+    }),
+  },
+  {
+    // 成果物(納品物)が、中核層の要素を「存在させる」形。移行計画と現行/目標を繋ぐ線。
+    id: 'realization-deliverable-to-core',
+    test: (s, t, r) =>
+      r.id === 'realization' && s.id === 'deliverable' && t.layer !== 'implementation' && t.layer !== 'motivation',
+    judge: (s, t) => ({
+      verdict: 'ok',
+      reason: {
+        ja: `${s.name} が出来上がることで ${t.name} が存在することになる、という移行計画と設計を繋ぐ線。この線があると「この納品物が遅れると、どの要素が目標時点に間に合わないか」を図の上で辿れる。`,
+        en: `Completing ${s.name} is what brings ${t.name} into existence — the line that joins the migration plan to the design. With it in place you can trace which elements miss the target date when a deliverable slips.`,
+      },
+      alternatives: [
+        {
+          ja: `${s.name} を生み出す Work Package → (Realization) → ${s.name} も併せて引く。作業・納品物・出来上がるものの 3 点が揃って初めて計画として読める。`,
+          en: `Also draw the work package that produces it: Work Package → (Realization) → ${s.name}. Work, deliverable, and result together are what make it readable as a plan.`,
+        },
+        {
+          ja: `その時点で何が動いているかを言いたいなら Plateau を立て、Plateau → (Aggregation) → ${t.name} で束ねる。`,
+          en: `To state what is running at a given point, introduce a Plateau and bundle with Plateau → (Aggregation) → ${t.name}.`,
+        },
+      ],
+    }),
+  },
+  {
+    // 担い手を終点にした Realization。Artifact / Deliverable → 担い手(上の例外)以外は向きの取り違え。
+    id: 'realization-to-active-target',
+    test: (s, t, r) => r.id === 'realization' && t.aspect === 'active',
+    judge: (s, t) => ({
+      verdict: 'likely-wrong',
+      reason: {
+        ja: `${t.name} は担い手(人・組織・部品・機器)であって、誰かに実現してもらう「約束」や「意図」ではない。Realization は具体が抽象を満たす線なので、終点に担い手が来ることは基本的にない。今の向きだと「${s.name} が ${t.name} を作り出している」と読める。`,
+        en: `${t.name} is a performer — a person, org unit, component, or device — not a promise or an intent waiting to be made good. Realization runs from concrete to abstract, so a performer at the arrow head almost never makes sense; as drawn it says ${s.name} brings ${t.name} into existence.`,
+      },
+      alternatives: [
+        {
+          ja: `${s.name} が振る舞いなら、言いたいことは「${t.name} がそれをやっている」のはず。${t.name} → (Assignment) → ${s.name} に引き直す。`,
+          en: `If ${s.name} is behaviour, what you mean is that ${t.name} performs it: redraw as ${t.name} → (Assignment) → ${s.name}.`,
+        },
+        {
+          ja: `${t.name} が ${s.name} を使っている / 支えられているなら Serving(提供側 → 利用側)。担い手どうしの「この枠を埋めている」関係なら Assignment。`,
+          en: `If ${t.name} consumes or is supported by ${s.name}, use Serving (provider to consumer). Between two performers, "fills this position" is Assignment.`,
+        },
+      ],
+    }),
+  },
   {
     id: 'realization-app-to-business-behavior',
     test: (s, t, r) =>
-      r.id === 'realization' && s.layer === 'application' && s.aspect === 'active' && t.layer === 'business' && t.aspect === 'behavior',
+      r.id === 'realization' &&
+      s.layer === 'application' &&
+      s.aspect === 'active' &&
+      t.layer === 'business' &&
+      t.aspect === 'behavior' &&
+      !SERVICE_IDS.has(t.id),
     judge: (s, t) => ({
       verdict: 'questionable',
       reason: {
@@ -1024,7 +1156,7 @@ const RULES: Rule[] = [
   },
   {
     id: 'realization-to-capability-from-app',
-    test: (s, t, r) => r.id === 'realization' && t.id === 'capability' && s.layer === 'application',
+    test: (s, t, r) => r.id === 'realization' && t.id === 'capability' && s.layer === 'application' && s.aspect === 'active',
     judge: (s, t) => ({
       verdict: 'questionable',
       reason: {
@@ -1044,18 +1176,20 @@ const RULES: Rule[] = [
     }),
   },
   {
-    id: 'realization-behavior-to-capability',
-    test: (s, t, r) => r.id === 'realization' && t.id === 'capability' && s.aspect === 'behavior',
+    // Capability / Value Stream / Course of Action は戦略層の振る舞い。
+    // 現場の振る舞いがそれを実現する、が戦略層と現場を繋ぐ主線。
+    id: 'realization-behavior-to-strategy',
+    test: (s, t, r) => r.id === 'realization' && t.layer === 'strategy' && t.aspect === 'behavior' && s.aspect === 'behavior',
     judge: (s, t) => ({
       verdict: 'ok',
       reason: {
-        ja: `能力は「実際にやっていること」の裏付けがあって初めて主張できる。${s.name} が ${t.name} を実現する形は、その裏付けを図の上に置いた状態で、戦略層と現場を繋ぐ主線になる。`,
-        en: `A capability claim only stands up when something is actually being done. ${s.name} realizing ${t.name} puts that evidence on the page, and it is the main line joining the strategy layer to the work.`,
+        ja: `戦略層の ${t.name} は「実際にやっていること」の裏付けがあって初めて主張できる。${s.name} が ${t.name} を実現する形は、その裏付けを図の上に置いた状態で、戦略層と現場を繋ぐ主線になる。`,
+        en: `A strategy-layer claim only stands up when something is actually being done. ${s.name} realizing ${t.name} puts that evidence on the page, and it is the main line joining the strategy layer to the work.`,
       },
       alternatives: [
         {
-          ja: `能力ごとに実現している振る舞いが 1 つも無いなら、それは「持っているつもりの能力」。ヒートマップで赤にする前に、まずこの線が引けるかを確かめる。`,
-          en: `A capability with no behaviour realizing it is a capability you only believe you have. Before colouring it red on a heat map, check whether this line can be drawn at all.`,
+          ja: `${t.name} を実現している振る舞いが 1 つも無いなら、それは「あるつもりの能力」。ヒートマップで赤にする前に、まずこの線が引けるかを確かめる。`,
+          en: `If nothing realizes ${t.name}, it is something you only believe you have. Before colouring it red on a heat map, check whether this line can be drawn at all.`,
         },
         {
           ja: `支えている持ち物(人材・システム・データ)は Resource → (Assignment) → ${t.name} で足す。振る舞いと持ち物の両方が揃うと、投資の議論が具体化する。`,
@@ -1086,21 +1220,83 @@ const RULES: Rule[] = [
     }),
   },
   {
-    id: 'realization-component-service-same-layer',
-    test: (s, t, r) => r.id === 'realization' && s.aspect === 'active' && t.aspect === 'behavior' && s.layer === t.layer,
+    // 担い手 → 同じ層のサービス。「この部品がこの約束を提供している」の省略形として通る。
+    id: 'realization-active-to-service-same-layer',
+    test: (s, t, r) => r.id === 'realization' && s.aspect === 'active' && SERVICE_IDS.has(t.id) && s.layer === t.layer,
     judge: (s, t) => ({
       verdict: 'ok',
       reason: {
-        ja: `${s.name} が ${t.name} という「外に対する約束」を中身で満たす形になっており、実現の関係として自然。同じ層の中で抽象(サービス)と具体(担い手)を分けられている。`,
-        en: `${s.name} gives substance to the promise ${t.name} makes to the outside. Abstract and concrete stay separated inside one layer, which is exactly what realization is for.`,
+        ja: `${t.name} は外に対する約束で、${s.name} はそれを提供している実体。「このサービスの提供元はここ」と読める形で、棚卸しでも設計でも使える。同じ層の中で約束(サービス)と実体(担い手)が分かれているので、利用側は ${t.name} だけを見ればよくなる。`,
+        en: `${t.name} is the promise made outward and ${s.name} is the thing behind it. It reads as "this is where the service comes from", which works for both inventory and design: promise and provider stay separated, so consumers only ever look at ${t.name}.`,
       },
       alternatives: [
+        {
+          ja: `厳密に書くなら ${s.name} → (Assignment) → ${elementShort(internalBehaviorIdFor(s.layer) ?? 'application-function')} → (Realization) → ${t.name}。内部の仕事と外向きの約束が分かれるので、「同じ機能を複数サービスで出している」重複が見える。`,
+          en: `The strict form is ${s.name} → (Assignment) → ${elementShort(internalBehaviorIdFor(s.layer) ?? 'application-function')} → (Realization) → ${t.name}. Separating the internal work from the outward promise is what exposes one function being sold through several services.`,
+        },
         {
           ja: `サービスを複数のコンポーネントで実現しているなら、Collaboration を立ててそこから Realization を引くと責任分界が読める。`,
           en: `If several components realize the service, introduce a Collaboration and draw the realization from it so the split of responsibility becomes readable.`,
         },
       ],
     }),
+  },
+  {
+    // 担い手 → 別の層のサービス。成立はするが、途中の層が飛んでいる。
+    id: 'realization-active-to-service-cross-layer',
+    test: (s, t, r) => r.id === 'realization' && s.aspect === 'active' && SERVICE_IDS.has(t.id) && s.layer !== t.layer,
+    judge: (s, t) => ({
+      verdict: 'questionable',
+      reason: {
+        ja: `向きは正しい(具体 → 約束)が、${s.name} から ${t.name} へ層を飛び越えている。この 1 本に「${s.name} の内部で何が起きて、その結果どの約束になるのか」が全部畳み込まれているため、${s.name} を入れ替える検討に入った瞬間に描き直しになる。`,
+        en: `The direction is right — concrete to promise — but the line jumps layers from ${s.name} to ${t.name}. Everything about what happens inside ${s.name} and how it turns into the promise is folded into this single link, so the moment you consider replacing ${s.name} the picture has to be redrawn.`,
+      },
+      alternatives: [
+        {
+          ja: `${s.name} → (Realization) → ${elementShort(serviceIdFor(s.layer) ?? 'application-service')} → (Serving) → ${elementShort(internalBehaviorIdFor(t.layer) ?? 'business-process')} → (Realization) → ${t.name} に分ける。自層の約束を経由するので、下の入れ替えが上に波及しない。`,
+          en: `Break it up: ${s.name} → (Realization) → ${elementShort(serviceIdFor(s.layer) ?? 'application-service')} → (Serving) → ${elementShort(internalBehaviorIdFor(t.layer) ?? 'business-process')} → (Realization) → ${t.name}. Routing through the promise of its own layer keeps a swap underneath from propagating upward.`,
+        },
+        {
+          ja: `全社の棚卸し段階で線の数を絞りたいなら、この省略形のままでよい。設計に入る段で分解する。`,
+          en: `During an enterprise-wide inventory, keeping the shorthand is fine. Break it down when you move into design.`,
+        },
+      ],
+    }),
+  },
+  {
+    // 【最重要】担い手 → 内部の振る舞い は Realization ではなく Assignment。
+    // Business Actor → Business Process をここで捕まえる。
+    id: 'realization-active-to-behavior-should-be-assignment',
+    test: (s, t, r) => r.id === 'realization' && s.aspect === 'active' && t.aspect === 'behavior' && !SERVICE_IDS.has(t.id),
+    judge: (s, t) => {
+      const svcId = serviceIdFor(t.layer);
+      const alternatives: Bilingual[] = [
+        {
+          ja: `${s.name} → (Assignment) → ${t.name} に引き直す。「${s.name} が ${t.name} をやっている」という、担い手と振る舞いを結ぶ唯一の線がこれ。`,
+          en: `Redraw as ${s.name} → (Assignment) → ${t.name}. Assignment is the one line that ties a performer to the behaviour it carries out.`,
+        },
+      ];
+      if (svcId) {
+        alternatives.push({
+          ja: `「実現している」と言いたい相手が外向きの提供物なら、終点を ${elementShort(svcId)} にする(${t.name} は内部の振る舞いなので約束にはならない)。${t.name} → (Realization) → ${elementShort(svcId)} が本来の実現の線。`,
+          en: `If what you meant to realize is something offered outward, the target should be ${elementShort(svcId)} — ${t.name} is internal behaviour, not a promise. The realization line proper is ${t.name} → (Realization) → ${elementShort(svcId)}.`,
+        });
+      }
+      if (s.layer !== t.layer) {
+        alternatives.push({
+          ja: `層をまたぐ支援関係なら Serving。${s.name} 側でサービスを 1 枚立て、そのサービス → (Serving) → ${t.name} にすると、${s.name} を入れ替えても上の図が壊れない。`,
+          en: `For cross-layer support, use Serving: expose a service on the ${s.name} side and draw that service → (Serving) → ${t.name}, so replacing ${s.name} leaves the upper picture intact.`,
+        });
+      }
+      return {
+        verdict: 'likely-wrong',
+        reason: {
+          ja: `${s.name} は担い手、${t.name} は内部の振る舞い。この組み合わせは Realization ではなく Assignment で結ぶ。Realization は「具体が抽象を満たす」線で、終点に来るのは外向きの約束(${svcId ? elementShort(svcId) : 'サービス'})や要件・目標といった抽象物。${t.name} は外に対する約束ではないので、この線のままだと ArchiMate として成立せず、モデリングツールに取り込めないか、取り込めても意味が通らない。`,
+          en: `${s.name} is a performer and ${t.name} is internal behaviour; that pairing is Assignment, not Realization. Realization is the line where something concrete makes good on something abstract, and its arrow head belongs on an outward promise (${svcId ? elementShort(svcId) : 'a service'}), a requirement, or a goal. ${t.name} is none of those, so as drawn the link does not hold up as ArchiMate — a modelling tool will either reject it or import something that says nothing.`,
+        },
+        alternatives,
+      };
+    },
   },
   {
     id: 'realization-behavior-to-service',
@@ -1122,6 +1318,82 @@ const RULES: Rule[] = [
         },
       ],
     }),
+  },
+  {
+    // 下の層の振る舞い → 上の層のサービス。層を飛ぶが向きは正しい。
+    id: 'realization-behavior-to-service-upward',
+    test: (s, t, r) => {
+      if (r.id !== 'realization') return false;
+      if (s.aspect !== 'behavior' || !SERVICE_IDS.has(t.id)) return false;
+      const so = stackOrderOf(s);
+      const to = stackOrderOf(t);
+      return so !== undefined && to !== undefined && so > to;
+    },
+    judge: (s, t) => ({
+      verdict: 'ok',
+      reason: {
+        ja: `下の層の ${s.name} が、上の層の約束である ${t.name} を中身で満たす形。向き(具体 → 抽象)として正しく、業務側の約束をシステム側がどこまで担っているかを 1 本で言える。`,
+        en: `${s.name}, further down, gives substance to ${t.name}, the promise made one layer up. The direction is right — concrete to abstract — and a single line states how much of the business-side promise the system side actually carries.`,
+      },
+      alternatives: [
+        {
+          ja: `${t.name} を人が担っている部分が残っているなら、その振る舞いからも Realization を引く。1 本しか無いと「全部システムがやっている」という誤読を招く。`,
+          en: `If people still carry part of ${t.name}, draw a realization from their behaviour too. A single line invites the reading that the system does all of it.`,
+        },
+      ],
+    }),
+  },
+  {
+    // 振る舞いどうしを層をまたいで結ぶ Realization。下 → 上 なら自動化の主張、上 → 下 は向きの取り違え。
+    id: 'realization-behavior-cross-layer',
+    test: (s, t, r) => {
+      if (r.id !== 'realization') return false;
+      if (s.aspect !== 'behavior' || t.aspect !== 'behavior') return false;
+      if (SERVICE_IDS.has(t.id)) return false;
+      const so = stackOrderOf(s);
+      const to = stackOrderOf(t);
+      return so !== undefined && to !== undefined && so !== to;
+    },
+    judge: (s, t) => {
+      const so = stackOrderOf(s) ?? 0;
+      const to = stackOrderOf(t) ?? 0;
+      if (so > to) {
+        return {
+          verdict: 'ok',
+          reason: {
+            ja: `下の層の ${s.name} が、上の層の ${t.name} を丸ごと肩代わりしている、という主張。完全に自動化された手順を描くときの正しい形で、業務手順とシステム処理の対応が 1 対 1 で説明できる。`,
+            en: `The claim is that ${s.name}, one layer down, carries out ${t.name} in full. This is the right shape for a fully automated procedure, and it gives a one-to-one story between the procedure and the processing.`,
+          },
+          alternatives: [
+            {
+              ja: `人の判断が 1 箇所でも残っているなら、この線は言い過ぎ。サービスを 1 枚立てて ${s.name} → (Realization) → サービス → (Serving) → ${t.name} にすると、支えている関係として正確になる。`,
+              en: `If a single human judgement remains anywhere, this overstates it. Interpose a service — ${s.name} → (Realization) → service → (Serving) → ${t.name} — and it becomes an accurate statement of support.`,
+            },
+            {
+              ja: `担い手も描くなら、${s.name} を実行しているコンポーネントから Assignment を引く。「止まったら誰が困るか」まで 1 枚で辿れる。`,
+              en: `Add the performer too: draw Assignment from the component that runs ${s.name}. One page then answers who is hurt when it stops.`,
+            },
+          ],
+        };
+      }
+      return {
+        verdict: 'likely-wrong',
+        reason: {
+          ja: `向きが逆。Realization は具体 → 抽象で読むので、下の層の ${t.name} を上の層の ${s.name} が実現する、とは読めない。今の向きだと「業務の手順がシステムの処理を作り出している」と主張していることになる。`,
+          en: `The direction is inverted. Realization reads concrete to abstract, so ${s.name}, higher up, cannot realize ${t.name} below it. As drawn it claims the business procedure brings the system processing into existence.`,
+        },
+        alternatives: [
+          {
+            ja: `${t.name} → (Realization) → ${s.name} に引き直す(下の層が上の層を実現する)。`,
+            en: `Redraw as ${t.name} → (Realization) → ${s.name} — the lower layer realizes the upper one.`,
+          },
+          {
+            ja: `${s.name} が ${t.name} を必要としている(依存している)という意味なら Serving を逆向きに: ${t.name} → (Serving) → ${s.name}。`,
+            en: `If the point is that ${s.name} depends on ${t.name}, use Serving the other way: ${t.name} → (Serving) → ${s.name}.`,
+          },
+        ],
+      };
+    },
   },
   {
     id: 'realization-implementation-output',
@@ -1168,23 +1440,135 @@ const RULES: Rule[] = [
     }),
   },
   {
-    id: 'realization-cross-layer-upward-ok',
-    test: (s, t, r) =>
-      r.id === 'realization' &&
-      s.aspect === 'passive' &&
-      t.aspect === 'active' &&
-      s.layer === 'technology' &&
-      t.layer === 'application',
+    // 受動要素どうしで向きが上向き(業務語 → システム上の実体)。具体と抽象が逆。
+    id: 'realization-passive-upward',
+    test: (s, t, r) => {
+      if (r.id !== 'realization') return false;
+      if (s.aspect !== 'passive' || t.aspect !== 'passive') return false;
+      const so = stackOrderOf(s);
+      const to = stackOrderOf(t);
+      return so !== undefined && to !== undefined && so < to;
+    },
     judge: (s, t) => ({
-      verdict: 'ok',
+      verdict: 'likely-wrong',
       reason: {
-        ja: `${s.name} は ${t.name} の「実体としての形」なので、実現として自然。配置の議論(どのノードに何が載るか)へ素直に繋がる。`,
-        en: `${s.name} is the concrete form ${t.name} takes, so realization fits. It also leads cleanly into the deployment conversation.`,
+        ja: `向きが逆。抽象(業務の言葉で呼ぶ ${s.name})を、具体(下の層の ${t.name})が実現する、が本来の向き。今の向きだと「業務上の呼び名がシステム上の実体を作り出している」と読める。`,
+        en: `The direction is inverted. The concrete item lower down (${t.name}) realizes the one named in business language (${s.name}), not the other way round. As drawn, the business term appears to bring the stored item into existence.`,
       },
       alternatives: [
         {
-          ja: `配置まで示すなら Node → (Assignment) → ${s.name} を足すと、障害時の影響範囲が上まで辿れる。`,
-          en: `Add Node → (Assignment) → ${s.name} to complete the deployment story and make outage impact traceable upward.`,
+          ja: `${t.name} → (Realization) → ${s.name} に引き直す。「業務で言う 1 件」がシステム上どこに何個あるのかを辿れる形になる。`,
+          en: `Redraw as ${t.name} → (Realization) → ${s.name}. You can then trace where "one of those" actually lives, and in how many places.`,
+        },
+      ],
+    }),
+  },
+  {
+    // 受動要素を終点にした Realization(実装移行層の成果物・受動要素どうしの対応を除く)。
+    id: 'realization-to-passive-target',
+    test: (s, t, r) => r.id === 'realization' && t.aspect === 'passive' && s.aspect !== 'passive',
+    judge: (s, t) => ({
+      verdict: 'likely-wrong',
+      reason: {
+        ja: `${t.name} は扱われる情報・モノであって、誰かに実現してもらう約束ではない。${s.name} が ${t.name} を「実現する」と描くと、その情報を実際に作っている振る舞いも、それを保持している実体も図から消える。`,
+        en: `${t.name} is information or a physical thing that gets handled, not a promise waiting to be made good. Drawing ${s.name} as realizing it hides both the behaviour that actually creates the information and whatever holds it.`,
+      },
+      alternatives: [
+        {
+          ja: `${s.name} が ${t.name} を作る・更新するという意味なら Access(作成・更新をラベルで区別する)。マスタの議論に使える形になる。`,
+          en: `If ${s.name} creates or updates ${t.name}, use Access and label create/update explicitly. That is the form a master-data discussion can use.`,
+        },
+        {
+          ja: `${t.name} が別の受動要素の実体だと言いたいなら、受動要素どうしで 具体 → (Realization) → 抽象 に引き直す(例: Data Object → Business Object)。`,
+          en: `If the point is that ${t.name} is the concrete form of another passive element, draw it between passive elements, concrete to abstract — for example Data Object → Business Object.`,
+        },
+      ],
+    }),
+  },
+  {
+    // 中核層の要素 → 要件・制約・成果。要件追跡の主線。
+    id: 'realization-core-to-intent',
+    test: (s, t, r) => r.id === 'realization' && INTENT_TARGET_IDS.has(t.id) && s.aspect !== 'motivation',
+    judge: (s, t) => ({
+      verdict: 'ok',
+      reason: {
+        ja: `「${s.name} が ${t.name} を満たしている」と読める形で、Realization の本来の向き(具体 → 抽象)。この線が全ての ${t.name} に対して引けていれば、要件の追跡表を図から作れる。`,
+        en: `It reads as "${s.name} satisfies ${t.name}", which is realization used in its proper direction — concrete to abstract. Once every intent of this kind has such a line, the traceability matrix can be produced from the model.`,
+      },
+      alternatives: [
+        {
+          ja: `どの要素からも実現されていない ${t.name} は、まだ誰も引き受けていない要求。フェーズ E に入る前にこの穴を潰す。`,
+          en: `Any intent with nothing realizing it is a demand nobody has picked up. Close those holes before entering Phase E.`,
+        },
+        {
+          ja: `効き方が確実でないなら Influence にして正負を添える。Realization は「満たしている」と断定する線なので、根拠が無いまま使わない。`,
+          en: `Where the effect is not certain, use Influence with a positive or negative qualifier. Realization asserts satisfaction outright, so do not use it without grounds.`,
+        },
+      ],
+    }),
+  },
+  {
+    // Stakeholder / Driver / Assessment は「誰が」「何に押されて」「今どうか」であって、
+    // 実現する側にも実現される側にもならない。Realization の端点に来たらまず誤り。
+    id: 'realization-motivation-nonrealizable-endpoint',
+    test: (s, t, r) =>
+      r.id === 'realization' &&
+      s.aspect === 'motivation' &&
+      t.aspect === 'motivation' &&
+      (MOTIVATION_NOT_REALIZABLE.has(s.id) || MOTIVATION_NOT_REALIZABLE.has(t.id)),
+    judge: (s, t) => {
+      const bad = MOTIVATION_NOT_REALIZABLE.has(t.id) ? t : s;
+      const side = MOTIVATION_NOT_REALIZABLE.has(t.id)
+        ? { ja: '終点', en: 'the arrow head' }
+        : { ja: '始点', en: 'the tail' };
+      return {
+        verdict: 'likely-wrong',
+        reason: {
+          ja: `${bad.name} は「誰が・何に押されて・今どうなっているか」を置く要素で、満たしたり満たされたりする対象ではない。Realization の${side.ja}に ${bad.name} が来ている時点で、この線は「何が何を満たすのか」を何も言えていない。`,
+          en: `${bad.name} states who is involved, what pressure exists, or how things stand today — it is not something that gets satisfied, nor something that satisfies. With ${bad.name} at ${side.en} of a realization, the line asserts nothing about what satisfies what.`,
+        },
+        alternatives: [
+          {
+            ja: `関心の所在を言いたいだけなら Association(${s.name} — ${t.name})。線に意味を持たせず「関係がある」だけを示す。`,
+            en: `To record only that the two are related, use Association (${s.name} — ${t.name}) and let the line carry no further claim.`,
+          },
+          {
+            ja: `効き方(後押ししている / 妨げている)を言いたいなら Influence にして正負を添える。断定できる根拠があるときだけ Realization を使う。`,
+            en: `To say one helps or hinders the other, use Influence with a positive or negative qualifier. Reserve Realization for claims you can defend outright.`,
+          },
+          {
+            ja: `満たす鎖を描きたいなら、梯子に載る要素だけで繋ぐ: Requirement / Constraint → Principle → Outcome → Goal。`,
+            en: `To draw the satisfaction chain, connect only the elements that sit on the ladder: Requirement or Constraint → Principle → Outcome → Goal.`,
+          },
+        ],
+      };
+    },
+  },
+  {
+    // 動機層の中の Realization も「具体 → 抽象」。Goal → Requirement のような
+    // 下向きは、鎖の向きを丸ごと逆に読ませるので誤り。
+    id: 'realization-motivation-chain-reversed',
+    test: (s, t, r) =>
+      r.id === 'realization' &&
+      s.aspect === 'motivation' &&
+      t.aspect === 'motivation' &&
+      MOTIVATION_LADDER[s.id] !== undefined &&
+      MOTIVATION_LADDER[t.id] !== undefined &&
+      (MOTIVATION_LADDER[s.id] as number) > (MOTIVATION_LADDER[t.id] as number),
+    judge: (s, t) => ({
+      verdict: 'likely-wrong',
+      reason: {
+        ja: `向きが逆。動機層の中でも Realization は「具体 → 抽象」で、要件・制約 → 原則 → 成果 → 目標 の向きにしか引けない。${t.name} のほうが ${s.name} より具体側なので、今の線は「${s.name} が ${t.name} を生み出している」と読め、要件の追跡表を作ると根拠と結論が入れ替わる。`,
+        en: `The direction is inverted. Inside the motivation layer too, realization runs concrete to abstract — requirement or constraint, then principle, then outcome, then goal. ${t.name} is the more concrete of the two, so as drawn the line says ${s.name} produces ${t.name}, and any traceability matrix built from it swaps grounds and conclusion.`,
+      },
+      alternatives: [
+        {
+          ja: `${t.name} → (Realization) → ${s.name} に引き直す。「この具体が、この抽象を満たしている」と読めるようになる。`,
+          en: `Redraw as ${t.name} → (Realization) → ${s.name}, so it reads "this concrete item satisfies that abstract one".`,
+        },
+        {
+          ja: `${s.name} が ${t.name} を導いた・縛っているという意味なら Influence(正負を添える)。「${s.name} を分解すると ${t.name} になる」という意味なら Aggregation / Composition。`,
+          en: `If the point is that ${s.name} drove or constrained ${t.name}, use Influence with a qualifier. If ${t.name} is a part you get by decomposing ${s.name}, use Aggregation or Composition.`,
         },
       ],
     }),
@@ -1225,6 +1609,28 @@ const RULES: Rule[] = [
         {
           ja: `${t.name} が別の場所へ渡っていくことを言いたいなら、振る舞いどうしを Flow で結び、線のラベルに ${t.name} の名前を書く。`,
           en: `If the point is that ${t.name} travels somewhere, connect the behaviours with Flow and label the line with the name of ${t.name}.`,
+        },
+      ],
+    }),
+  },
+  {
+    // 受動要素は「役に立つ側」にもなれない。データが誰かを支えている形は描けない。
+    id: 'serving-from-passive',
+    test: (s, t, r) => r.id === 'serving' && s.aspect === 'passive',
+    judge: (s, t) => ({
+      verdict: 'likely-wrong',
+      reason: {
+        ja: `${s.name} は扱われる情報・モノであって、自分から誰かの役に立つ担い手や振る舞いではない。データを Serving の始点にすると、そのデータを保持し提供している実体(コンポーネントやサービス)が図から消える。`,
+        en: `${s.name} is information or a physical thing that gets handled; it does not serve anyone on its own. Starting a serving arrow at data hides whatever actually holds it and offers it up.`,
+      },
+      alternatives: [
+        {
+          ja: `${t.name} が ${s.name} を読み書きしているなら Access(${t.name} → ${s.name})。振る舞いから引くのが本来の形。`,
+          en: `If ${t.name} reads or writes ${s.name}, use Access drawn ${t.name} → ${s.name}; it belongs on the behaviour side.`,
+        },
+        {
+          ja: `「${s.name} を提供している」と言いたいなら、それを提供するサービスを 1 つ立て、そのサービス → (Serving) → ${t.name} にする。データそのものではなく提供の約束が依存先になる。`,
+          en: `To say ${s.name} is being provided, introduce the service that provides it and draw that service → (Serving) → ${t.name}, so the dependency lands on the promise rather than on the data.`,
         },
       ],
     }),
@@ -1304,8 +1710,8 @@ const RULES: Rule[] = [
             ]
           : [
               {
-                ja: `${s.name} → (Realization) → ${elementShort(s.layer === 'application' ? 'application-service' : 'technology-service')} → (Serving) → ${t.name} に組み替える。`,
-                en: `Restructure as ${s.name} → (Realization) → ${elementShort(s.layer === 'application' ? 'application-service' : 'technology-service')} → (Serving) → ${t.name}.`,
+                ja: `${s.name} → (Realization) → ${elementShort(serviceIdFor(s.layer) ?? 'application-service')} → (Serving) → ${t.name} に組み替える。`,
+                en: `Restructure as ${s.name} → (Realization) → ${elementShort(serviceIdFor(s.layer) ?? 'application-service')} → (Serving) → ${t.name}.`,
               },
             ],
     }),
@@ -1338,8 +1744,8 @@ const RULES: Rule[] = [
       return {
         verdict: 'questionable',
         reason: {
-          ja: `向き自体は成立するが、担い手(${s.name})から直接引いているため、この線は「${s.name} という実装に依存している」という主張になる。同じ層の中でこれをやると、片方を差し替えた瞬間に相手側の図も書き換えになる。`,
-          en: `The direction works, but drawing it from the performer (${s.name}) asserts dependency on that particular implementation. Inside one layer that means replacing either side forces a rewrite of the other side's picture too.`,
+          ja: `向き自体は成立するが、${text(ASPECT_LABEL[s.aspect], 'ja')}である ${s.name} から直接引いているため、この線は「${s.name} という実装に依存している」という主張になる。同じ層の中でこれをやると、片方を差し替えた瞬間に相手側の図も書き換えになる。`,
+          en: `The direction works, but drawing it from ${s.name} — ${text(ASPECT_LABEL[s.aspect], 'en')} rather than a service — asserts dependency on that particular implementation. Inside one layer that means replacing either side forces a rewrite of the other side's picture too.`,
         },
         alternatives: svcId
           ? [
@@ -1403,15 +1809,16 @@ const RULES: Rule[] = [
     }),
   },
   {
+    // 担い手 → 振る舞い。Assignment の本来の使い方で、Business Actor → Business Process もここ。
     id: 'assignment-active-to-behavior',
     test: (s, t, r) => r.id === 'assignment' && s.aspect === 'active' && t.aspect === 'behavior',
     judge: (s, t) => ({
-      verdict: s.id === 'business-actor' && t.layer === 'business' ? 'questionable' : 'ok',
+      verdict: 'ok',
       reason:
         s.id === 'business-actor' && t.layer === 'business'
           ? {
-              ja: `向きも組み合わせも正しいが、実在の組織(${s.name})を直接プロセスに割り当てると、組織変更のたびにモデルを直すことになる。役割を 1 枚挟むと、組織図の変更が図に波及しない。`,
-              en: `Direction and pairing are both fine, but assigning a real org unit (${s.name}) straight to the process means editing the model at every reorg. A role in between keeps org changes out of the picture.`,
+              ja: `「${s.name} が ${t.name} をやる」と読め、担い手と振る舞いを結ぶ正しい線。この組み合わせに Realization を使う誤りが多いが、正解はこの Assignment。運用上の助言として: 実在の組織(${s.name})を直接プロセスに割り当てると組織変更のたびにモデルを直すことになるので、役割(Business Role)を 1 枚挟んでおくと組織図の変更が図に波及しない。`,
+              en: `It reads as "${s.name} performs ${t.name}" — the correct line between a performer and behaviour. Realization is the common mistake here; Assignment is the right answer. One practical note: assigning a real org unit (${s.name}) straight to the process means editing the model at every reorg, so putting a Business Role in between keeps org changes out of the picture.`,
             }
           : {
               ja: `「${s.name} が ${t.name} をやる」と読め、担い手と振る舞いの結び方として正しい。誰が責任を持つかが図の上で確定する。`,
@@ -1454,6 +1861,72 @@ const RULES: Rule[] = [
       ],
     }),
   },
+  {
+    // ここまでで拾えなかった Assignment は端点の性質が合っていない。
+    // Assignment が繋げるのは 担い手 → 振る舞い / 担い手 → 担い手(枠を埋める)/ ノード → 配置物 の 3 形だけ。
+    id: 'assignment-invalid-endpoints',
+    test: (s, t, r) => r.id === 'assignment',
+    judge: (s, t) => {
+      const alternatives: Bilingual[] = [];
+      if (s.aspect === 'active' && t.aspect === 'active') {
+        // 担い手どうしだが「枠を埋める」形にならない組み合わせ(同じ種類・層をまたぐ)
+        alternatives.push({
+          ja: `${s.id === t.id ? `同じ種類(${s.name})どうし` : `層をまたぐ担い手どうし`}は「枠を埋める」関係にならない。分解なら Composition、束ねるだけなら Aggregation、一種なら Specialization。`,
+          en: `${s.id === t.id ? `Two elements of the same kind (${s.name})` : `Performers in different layers`} do not stand in a fills-this-position relation. Use Composition to decompose, Aggregation to bundle, Specialization for "a kind of".`,
+        });
+        alternatives.push({
+          ja: `どちらかが相手の仕事を担っていると言いたいなら、その仕事(振る舞い)を 1 つ立てて 担い手 → (Assignment) → 振る舞い にする。`,
+          en: `If one carries the other's work, give that work a behaviour element and draw performer → (Assignment) → behaviour.`,
+        });
+      } else if (t.aspect === 'passive') {
+        alternatives.push({
+          ja: `${t.name} を読み書きするという意味なら Access。始点は振る舞いにする(${s.aspect === 'active' ? `${s.name} → (Assignment) → 振る舞い → (Access) → ${t.name}` : `振る舞い → (Access) → ${t.name}`})。`,
+          en: `If the point is reading or writing ${t.name}, use Access from a behaviour${s.aspect === 'active' ? ` — ${s.name} → (Assignment) → behaviour → (Access) → ${t.name}` : ''}.`,
+        });
+        alternatives.push({
+          ja: `配置(ノードの上で動く)を表したいなら、始点をテクノロジー層の Node / Device にし、終点を Artifact にする。`,
+          en: `To express deployment, the source must be a technology-layer Node or Device and the target an Artifact.`,
+        });
+      } else if (t.aspect === 'motivation') {
+        alternatives.push({
+          ja: `${t.name} を満たしているという意味なら Realization(${s.name} → (Realization) → ${t.name})。効き方が不確実なら Influence。`,
+          en: `If ${s.name} satisfies ${t.name}, use Realization; if the effect is uncertain, use Influence.`,
+        });
+      } else if (t.aspect === 'milestone') {
+        alternatives.push({
+          ja: `プラトーに「その時点で存在するもの」をぶら下げるなら Aggregation(Plateau → 要素)。`,
+          en: `To hang what exists at a point in time off a plateau, use Aggregation drawn Plateau → element.`,
+        });
+      } else {
+        alternatives.push({
+          ja: `担い手を 1 つ立てて、その担い手から ${t.name} へ Assignment を引く。振る舞いを行うのは常に担い手。`,
+          en: `Introduce a performer and draw the assignment from it to ${t.name}. Behaviour is always carried out by a performer.`,
+        });
+      }
+      alternatives.push({
+        ja: `関係の意味が「支えている」なら Serving、「順序」なら Triggering、「受け渡し」なら Flow。Assignment はこのどれでもない。`,
+        en: `If the meaning is support use Serving, sequence use Triggering, hand-off use Flow. Assignment is none of those.`,
+      });
+      const tail: Bilingual =
+        s.aspect === 'active' && t.aspect === 'active'
+          ? {
+              ja: `今の指定は担い手どうしだが、「枠を埋める」と読めるのは同じ層の別種(例: Business Actor → Business Role)の場合に限られ、${s.name} → ${t.name} はそれに当たらない。`,
+              en: `Both ends here are performers, but "fills that position" only reads that way between different kinds inside one layer — Business Actor to Business Role, say — and ${s.name} to ${t.name} is not that.`,
+            }
+          : {
+              ja: `今の指定は ${text(ASPECT_LABEL[s.aspect], 'ja')}(${s.name})→ ${text(ASPECT_LABEL[t.aspect], 'ja')}(${t.name})で、このどれにも当てはまらない。`,
+              en: `What you have is ${text(ASPECT_LABEL[s.aspect], 'en')} (${s.name}) to ${text(ASPECT_LABEL[t.aspect], 'en')} (${t.name}), which is none of them.`,
+            };
+      return {
+        verdict: 'likely-wrong',
+        reason: {
+          ja: `Assignment が繋げるのは、担い手 → 振る舞い(これがやる)、担い手 → 担い手(この枠を埋める)、Node / Device → Artifact(この上で動く)の 3 形だけ。${tail.ja}`,
+          en: `Assignment covers exactly three shapes: performer to behaviour (this does that), performer to performer (this fills that position), and Node or Device to Artifact (this runs here). ${tail.en}`,
+        },
+        alternatives,
+      };
+    },
+  },
 
   // --- Access ---
   {
@@ -1484,8 +1957,8 @@ const RULES: Rule[] = [
       },
       alternatives: [
         {
-          ja: `詳細が要る段階になったら Application Function を 1 枚挟む: ${s.name} → (Assignment) → Application Function → (Access) → ${t.name}。`,
-          en: `When the detail is needed, insert an Application Function: ${s.name} → (Assignment) → Application Function → (Access) → ${t.name}.`,
+          ja: `詳細が要る段階になったら振る舞いを 1 枚挟む: ${s.name} → (Assignment) → ${elementShort(internalBehaviorIdFor(s.layer) ?? 'application-function')} → (Access) → ${t.name}。`,
+          en: `When the detail is needed, insert a behaviour: ${s.name} → (Assignment) → ${elementShort(internalBehaviorIdFor(s.layer) ?? 'application-function')} → (Access) → ${t.name}.`,
         },
         {
           ja: `全社の棚卸し段階なら、この省略形のまま進めてよい。全部を精緻にすると完成しない。`,
@@ -1514,6 +1987,43 @@ const RULES: Rule[] = [
         },
       ],
     }),
+  },
+  {
+    // 終点は受動要素だが、始点が振る舞いでも担い手でもない Access。
+    id: 'access-invalid-source',
+    test: (s, t, r) => r.id === 'access',
+    judge: (s, t) => {
+      const alternatives: Bilingual[] = [
+        {
+          ja: `${t.name} を実際に読み書きしている振る舞いを立て、その振る舞い → (Access) → ${t.name} に引き直す。`,
+          en: `Introduce the behaviour that really reads or writes ${t.name} and draw behaviour → (Access) → ${t.name}.`,
+        },
+      ];
+      if (s.aspect === 'passive') {
+        alternatives.push({
+          ja: `${s.name} と ${t.name} はどちらも扱われるもの。両者の対応(業務側の呼び名 ↔ システム上の実体)を言いたいなら、具体 → (Realization) → 抽象 に引き直す。`,
+          en: `${s.name} and ${t.name} are both things that get handled. If the point is the correspondence between them — business term versus stored item — redraw it concrete → (Realization) → abstract.`,
+        });
+      } else if (s.aspect === 'motivation') {
+        alternatives.push({
+          ja: `${s.name} は意図を表す要素なので、情報との関係は Access ではなく、満たす関係なら Realization、効き方が不確実なら Influence、それ以外は注記で表す。`,
+          en: `${s.name} states intent, so its link to information is not Access: use Realization where something satisfies it, Influence where the effect is uncertain, and a note otherwise.`,
+        });
+      } else {
+        alternatives.push({
+          ja: `${s.name} が時点や差分を表す要素なら、含む・含まないの関係は Aggregation で表す。情報の読み書きとは別の話。`,
+          en: `If ${s.name} stands for a point in time or a delta, express what it does or does not include with Aggregation. That is a different question from reading and writing information.`,
+        });
+      }
+      return {
+        verdict: 'likely-wrong',
+        reason: {
+          ja: `Access の始点になれるのは振る舞い(省略形として担い手)だけ。${text(ASPECT_LABEL[s.aspect], 'ja')}である ${s.name} は情報を読み書きする主体ではないので、この線は誰が ${t.name} を触っているのかを何も言っていない。`,
+          en: `Only behaviour — or, as a shorthand, a performer — can sit at the tail of an Access link. ${s.name} is ${text(ASPECT_LABEL[s.aspect], 'en')}, not something that reads or writes, so the line says nothing about who actually touches ${t.name}.`,
+        },
+        alternatives,
+      };
+    },
   },
 
   // --- Triggering / Flow ---
@@ -2217,8 +2727,8 @@ const PHASE_MAPPINGS: PhaseMapping[] = [
         en: 'Application Portfolio Catalog: do not hand-build the table. Tag each Application Component with owner, in-service year, sunset plan, and criticality, then export CSV from the model. A hand-built inventory diverges from reality inside a quarter.',
       },
       {
-        ja: 'Data Entity Catalog: Data Object と Business Object を Realization で結ぶ。1 対 1 にはならない(1 つの業務語が 3 システムに散っている、が普通)。むしろその散り方こそが、この図で見せたい問題。',
-        en: 'Data Entity Catalog: link Data Objects to Business Objects with Realization. They will not map one-to-one — one business term scattered across three systems is the normal case, and that scatter is precisely what the view is meant to expose.',
+        ja: 'Data Entity Catalog: Data Object → (Realization) → Business Object の向きで結ぶ(具体が抽象を実現する)。1 対 1 にはならない(1 つの業務語が 3 システムに散っている、が普通)。むしろその散り方こそが、この図で見せたい問題。',
+        en: 'Data Entity Catalog: draw it Data Object → (Realization) → Business Object — concrete realizes abstract. They will not map one-to-one — one business term scattered across three systems is the normal case, and that scatter is precisely what the view is meant to expose.',
       },
       {
         ja: 'ADD のデータ / アプリケーション節: 現行と目標を必ず同じ書式・同じ配置で描く。配置が違うと、人間の目は差分を見つけられない。左右に並べて初めてギャップの議論ができる。',
@@ -2286,8 +2796,8 @@ const PHASE_MAPPINGS: PhaseMapping[] = [
         en: 'Technology Standards Catalog: tag every System Software and Node as adopted, tolerated, or sunsetting, and colour accordingly. Export the table from the model. With those three colours, reviewing a new project reduces to "that colour is not available".',
       },
       {
-        ja: 'ADD のテクノロジー節: 可用性や性能の要件は Requirement として動機層に置き、対象ノードとは Realization で結ぶ。テクノロジー要素の中に「99.9%」と書き込むと、要件の一覧が作れなくなる。',
-        en: 'The technology section of the ADD: keep availability and performance requirements as Requirements in the motivation layer, linked to the nodes by Realization. Writing "99.9%" inside a technology element makes the requirement list unbuildable.',
+        ja: 'ADD のテクノロジー節: 可用性や性能の要件は Requirement として動機層に置き、Node → (Realization) → Requirement の向きで結ぶ(実装側が要件を満たす)。テクノロジー要素の中に「99.9%」と書き込むと、要件の一覧が作れなくなる。',
+        en: 'The technology section of the ADD: keep availability and performance requirements as Requirements in the motivation layer and draw Node → (Realization) → Requirement — the implementation satisfies the requirement. Writing "99.9%" inside a technology element makes the requirement list unbuildable.',
       },
       {
         ja: '障害影響の説明: Node → Artifact → Application Component → Application Service → Business Process の鎖を 1 本だけでも通しておくと、「このサーバが落ちると何が止まるか」に図で即答できる。全部通す必要はない。重要業務 1 本で十分。',
@@ -2904,8 +3414,8 @@ const VIEW_RECIPES: ViewRecipe[] = [
         en: 'One business term at the centre, one term per page. Cram several in and no line can be attributed to a term any more.',
       },
       {
-        ja: 'その周囲に、その用語を保持している Data Object を配置し、Realization で結ぶ。3 個以上あればそれ自体が発見。',
-        en: 'Ring it with the Data Objects that hold it, linked by Realization. Three or more is itself the finding.',
+        ja: 'その周囲に、その用語を保持している Data Object を配置し、Data Object → (Realization) → Business Object の向きで結ぶ。3 個以上あればそれ自体が発見。',
+        en: 'Ring it with the Data Objects that hold it, each drawn Data Object → (Realization) → Business Object. Three or more is itself the finding.',
       },
       {
         ja: 'Access の線を「作る / 更新する / 読むだけ」の 3 種で塗り分ける。作る側が 2 箇所以上ある時点で、データ品質の問題は構造の問題。',

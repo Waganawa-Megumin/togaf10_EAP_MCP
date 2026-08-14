@@ -103,8 +103,21 @@ function handleRequest(dash: RunningDashboard, req: IncomingMessage, res: Server
   res.end('Not Found');
 }
 
-/** OS 標準のコマンドでブラウザを開く(失敗しても致命的ではない) */
+/**
+ * OS 標準のコマンドでブラウザを開く(失敗しても致命的ではない)。
+ *
+ * `TOGAF_EAP_NO_BROWSER` が設定されていれば何もしない。
+ * CI・ヘッドレス環境のほか、短命なプロセスから呼ぶ場合に必要:
+ * サーバーはプロセス終了とともに落ちるため、開いたタブが
+ * 「アクセスできません」になって残るだけになる。
+ */
+export function browserSuppressed(): boolean {
+  const value = process.env.TOGAF_EAP_NO_BROWSER;
+  return typeof value === 'string' && value.trim() !== '' && value !== '0' && value.toLowerCase() !== 'false';
+}
+
 export function openBrowser(url: string): boolean {
+  if (browserSuppressed()) return false;
   const platform = process.platform;
   const command = platform === 'darwin' ? 'open' : platform === 'win32' ? 'start' : 'xdg-open';
   const args = platform === 'win32' ? ['', url] : [url];

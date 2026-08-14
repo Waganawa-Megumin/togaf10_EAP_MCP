@@ -22,7 +22,14 @@ import {
   type Lang,
 } from '../knowledge/index.js';
 import { loadEngagement } from '../engagement/store.js';
-import { summarizeProgress, type DeliverableProgress, type Engagement } from '../engagement/model.js';
+import {
+  summarizeProgress,
+  type Assessment,
+  type AssessmentFactor,
+  type AssessmentKind,
+  type DeliverableProgress,
+  type Engagement,
+} from '../engagement/model.js';
 import { DELIVERABLE_STATUS_LABEL, L, PHASE_STATUS_LABEL, RISK_LEVEL_LABEL } from '../dashboard/labels.js';
 import { errorResult, langSchema, msg, textResult } from './common.js';
 
@@ -57,6 +64,27 @@ const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 /** 日付として扱える期限だけを返す(自由記述の期限は計算に混ぜない) */
 function isoDue(due: string | undefined): string | undefined {
   return due && ISO_DATE.test(due) ? due : undefined;
+}
+
+/**
+ * 外部由来の文字列を 1 行に畳み、パイプを無害化する。
+ * 表セルにも本文にもそのまま置ける形にする。
+ */
+function cell(value: string | undefined): string {
+  if (!value) return '';
+  return value.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ').trim();
+}
+
+/** 小数第 1 位まで(整数はそのまま) */
+function round1(value: number): number {
+  return Math.round(value * 10) / 10;
+}
+
+/** 水準を視覚化する簡易バー */
+function bar(value: number, scale: number, width = 10): string {
+  const ratio = scale <= 0 ? 0 : Math.max(0, Math.min(1, value / scale));
+  const filled = Math.round(ratio * width);
+  return `${'█'.repeat(filled)}${'░'.repeat(Math.max(0, width - filled))}`;
 }
 
 /** 一覧を「, 」でつなぎ、多すぎる場合は「ほか N 件」で丸める */
@@ -500,6 +528,10 @@ const HL = {
   },
   nextStep: { ja: '次の一手', en: 'Next step' },
   auditedAt: { ja: '監査基準日', en: 'Audited as of' },
+  kind: { ja: '種別', en: 'Kind' },
+  achievement: { ja: '到達度', en: 'Progress to target' },
+  verdict: { ja: '判定', en: 'Verdict' },
+  assessedAt: { ja: '評価日', en: 'Assessed' },
 } satisfies Record<string, Bilingual>;
 
 /** ローカル日付を YYYY-MM-DD で返す */
@@ -533,9 +565,318 @@ function findRecordedDeliverable(
 
 const APPROVED_STATUSES = new Set(['approved', 'baselined']);
 
+// ---------------------------------------------------------------------------
+// 評価(変革準備度 / 成熟度)の読み取り
+//
+// 保存された評価を健全性チェックの側から読み直す。
+// 「評価したのに誰も見ない」状態を避けるため、判定の区切りは
+// assess_readiness / assess_maturity と同じ値を使う(両者の結論をずらさない)。
+// ---------------------------------------------------------------------------
+
+/** 評価 1 件を読み解いた結果 */
+interface AssessmentView {
+  assessment: Assessment;
+  scale: number;
+  avgCurrent: number;
+  avgTarget: number;
+  /** 目標に対する到達度 (%) */
+  achievement: number;
+  /** 最も水準の低い因子 */
+  weakest: AssessmentFactor;
+  /** ギャップが目安以上の因子(大きい順) */
+  wideGaps: AssessmentFactor[];
+  /** 変革リスクとして扱うギャップの目安 */
+  riskThreshold: number;
+  /** 評価日からの経過日数 */
+  ageDays: number;
+}
+
+/** 準備度の判定区分 */
+type ReadinessBand = 'ready' | 'conditional' | 'notReady';
+
+const READINESS_VERDICT: Record<ReadinessBand, Bilingual> = {
+  ready: { ja: '着手できる', en: 'ready to start' },
+  conditional: { ja: '条件付きで着手できる', en: 'can start with conditions' },
+  notReady: { ja: '着手前に手当てが必要', en: 'remedies needed before kickoff' },
+};
+
+const MATURITY_VERDICT: Record<ReadinessBand, Bilingual> = {
+  ready: { ja: 'ほぼ目標水準', en: 'close to target' },
+  conditional: { ja: '届く距離', en: 'within reach' },
+  notReady: { ja: '差が大きい', en: 'a wide gap' },
+};
+
+/** 到達度を判定区分に落とす(準備度と成熟度で境目が異なる) */
+function bandOf(kind: AssessmentKind, achievement: number): ReadinessBand {
+  const high = kind === 'readiness' ? 85 : 90;
+  if (achievement >= high) return 'ready';
+  if (achievement >= 60) return 'conditional';
+  return 'notReady';
+}
+
+/** 判定文(短い方)を返す */
+function verdictLabel(kind: AssessmentKind, achievement: number): Bilingual {
+  const band = bandOf(kind, achievement);
+  return kind === 'readiness' ? READINESS_VERDICT[band] : MATURITY_VERDICT[band];
+}
+
+/** 保存済みの評価 1 件を集計する(因子が無い/数値が壊れている記録は捨てる) */
+function viewAssessment(assessment: Assessment, base: Date): AssessmentView | undefined {
+  const factors = (assessment.factors ?? []).filter(
+    (f) => f && typeof f.name === 'string' && Number.isFinite(f.current) && Number.isFinite(f.target),
+  );
+  if (factors.length === 0) return undefined;
+  const scale = Number.isFinite(assessment.scale) && assessment.scale > 0 ? assessment.scale : 5;
+  const avgCurrent = factors.reduce((a, f) => a + f.current, 0) / factors.length;
+  const avgTarget = factors.reduce((a, f) => a + f.target, 0) / factors.length;
+  const achievement = avgTarget > 0 ? Math.round((avgCurrent / avgTarget) * 100) : 100;
+  const riskThreshold = Math.max(1, Math.round(scale * 0.3));
+  // 最も低い因子。同点なら目標との差が大きいほうを選ぶ(手当ての優先順位が高い側)
+  const weakest = factors.reduce((a, b) => {
+    if (b.current < a.current) return b;
+    if (b.current === a.current && b.target - b.current > a.target - a.current) return b;
+    return a;
+  });
+  const wideGaps = factors
+    .filter((f) => f.target - f.current >= riskThreshold)
+    .sort((a, b) => b.target - b.current - (a.target - a.current));
+  return {
+    assessment,
+    scale,
+    avgCurrent,
+    avgTarget,
+    achievement,
+    weakest,
+    wideGaps,
+    riskThreshold,
+    ageDays: daysSince(assessment.assessedAt || assessment.updatedAt, base),
+  };
+}
+
+/** 指定種別のうち最新の評価を読む */
+function latestAssessment(
+  engagement: Engagement,
+  kind: AssessmentKind,
+  base: Date,
+): AssessmentView | undefined {
+  const sorted = engagement.assessments
+    .filter((a) => a && a.kind === kind)
+    .slice()
+    .sort((a, b) => (a.assessedAt ?? '').localeCompare(b.assessedAt ?? ''));
+  for (let i = sorted.length - 1; i >= 0; i -= 1) {
+    const view = viewAssessment(sorted[i], base);
+    if (view) return view;
+  }
+  return undefined;
+}
+
+/** 実行段階に入っている兆候 / Signals that delivery has already started */
+interface ExecutionSignals {
+  /** 計画済み・進行中・完了の作業パッケージ数 */
+  activeWorkPackages: number;
+  /** 定義済みの移行状態数 */
+  transitions: number;
+  /** 進行中・完了になっている実行系フェーズ(E/F/G)のコード */
+  executingPhases: string[];
+  /** いずれかが当てはまるか */
+  any: boolean;
+}
+
+const EXECUTION_PHASE_IDS = new Set(['e', 'f', 'g']);
+
+function executionSignals(engagement: Engagement): ExecutionSignals {
+  const activeWorkPackages = engagement.workPackages.filter(
+    (w) => w.status === 'planned' || w.status === 'in_progress' || w.status === 'delivered',
+  ).length;
+  const transitions = engagement.transitions.length;
+  const executingPhases = engagement.phases
+    .filter(
+      (p) =>
+        EXECUTION_PHASE_IDS.has(p.phaseId) && (p.status === 'in_progress' || p.status === 'completed'),
+    )
+    .map((p) => findPhase(p.phaseId)?.code ?? p.phaseId);
+  return {
+    activeWorkPackages,
+    transitions,
+    executingPhases,
+    any: activeWorkPackages > 0 || transitions > 0 || executingPhases.length > 0,
+  };
+}
+
+/** 実行段階の兆候を読める文にする */
+function describeExecution(signals: ExecutionSignals, lang: 'ja' | 'en'): string {
+  const parts: string[] = [];
+  if (signals.activeWorkPackages > 0) {
+    parts.push(
+      lang === 'ja'
+        ? `作業パッケージ ${signals.activeWorkPackages} 件が計画済み以上`
+        : `${countEn(signals.activeWorkPackages, 'work package is', 'work packages are')} planned or further`,
+    );
+  }
+  if (signals.transitions > 0) {
+    parts.push(
+      lang === 'ja'
+        ? `移行状態 ${signals.transitions} 件が定義済み`
+        : `${countEn(signals.transitions, 'transition state is', 'transition states are')} defined`,
+    );
+  }
+  if (signals.executingPhases.length > 0) {
+    parts.push(
+      lang === 'ja'
+        ? `フェーズ ${signals.executingPhases.join(', ')} に入っている`
+        : `phase ${signals.executingPhases.join(', ')} has been entered`,
+    );
+  }
+  if (parts.length === 0) return lang === 'ja' ? '移行計画はまだ動いていない' : 'delivery has not started yet';
+  return parts.join(lang === 'ja' ? '、' : '; ');
+}
+
+/** 因子名がリスク台帳のどこかで言及されているか */
+function riskMentions(engagement: Engagement, factorName: string): boolean {
+  const needle = factorName.trim().toLowerCase();
+  if (needle.length < 2) return false;
+  return engagement.risks.some((r) =>
+    [r.title, r.description, r.mitigation]
+      .filter((v): v is string => typeof v === 'string')
+      .some((v) => v.toLowerCase().includes(needle)),
+  );
+}
+
+/** 評価に関する指摘を集める(この案件で着手して大丈夫かに答える部分) */
+function assessmentFindings(engagement: Engagement, base: Date): Finding[] {
+  const findings: Finding[] = [];
+  const readiness = latestAssessment(engagement, 'readiness', base);
+  const maturity = latestAssessment(engagement, 'maturity', base);
+  const exec = executionSignals(engagement);
+  const execJa = describeExecution(exec, 'ja');
+  const execEn = describeExecution(exec, 'en');
+
+  if (!readiness) {
+    findings.push({
+      severity: exec.any ? 'warning' : 'info',
+      code: 'readiness-not-assessed',
+      title: {
+        ja: '変革準備度が一度も評価されていない',
+        en: 'Transformation readiness has never been assessed',
+      },
+      detail: exec.any
+        ? {
+            ja: `${execJa}。それでも、この組織がその変革に耐えられるかを測った記録が無い。準備できていない組織に計画を渡すと、折れるのは計画ではなく組織のほう。`,
+            en: `${execEn}. Yet nothing records whether this organization can absorb the change. Hand a plan to an unready organization and it is the organization, not the plan, that breaks.`,
+          }
+        : {
+            ja: '着手可否を判断する材料が無い。準備度は感覚で語ると必ず楽観に寄るので、因子に分けて点を付けておく。',
+            en: 'There is nothing to judge go/no-go against. Readiness discussed by feel always drifts optimistic; score it factor by factor instead.',
+          },
+      recommendation: {
+        ja: '`assess_readiness` を引数なし(`{}`)で呼ぶと既定の因子セットとコピペできる入力例が出る。埋めて save=true で保存すると、以降この健全性チェックにも反映される。',
+        en: 'Call `assess_readiness` with no arguments (`{}`) to get the default factor set and a ready-to-paste example. Fill it in and save with save=true, and this health check will pick it up from then on.',
+      },
+    });
+  } else {
+    const band = bandOf('readiness', readiness.achievement);
+    const verdict = READINESS_VERDICT[band];
+    const scoreJa = `${readiness.achievement}%(平均 ${round1(readiness.avgCurrent)} / ${readiness.scale}、判定「${verdict.ja}」)`;
+    const scoreEn = `${readiness.achievement}% (average ${round1(readiness.avgCurrent)} of ${readiness.scale} — "${verdict.en}")`;
+    const weakJa = `${cell(readiness.weakest.name)}(${round1(readiness.weakest.current)} → ${round1(readiness.weakest.target)})`;
+    const weakEn = `${cell(readiness.weakest.name)} (${round1(readiness.weakest.current)} → ${round1(readiness.weakest.target)})`;
+
+    if (band !== 'ready' && exec.any) {
+      // 組み合わせの検出: 準備度が足りないのに移行計画だけ先に進んでいる
+      findings.push({
+        severity: band === 'notReady' ? 'critical' : 'warning',
+        code: 'readiness-below-plan',
+        title: {
+          ja: '変革準備度が足りないまま移行計画が進んでいる',
+          en: 'Delivery is moving ahead of transformation readiness',
+        },
+        detail: {
+          ja: `変革準備度は ${scoreJa}。一方で${execJa}。計画の側だけが先行している。最も低い因子は${weakJa}で、ここが動かないまま移行に入ると、止まるのは計画ではなく現場の運用。`,
+          en: `Readiness stands at ${scoreEn}, while ${execEn}. Only the plan has moved. The weakest factor is ${weakEn}; enter the transition without shifting it and what stalls is day-to-day operations, not the plan.`,
+        },
+        recommendation: {
+          ja: `着手可否をスポンサーと決め直す。${weakJa}への手当て(誰が何をいつまでに)を \`update_engagement\` のアクションとして登録し、それが決まるまで新規の作業パッケージを増やさない。準備度が短期に上がらないなら、\`add_transition_state\` で単独稼働できる区切りを作り、そこまでに範囲を絞る。`,
+          en: `Re-decide go/no-go with the sponsor. Record the remedy for ${weakEn} — who does what by when — as an action via \`update_engagement\`, and add no further work packages until it exists. If readiness cannot rise quickly, use \`add_transition_state\` to carve out a milestone that stands on its own and cut the scope back to it.`,
+        },
+      });
+    } else if (band !== 'ready') {
+      findings.push({
+        severity: band === 'notReady' ? 'warning' : 'info',
+        code: 'readiness-low',
+        title: { ja: '変革準備度が着手水準に届いていない', en: 'Transformation readiness is below the level to start' },
+        detail: {
+          ja: `変革準備度は ${scoreJa}。最も低い因子は${weakJa}。移行計画はまだ動いていないので、いま手当てを決めれば間に合う。`,
+          en: `Readiness stands at ${scoreEn}, weakest at ${weakEn}. Delivery has not started, so deciding the remedy now is still in time.`,
+        },
+        recommendation: {
+          ja: `準備度を上げる小さな取り組みを${weakJa}から始め、フェーズ E に入る前に \`assess_readiness\` で測り直す。上がらない因子については、その領域を今回のスコープから外すことを検討する。`,
+          en: `Start with one small effort against ${weakEn}, then re-measure with \`assess_readiness\` before entering Phase E. For factors that refuse to move, consider taking that area out of scope this time.`,
+        },
+      });
+    }
+
+    const unregistered = readiness.wideGaps.filter((f) => !riskMentions(engagement, f.name));
+    if (unregistered.length > 0) {
+      const names = unregistered.map((f) => cell(f.name));
+      findings.push({
+        severity: 'warning',
+        code: 'readiness-gap-not-tracked',
+        title: {
+          ja: '準備度で開いた因子がリスクとして起票されていない',
+          en: 'Wide readiness gaps are not on the risk register',
+        },
+        detail: {
+          ja: `ギャップ +${readiness.riskThreshold} 以上と評価された因子(${joinNames(names, 3, 'ja')})が、リスク台帳のどこにも出てこない。評価はされたが、追跡される形になっていない。`,
+          en: `Factors scored with a gap of +${readiness.riskThreshold} or more (${joinNames(names, 3, 'en')}) appear nowhere on the risk register. They were assessed but never made trackable.`,
+        },
+        recommendation: {
+          ja: `\`update_engagement\` に次を渡すとそのまま起票できる: \`{"risks":[{"title":"変革準備度: ${names[0]}","level":"high","status":"open","owner":"(氏名)","mitigation":"(誰が何をいつまでに)"}]}\``,
+          en: `Register them directly by passing this to \`update_engagement\`: \`{"risks":[{"title":"Readiness: ${names[0]}","level":"high","status":"open","owner":"(name)","mitigation":"(who does what by when)"}]}\``,
+        },
+      });
+    }
+
+    if (readiness.ageDays >= 180) {
+      findings.push({
+        severity: 'info',
+        code: 'readiness-stale',
+        title: { ja: '準備度の評価が古い', en: 'The readiness assessment has aged' },
+        detail: {
+          ja: `評価から ${readiness.ageDays} 日。準備度は体制変更・予算見直し・キーパーソンの異動で簡単に下がるので、この数値は現状の証拠にならない。`,
+          en: `${readiness.ageDays} days since it was taken. Readiness drops easily on a reorganization, a budget review, or one key person leaving, so this figure is no longer evidence of the present.`,
+        },
+        recommendation: {
+          ja: '同じ因子で `assess_readiness` を測り直し、前回との差を見る。下がった因子があれば、その原因が最優先の論点になる。',
+          en: 'Re-run `assess_readiness` on the same factors and look at the delta. Any factor that fell is the most important thing on the agenda.',
+        },
+      });
+    }
+  }
+
+  if (maturity && bandOf('maturity', maturity.achievement) === 'notReady') {
+    findings.push({
+      severity: 'info',
+      code: 'maturity-low',
+      title: { ja: 'EA 実践の成熟度が低い水準にある', en: 'EA practice maturity is at a low level' },
+      detail: {
+        ja: `成熟度は ${maturity.achievement}%(平均 ${round1(maturity.avgCurrent)} / ${maturity.scale})。この水準で重厚な手続きと大量の成果物を導入すると、書式だけが残って中身が形骸化する。`,
+        en: `Maturity is ${maturity.achievement}% (average ${round1(maturity.avgCurrent)} of ${maturity.scale}). Imposing heavy process and a long deliverable list at this level leaves the templates and loses the substance.`,
+      },
+      recommendation: {
+        ja: '`tailor_adm` で作る成果物を絞り、まず 1 案件で回して型を作る。成熟度は手続きを増やすことではなく、回した回数で上がる。',
+        en: 'Cut the deliverable list with `tailor_adm` and prove the shape on one engagement first. Maturity rises with repetitions, not with added procedure.',
+      },
+    });
+  }
+
+  return findings;
+}
+
 /** エンゲージメントを監査して指摘を集める */
 function collectFindings(engagement: Engagement, today: string, base: Date): Finding[] {
-  const findings: Finding[] = [];
+  // --- 評価(変革準備度 / 成熟度)---
+  // 「この状態で着手して大丈夫か」に最初に答えるため、先頭に置く。
+  const findings: Finding[] = assessmentFindings(engagement, base);
 
   // --- ステークホルダー ---
   const highInfluence = engagement.stakeholders.filter((s) => s.influence === 'high');
@@ -985,9 +1326,43 @@ function collectFindings(engagement: Engagement, today: string, base: Date): Fin
   return findings.sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]);
 }
 
+/**
+ * 横断ビュー用の要約 / A compact health summary for the cross-engagement view.
+ *
+ * 表示は `check_engagement_health` に任せ、ここでは件数と重大な指摘の見出しだけ返す。
+ * `review_all_engagements`(engagements.ts)から呼ばれる。
+ */
+export interface HealthSummary {
+  critical: number;
+  warning: number;
+  info: number;
+  /** 重大な指摘の見出し(重大度順) */
+  topCritical: Bilingual[];
+}
+
+export function summarizeHealth(engagement: Engagement, today: string, base: Date): HealthSummary {
+  const findings = collectFindings(engagement, today, base);
+  const critical = findings.filter((f) => f.severity === 'critical');
+  return {
+    critical: critical.length,
+    warning: findings.filter((f) => f.severity === 'warning').length,
+    info: findings.filter((f) => f.severity === 'info').length,
+    topCritical: critical.map((f) => f.title),
+  };
+}
+
 /** 良好な点を最大 3 件挙げる */
 function collectGoodPoints(engagement: Engagement, today: string, base: Date): Bilingual[] {
   const goods: Bilingual[] = [];
+
+  const readiness = latestAssessment(engagement, 'readiness', base);
+  if (readiness && bandOf('readiness', readiness.achievement) === 'ready') {
+    goods.push({
+      ja: `変革準備度 ${readiness.achievement}%(平均 ${round1(readiness.avgCurrent)} / ${readiness.scale})。着手できる水準にあり、判断の根拠が数値で残っている。`,
+      en: `Readiness is ${readiness.achievement}% (average ${round1(readiness.avgCurrent)} of ${readiness.scale}) — at a level where you can start, with the judgement backed by numbers.`,
+    });
+  }
+
   const highInfluence = engagement.stakeholders.filter((s) => s.influence === 'high');
   const highWithApproach = highInfluence.filter((s) => s.approach && s.approach.trim().length > 0);
   if (highWithApproach.length > 0) {
@@ -1059,12 +1434,65 @@ function collectGoodPoints(engagement: Engagement, today: string, base: Date): B
   return take(goods, 3);
 }
 
+/**
+ * 評価(準備度・成熟度)の現在地を 1 つの表にする。
+ * 指摘とは別に、数値そのものを必ず目に入れるための節。
+ */
+function renderAssessmentSnapshot(engagement: Engagement, base: Date, lang: Lang): string[] {
+  const out: string[] = [];
+  const rows: { kind: AssessmentKind; view: AssessmentView }[] = [];
+  for (const kind of ['readiness', 'maturity'] as AssessmentKind[]) {
+    const view = latestAssessment(engagement, kind, base);
+    if (view) rows.push({ kind, view });
+  }
+
+  out.push(`## ${text(L.assessments, lang)}`);
+  out.push('');
+  if (rows.length === 0) {
+    out.push(
+      msg(
+        '変革準備度も成熟度も未評価。着手して大丈夫かを判断する数値がまだ無い。`assess_readiness` を引数なし(`{}`)で呼ぶと、埋めるべき因子とコピペできる入力例が出る。',
+        'Neither readiness nor maturity has been assessed, so there is no number behind the go/no-go call. Call `assess_readiness` with no arguments (`{}`) to see the factors to fill in and a ready-to-paste example.',
+        lang,
+      ),
+    );
+    out.push('');
+    return out;
+  }
+
+  out.push(
+    `| ${text(HL.kind, lang)} | ${text(L.current, lang)} | ${text(L.target, lang)} | ${text(HL.achievement, lang)} | ${text(HL.verdict, lang)} | ${text(HL.assessedAt, lang)} |`,
+  );
+  out.push('| --- | --- | --- | ---: | --- | --- |');
+  for (const { kind, view } of rows) {
+    const kindLabel = text(kind === 'readiness' ? L.readiness : L.maturity, lang);
+    const verdict = text(verdictLabel(kind, view.achievement), lang);
+    out.push(
+      `| ${kindLabel} | \`${bar(view.avgCurrent, view.scale)}\` ${round1(view.avgCurrent)} / ${view.scale} | ${round1(view.avgTarget)} | ${view.achievement}% | ${verdict} | ${cell(view.assessment.assessedAt).slice(0, 10)} |`,
+    );
+  }
+  out.push('');
+  for (const { kind, view } of rows) {
+    const kindLabel = text(kind === 'readiness' ? L.readiness : L.maturity, lang);
+    out.push(
+      `- ${kindLabel} — ${msg(
+        `最も低い因子: ${cell(view.weakest.name)}(${round1(view.weakest.current)} → ${round1(view.weakest.target)})`,
+        `weakest factor: ${cell(view.weakest.name)} (${round1(view.weakest.current)} → ${round1(view.weakest.target)})`,
+        lang === 'both' ? 'ja' : lang,
+      )}`,
+    );
+  }
+  out.push('');
+  return out;
+}
+
 /** 健全性チェックの結果を Markdown に整形する */
 function renderHealth(
   engagement: Engagement,
   findings: Finding[],
   goods: Bilingual[],
   today: string,
+  base: Date,
   lang: Lang,
 ): string {
   const out: string[] = [];
@@ -1088,6 +1516,8 @@ function renderHealth(
     out.push(`| ${text(SEVERITY_LABEL[s], lang)} | ${counts[s]} |`);
   }
   out.push('');
+
+  out.push(...renderAssessmentSnapshot(engagement, base, lang));
 
   if (findings.length === 0) {
     out.push(`## ${text(L.findings, lang)}`);
@@ -1133,6 +1563,20 @@ function renderHealth(
   out.push(`## ${text(HL.nextStep, lang)}`);
   out.push('');
   const critical = counts.critical;
+  // 着手可否が論点になっているときは、そちらを先に言う
+  const readinessBlocker = findings.find(
+    (f) => f.code === 'readiness-below-plan' && f.severity === 'critical',
+  );
+  if (readinessBlocker) {
+    out.push(
+      msg(
+        '論点は個別の指摘ではなく着手可否そのもの。準備度の最低因子への手当てを決め、それが決まるまで新規の作業パッケージを増やさない。決めた内容は決定事項として記録する。',
+        'The question here is not any single finding but whether to start at all. Fix the remedy for the weakest readiness factor, add no new work packages until it exists, and record what you decide as a decision.',
+        lang,
+      ),
+    );
+    out.push('');
+  }
   if (critical > 0) {
     out.push(
       msg(
@@ -1310,9 +1754,20 @@ export function registerReviewTools(server: McpServer): void {
       }
       const today = asOf ?? localDateString(base);
 
-      const findings = collectFindings(engagement, today, base);
-      const goods = collectGoodPoints(engagement, today, base);
-      return textResult(renderHealth(engagement, findings, goods, today, l));
+      try {
+        const findings = collectFindings(engagement, today, base);
+        const goods = collectGoodPoints(engagement, today, base);
+        return textResult(renderHealth(engagement, findings, goods, today, base, l));
+      } catch (error) {
+        // 保存済み JSON は列挙値の検証を通っていないため、想定外の値でも落とさない
+        return errorResult(
+          msg(
+            `健全性チェックの生成に失敗しました: ${error instanceof Error ? error.message : String(error)}。\`get_engagement\` に format="json" を渡して保存内容を確認してください。`,
+            `Failed to build the health check: ${error instanceof Error ? error.message : String(error)}. Inspect the stored record by passing format="json" to \`get_engagement\`.`,
+            l,
+          ),
+        );
+      }
     },
   );
 }

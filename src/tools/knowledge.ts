@@ -24,7 +24,18 @@ import {
   renderPhase,
   renderTechnique,
 } from './format.js';
+import { loadEngagement } from '../engagement/store.js';
 import { errorResult, langSchema, msg, textResult } from './common.js';
+
+/**
+ * 表のセルに入れる見出し。`msg` は "both" のとき改行で連結するため、
+ * 表の中で使うと行が割れて Markdown の表が壊れる。ここでは 1 行に畳む。
+ */
+function inline(ja: string, en: string, lang: Lang): string {
+  if (lang === 'ja') return ja;
+  if (lang === 'en') return en;
+  return `${ja} / ${en}`;
+}
 
 const KIND_LABEL: Record<string, { ja: string; en: string }> = {
   phase: { ja: 'フェーズ', en: 'Phase' },
@@ -47,7 +58,7 @@ export function registerKnowledgeTools(server: McpServer): void {
       const lines: string[] = [];
       lines.push(msg('# ADM フェーズ一覧', '# ADM Phases', l));
       lines.push('');
-      lines.push(`| # | ID | ${msg('フェーズ', 'Phase', l)} | ${msg('要約', 'Summary', l)} |`);
+      lines.push(`| # | ID | ${inline('フェーズ', 'Phase', l)} | ${inline('要約', 'Summary', l)} |`);
       lines.push('| :-: | --- | --- | --- |');
       for (const p of ADM_PHASES) {
         lines.push(`| ${p.code} | \`${p.id}\` | ${text(p.name, l)} | ${text(p.tagline, l)} |`);
@@ -182,7 +193,7 @@ export function registerKnowledgeTools(server: McpServer): void {
       const lines: string[] = [];
       lines.push(msg('# 成果物一覧', '# Deliverables', l));
       lines.push('');
-      lines.push(`| ID | ${msg('成果物', 'Deliverable', l)} | ${msg('作成フェーズ', 'Created in', l)} |`);
+      lines.push(`| ID | ${inline('成果物', 'Deliverable', l)} | ${inline('作成フェーズ', 'Created in', l)} |`);
       lines.push('| --- | --- | :-: |');
       for (const d of items) {
         const codes = d.createdInPhaseIds
@@ -316,28 +327,95 @@ export function registerKnowledgeTools(server: McpServer): void {
     {
       title: 'Generate a deliverable template',
       description:
-        '成果物の Markdown 雛形(節構成 + 記入の手引き)を生成する。 / Generate a Markdown skeleton for a deliverable, with section headings and guidance.',
+        '成果物の Markdown 雛形(節構成 + 記入の手引き)を生成する。既定では現在の案件に登録済みのステークホルダー・リスク・作業パッケージ・移行状態を該当する節に流し込むので、他のツールの出力から転記する必要がない。 / Generate a Markdown skeleton for a deliverable. By default it pre-fills the sections with the stakeholders, risks, work packages, and transition states already recorded in the current engagement, so nothing has to be transcribed by hand.',
       inputSchema: {
-        deliverable: z.string().describe('成果物 ID または名称。例: "architecture-vision"'),
+        deliverable: z
+          .string()
+          .optional()
+          .describe('成果物 ID または名称。省略すると一覧を返す / Deliverable id or name; omit to list them'),
         engagementName: z
           .string()
           .optional()
-          .describe('見出しに入れる案件名 / Engagement name to put in the title'),
+          .describe(
+            '見出しに入れる案件名。省略時は現在の案件名 / Engagement name for the title; defaults to the current engagement',
+          ),
+        useEngagement: z
+          .boolean()
+          .default(true)
+          .describe(
+            '現在の案件の登録済みデータを雛形に流し込む(既定 true)。false で空の雛形 / Pre-fill from the current engagement (default true); false returns the blank skeleton',
+          ),
         lang: langSchema,
       },
     },
-    async ({ deliverable, engagementName, lang }) => {
-      const found = findDeliverable(deliverable);
-      if (!found) {
+    async ({ deliverable, engagementName, useEngagement, lang }) => {
+      const l = lang as Lang;
+      try {
+        if (!deliverable || deliverable.trim().length === 0) {
+          return textResult(templateUsage(l));
+        }
+        const found = findDeliverable(deliverable);
+        if (!found) {
+          const hits = searchKnowledge(deliverable, { kinds: ['deliverable'], limit: 5 });
+          // 当たりが無いときに先頭 5 件を「近い候補」と偽らない(見当違いの ID を勧めることになる)
+          const ids = hits.map((h) => `\`${h.id}\``).join(', ');
+          const leadJa = hits.length > 0 ? `近い候補: ${ids}` : '近い候補は見つかりませんでした。';
+          const leadEn = hits.length > 0 ? `Closest matches: ${ids}` : 'No close match was found.';
+          return errorResult(
+            msg(
+              `成果物「${deliverable}」が見つかりません。${leadJa}\n引数なしで呼ぶと全 ${DELIVERABLES.length} 件の一覧を返します。`,
+              `Deliverable "${deliverable}" not found. ${leadEn}\nCall it with no arguments to list all ${DELIVERABLES.length} deliverables.`,
+              l,
+            ),
+          );
+        }
+        // 案件が読めない・未作成でも雛形は返す(従来どおりの空の雛形になる)
+        const engagement = useEngagement === false ? null : loadEngagement();
+        const name = engagementName ?? engagement?.name;
+        return textResult(renderDeliverableTemplate(found, l, name, engagement));
+      } catch (err) {
         return errorResult(
           msg(
-            `成果物「${deliverable}」が見つかりません。`,
-            `Deliverable "${deliverable}" not found.`,
-            lang as Lang,
+            `雛形の生成に失敗しました: ${err instanceof Error ? err.message : String(err)}\n\`useEngagement: false\` を付けて呼ぶと、案件データを読まずに空の雛形を返します。`,
+            `Could not generate the template: ${err instanceof Error ? err.message : String(err)}\nCall it again with \`useEngagement: false\` to get the blank skeleton without reading engagement data.`,
+            l,
           ),
         );
       }
-      return textResult(renderDeliverableTemplate(found, lang as Lang, engagementName));
     },
   );
+}
+
+/** 引数なしで呼ばれたときの案内(何を入れればよいかとコピペできる JSON) */
+function templateUsage(lang: Lang): string {
+  const lines: string[] = [];
+  lines.push(msg('# 成果物の雛形を作る', '# Generate a deliverable template', lang));
+  lines.push('');
+  lines.push(
+    msg(
+      '`deliverable` に下の ID を 1 つ渡してください。既定では、現在の案件に登録済みのステークホルダー・リスク・作業パッケージ・移行状態が該当する節に自動で入ります。',
+      'Pass one of the ids below as `deliverable`. By default the stakeholders, risks, work packages, and transition states already recorded in the current engagement are dropped into the matching sections.',
+      lang,
+    ),
+  );
+  lines.push('');
+  lines.push('```json');
+  lines.push('{ "deliverable": "architecture-vision" }');
+  lines.push('```');
+  lines.push('');
+  lines.push(`| ID | ${inline('成果物', 'Deliverable', lang)} | ${inline('作成フェーズ', 'Created in', lang)} |`);
+  lines.push('| --- | --- | :-: |');
+  for (const d of DELIVERABLES) {
+    const codes = d.createdInPhaseIds.map((id) => findPhase(id)?.code ?? id).join(', ');
+    lines.push(`| \`${d.id}\` | ${text(d.name, lang)} | ${codes} |`);
+  }
+  lines.push('');
+  lines.push(
+    msg(
+      '案件データを入れずに空の雛形が欲しいときは `useEngagement: false` を付けてください。',
+      'Add `useEngagement: false` when you want the blank skeleton with no engagement data.',
+      lang,
+    ),
+  );
+  return lines.join('\n');
 }

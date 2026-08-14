@@ -6,3 +6,4 @@ dist/
 coverage/
 .dev-progress/
 .playwright-mcp/
+redteam-samples/

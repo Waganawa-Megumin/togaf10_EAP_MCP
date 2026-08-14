@@ -40,6 +40,16 @@ import type {
   RiskStatus,
   WorkPackageStatus,
 } from '../engagement/model.js';
+// 象限名はダッシュボード・分析ツールと同じ語彙を使う(訳語がぶれると別物に見える)
+import { L } from '../dashboard/labels.js';
+// 象限の判定ルールは `stakeholder_matrix` と 1 つを共有する。ここで再実装しない。
+import {
+  classifyStakeholderQuadrant,
+  STAKEHOLDER_BORDERLINE_MARK,
+  STAKEHOLDER_QUADRANT_LABEL,
+  STAKEHOLDER_QUADRANT_RULE,
+  type StakeholderQuadrant,
+} from './analysis.js';
 import { errorResult, langSchema, msg, textResult, type ToolResult } from './common.js';
 
 // ---------------------------------------------------------------------------
@@ -1548,7 +1558,45 @@ function registerRoadmapGantt(server: McpServer): void {
 // 6. ステークホルダーマトリクス / Stakeholder matrix
 // ---------------------------------------------------------------------------
 
-const LEVEL_VALUE: Record<InfluenceLevel, number> = { low: 0.15, medium: 0.5, high: 0.85 };
+/**
+ * 象限の判定は `stakeholder_matrix`(src/tools/analysis.ts)の**関数そのもの**を呼ぶ。
+ *
+ * 同じ人が表と図で別の象限に置かれると、対立の調整という一番間違えられない場面で
+ * 「どちらに従えばいいのか」が分からなくなる。判定・境界線の記号・象限名・ルールの
+ * 開示文は analysis.ts に 1 つだけ置き、ここでは複製しない(複製すると必ずずれる)。
+ */
+
+/** 象限名は analysis.ts / ダッシュボードと同じ語を使う(訳語がぶれると別物に見える) */
+const QUADRANT_NAME: Record<StakeholderQuadrant, Bilingual> = STAKEHOLDER_QUADRANT_LABEL;
+
+/**
+ * 関与方針が**未設定のときだけ**仮置きする一般論。
+ * 利用者が自分で書いた方針を、これで黙って上書きしてはならない。
+ */
+const QUADRANT_DEFAULT_APPROACH: Record<StakeholderQuadrant, Bilingual> = {
+  manageClosely: bi(
+    '意思決定の場に同席させ、成果物のレビュー者に指名する',
+    'Put them in the decision room and name them as a reviewer of the deliverables',
+  ),
+  keepSatisfied: bi(
+    '短い要約を定期的に届け、関心が低いうちに前提を握る',
+    'Send short summaries on a regular beat and lock in the premises while attention is low',
+  ),
+  keepInformed: bi(
+    '詳細の相談相手にし、決めたことは理由付きで返す',
+    'Use them as the detail sounding board and return decisions with the reasoning',
+  ),
+  monitor: bi(
+    '必要最小限の通知にとどめ、節目で位置付けを見直す',
+    'Minimal notification, and re-check their position at each milestone',
+  ),
+};
+
+/**
+ * quadrantChart 上の座標。medium は「高側」に分類されるので、境界の 0.5 ではなく
+ * 高側の帯に置く。ここを 0.5 にすると、表では高側なのに図では境界線上に見えてしまう。
+ */
+const LEVEL_VALUE: Record<InfluenceLevel, number> = { low: 0.16, medium: 0.64, high: 0.88 };
 
 const LEVEL_LABEL: Record<InfluenceLevel, Bilingual> = {
   low: bi('低', 'low'),
@@ -1573,28 +1621,52 @@ function clamp01(value: number): number {
   return Math.min(0.97, Math.max(0.03, value));
 }
 
+/** 重なり回避のずらしが象限をまたがないよう、高側/低側それぞれの帯の中に閉じ込める */
+function clampToBand(value: number, highSide: boolean): number {
+  return highSide ? Math.min(0.97, Math.max(0.55, value)) : Math.min(0.45, Math.max(0.03, value));
+}
+
 interface StakeholderPoint {
   name: string;
   role?: string;
   influence: InfluenceLevel;
   interest: InfluenceLevel;
   concerns: string[];
+  /** 利用者が書いた関与方針。空のときだけ一般論を仮置きする */
+  approach?: string;
+  quadrant: StakeholderQuadrant;
+  borderline: boolean;
+  /** 影響力を高側(中以上)と判定したか。図の座標をどちらの帯に置くかに使う */
+  influenceHighSide: boolean;
+  /** 関心度を高側(中以上)と判定したか */
+  interestHighSide: boolean;
 }
 
-/** 4 象限それぞれの関与方針 */
-function engagementApproach(s: StakeholderPoint): Bilingual {
-  const highInfluence = s.influence === 'high';
-  const highInterest = s.interest === 'high';
-  if (highInfluence && highInterest) {
-    return bi('密に巻き込む(意思決定の場に同席させる)', 'Manage closely — put them in the decision room');
-  }
-  if (highInfluence && !highInterest) {
-    return bi('満足を保つ(短い要約を定期的に届ける)', 'Keep satisfied — send short summaries on a regular beat');
-  }
-  if (!highInfluence && highInterest) {
-    return bi('情報を届け続ける(詳細の相談相手にする)', 'Keep informed — use them as the detail sounding board');
-  }
-  return bi('必要最小限の通知にとどめる', 'Monitor with minimal effort');
+/** 境界線上を示す記号。表・図・読み方ガイドで同じものを使う */
+const MARK = STAKEHOLDER_BORDERLINE_MARK;
+
+/**
+ * 表に出す関与方針。
+ * 利用者が書いたものがあれば**必ずその文言をそのまま**出す。
+ * この図をそのまま会議に出す人がいる以上、本人が決めた方針を一般論に置き換えてはならない。
+ */
+function approachCell(point: StakeholderPoint, lang: Lang): string {
+  const own = (point.approach ?? '').trim();
+  // 書いてもらった文言は削らない。600 は表を壊さないための保険で、
+  // 実際の 1〜2 文の方針には届かない長さ(超えたときは `…` が付いて分かる)。
+  if (own.length > 0) return md(own, '-', 600);
+  const fallback = QUADRANT_DEFAULT_APPROACH[point.quadrant];
+  return md(
+    text(
+      bi(
+        `${fallback.ja}(未設定のため一般的な方針)`,
+        `${fallback.en} (generic — no approach recorded)`,
+      ),
+      lang,
+    ),
+    '-',
+    300,
+  );
 }
 
 function registerStakeholderMatrix(server: McpServer): void {
@@ -1603,7 +1675,7 @@ function registerStakeholderMatrix(server: McpServer): void {
     {
       title: 'Draw the stakeholder influence/interest matrix',
       description:
-        'ステークホルダーを影響力 × 関心度の 4 象限に Mermaid の quadrantChart で配置する。エンゲージメントに登録されていればそれを使い、無ければ引数から描く。象限ごとの関与方針と、最も危険な象限(影響力が高く関心が低い層)への手当てを添える。 / Plot stakeholders on an influence-versus-interest quadrant chart in Mermaid, using the engagement data when it exists and the arguments otherwise, with the engagement approach for each quadrant and specific advice for the most dangerous one: high influence, low interest.',
+        'ステークホルダーを影響力 × 関心度の 4 象限に Mermaid の quadrantChart で配置する。象限の判定は `stakeholder_matrix` と同一(中以上を高側に寄せ、境界線上には `*`)。登録済みの関与方針(approach)はその文言のまま表示し、未設定の人だけ一般的な方針を仮置きする。 / Plot stakeholders on an influence-versus-interest quadrant chart in Mermaid. Quadrants are decided by exactly the same rule as `stakeholder_matrix` (medium counts as the high side; boundary cases are marked `*`). Any engagement approach you recorded is shown verbatim; only people without one get a generic placeholder.',
       inputSchema: {
         stakeholders: z
           .array(
@@ -1612,6 +1684,10 @@ function registerStakeholderMatrix(server: McpServer): void {
               role: z.string().optional().describe('役割 / Role'),
               influence: z.enum(['low', 'medium', 'high']).describe('影響力 / Influence'),
               interest: z.enum(['low', 'medium', 'high']).describe('関心度 / Interest'),
+              approach: z
+                .string()
+                .optional()
+                .describe('関与方針(書けばそのまま表示する) / Engagement approach; shown verbatim when given'),
             }),
           )
           .default([])
@@ -1625,27 +1701,48 @@ function registerStakeholderMatrix(server: McpServer): void {
         const engagement = tryLoadEngagement();
         const fromEngagement = engagement !== null && engagement.stakeholders.length > 0;
         const unknownValues: string[] = [];
+        // 保存ファイルは手で編集できるので、文字列であることを確かめてから使う
+        const str = (raw: unknown): string | undefined =>
+          typeof raw === 'string' && raw.trim().length > 0 ? raw : undefined;
+        const toPoint = (
+          name: string,
+          role: string | undefined,
+          influence: InfluenceLevel,
+          interest: InfluenceLevel,
+          concerns: string[],
+          approach: string | undefined,
+        ): StakeholderPoint => {
+          // 判定は表ツールと同じ関数。ここで分岐を書き直すと必ずずれる。
+          const verdict = classifyStakeholderQuadrant({ name, influence, interest, approach });
+          return {
+            name,
+            role,
+            influence,
+            interest,
+            concerns,
+            approach,
+            quadrant: verdict.quadrant,
+            borderline: verdict.borderline,
+            influenceHighSide: verdict.influenceHighSide,
+            interestHighSide: verdict.interestHighSide,
+          };
+        };
         const points: StakeholderPoint[] = fromEngagement && engagement
           ? engagement.stakeholders.map((s) => {
               const influence = oneOf(INFLUENCE_LEVELS, s.influence, 'medium');
               const interest = oneOf(INFLUENCE_LEVELS, s.interest, 'medium');
               if (influence !== s.influence) unknownValues.push(String(s.influence));
               if (interest !== s.interest) unknownValues.push(String(s.interest));
-              return {
-                name: s.name,
-                role: s.role,
+              return toPoint(
+                str(s.name) ?? '',
+                str(s.role),
                 influence,
                 interest,
-                concerns: Array.isArray(s.concerns) ? s.concerns : [],
-              };
+                Array.isArray(s.concerns) ? s.concerns.filter((c) => typeof c === 'string') : [],
+                str(s.approach),
+              );
             })
-          : stakeholders.map((s) => ({
-              name: s.name,
-              role: s.role,
-              influence: s.influence,
-              interest: s.interest,
-              concerns: [],
-            }));
+          : stakeholders.map((s) => toPoint(s.name, s.role, s.influence, s.interest, [], str(s.approach)));
 
         if (points.length === 0) {
           return needInput(
@@ -1664,7 +1761,7 @@ function registerStakeholderMatrix(server: McpServer): void {
             ],
             `{
   "stakeholders": [
-    { "name": "CFO", "influence": "high", "interest": "low" },
+    { "name": "CFO", "influence": "high", "interest": "low", "approach": "投資委員会の 1 週間前に A4 一枚で回収見込みを渡す" },
     { "name": "営業本部長", "influence": "high", "interest": "high" },
     { "name": "現場リーダー", "role": "受注業務", "influence": "low", "interest": "high" }
   ]
@@ -1682,33 +1779,53 @@ function registerStakeholderMatrix(server: McpServer): void {
           occupancy.set(key, seen + 1);
           const jitter = JITTER[seen % JITTER.length];
           const extra = Math.floor(seen / JITTER.length) * 0.02;
-          const x = clamp01(LEVEL_VALUE[point.interest] + jitter[0] + extra);
-          const y = clamp01(LEVEL_VALUE[point.influence] + jitter[1] + extra);
-          let name = plainOf(point.name, '(名称未設定)', 24);
+          // ずらしても象限は越えさせない(表の象限と図の位置が食い違うと信用を失う)
+          const x = clampToBand(LEVEL_VALUE[point.interest] + jitter[0] + extra, point.interestHighSide);
+          const y = clampToBand(LEVEL_VALUE[point.influence] + jitter[1] + extra, point.influenceHighSide);
+          // 境界線上の人は図の上でも `*` を付けて、判定の根拠を隠さない
+          const mark = point.borderline ? MARK : '';
+          let name = `${plainOf(point.name, '(名称未設定)', 24)}${mark}`;
           // 同名が並ぶと Mermaid 側で点が上書きされるので連番を付ける
           let suffix = 2;
           while (usedNames.has(name)) {
-            name = `${plainOf(point.name, '(名称未設定)', 20)} ${suffix}`;
+            name = `${plainOf(point.name, '(名称未設定)', 20)}${mark} ${suffix}`;
             suffix += 1;
           }
           usedNames.add(name);
           pointLines.push(`    "${name}": [${x.toFixed(2)}, ${y.toFixed(2)}]`);
         }
 
+        // 象限名は analysis.ts / ダッシュボードと同じ語を使う
+        const quadrantCaption = (q: StakeholderQuadrant, fallback: string): string =>
+          plainOf(text(QUADRANT_NAME[q], l), fallback, 36);
         const lines: string[] = [
           'quadrantChart',
           `    title ${plainOf(line('ステークホルダー 影響力 x 関心度', 'Stakeholders: influence x interest', l), 'Stakeholders', 60)}`,
           `    x-axis ${plainOf(line('関心が低い', 'Low interest', l), 'Low interest', 36)} --> ${plainOf(line('関心が高い', 'High interest', l), 'High interest', 36)}`,
           `    y-axis ${plainOf(line('影響力が小さい', 'Low influence', l), 'Low influence', 36)} --> ${plainOf(line('影響力が大きい', 'High influence', l), 'High influence', 36)}`,
-          `    quadrant-1 ${plainOf(line('密に巻き込む', 'Manage closely', l), 'Manage closely', 36)}`,
-          `    quadrant-2 ${plainOf(line('満足を保つ', 'Keep satisfied', l), 'Keep satisfied', 36)}`,
-          `    quadrant-3 ${plainOf(line('必要最小限', 'Monitor', l), 'Monitor', 36)}`,
-          `    quadrant-4 ${plainOf(line('情報を届ける', 'Keep informed', l), 'Keep informed', 36)}`,
+          `    quadrant-1 ${quadrantCaption('manageClosely', 'Manage closely')}`,
+          `    quadrant-2 ${quadrantCaption('keepSatisfied', 'Keep satisfied')}`,
+          `    quadrant-3 ${quadrantCaption('monitor', 'Monitor')}`,
+          `    quadrant-4 ${quadrantCaption('keepInformed', 'Keep informed')}`,
           ...pointLines,
         ];
 
-        const dangerous = points.filter((p) => p.influence === 'high' && p.interest !== 'high');
-        const champions = points.filter((p) => p.influence === 'high' && p.interest === 'high');
+        const byQuadrant: Record<StakeholderQuadrant, StakeholderPoint[]> = {
+          manageClosely: [],
+          keepSatisfied: [],
+          keepInformed: [],
+          monitor: [],
+        };
+        for (const point of points) byQuadrant[point.quadrant].push(point);
+        const dangerous = byQuadrant.keepSatisfied;
+        const champions = byQuadrant.manageClosely;
+        const named = (list: StakeholderPoint[], lang: Lang): string =>
+          list
+            .map((p) => `${md(p.name, lang === 'en' ? '(unnamed)' : '(名称未設定)', 24)}${p.borderline ? MARK : ''}`)
+            .join(lang === 'en' ? ', ' : '、');
+        const withOwnApproach = points.filter((p) => (p.approach ?? '').trim().length > 0);
+        const withoutApproach = points.filter((p) => (p.approach ?? '').trim().length === 0);
+        const borderlineNames = points.filter((p) => p.borderline);
 
         const out: string[] = [];
         out.push(`# ${line('ステークホルダーマトリクス', 'Stakeholder matrix', l)}`);
@@ -1729,17 +1846,48 @@ function registerStakeholderMatrix(server: McpServer): void {
         out.push(...unknownValueNote(unknownValues, l));
         out.push(mermaid(lines));
         out.push('');
+
+        // 判定ルールの開示文は analysis.ts に 1 つだけ置き、表と図で一字一句同じものを出す。
         out.push(
-          `| ${line('氏名・役職', 'Name', l)} | ${line('影響力', 'Influence', l)} | ${line('関心度', 'Interest', l)} | ${line('関与方針', 'Approach', l)} |`,
+          msg(
+            `この図は \`stakeholder_matrix\` と同じ判定関数を使っています。${STAKEHOLDER_QUADRANT_RULE.ja}`,
+            `This chart uses the same classification function as \`stakeholder_matrix\`. ${STAKEHOLDER_QUADRANT_RULE.en}`,
+            l,
+          ),
         );
-        out.push('| --- | --- | --- | --- |');
+        out.push('');
+        out.push(
+          `| ${line('氏名・役職', 'Name', l)} | ${line('影響力', 'Influence', l)} | ${line('関心度', 'Interest', l)} | ${line('象限', 'Quadrant', l)} | ${line('関与方針', 'Approach', l)} |`,
+        );
+        out.push('| --- | :-: | :-: | --- | --- |');
         for (const point of points) {
           const role = point.role ? ` (${md(point.role, '-', 30)})` : '';
+          const mark = point.borderline ? MARK : '';
           out.push(
-            `| ${md(point.name, '(名称未設定)', 40)}${role} | ${text(LEVEL_LABEL[point.influence], l)} | ${text(LEVEL_LABEL[point.interest], l)} | ${text(engagementApproach(point), l)} |`,
+            `| ${md(point.name, '(名称未設定)', 40)}${mark}${role} | ${text(LEVEL_LABEL[point.influence], l)} | ${text(LEVEL_LABEL[point.interest], l)} | ${text(QUADRANT_NAME[point.quadrant], l)} | ${approachCell(point, l)} |`,
           );
         }
         out.push('');
+
+        // 「自分が書いた方針が図では一般論に置き換わっていた」を起こさないための明示
+        if (withOwnApproach.length > 0) {
+          out.push(
+            msg(
+              `関与方針は登録済みの文言をそのまま出しています(${withOwnApproach.length} / ${points.length} 名)。${
+                withoutApproach.length > 0
+                  ? `未設定の ${withoutApproach.length} 名だけ、象限から導いた一般的な方針を仮置きしています(「(未設定のため一般的な方針)」と付記)。`
+                  : '全員分が自分の言葉で埋まっているので、この表はそのまま配れます。'
+              }`,
+              `The approach column shows your recorded wording verbatim (${withOwnApproach.length} of ${points.length}). ${
+                withoutApproach.length > 0
+                  ? `Only the ${withoutApproach.length} without one get a generic placeholder derived from their quadrant, marked "(generic — no approach recorded)".`
+                  : 'Everyone is covered in your own words, so this table is ready to hand out as it is.'
+              }`,
+              l,
+            ),
+          );
+          out.push('');
+        }
 
         const withConcerns = points.filter((p) => p.concerns.length > 0);
         if (withConcerns.length > 0) {
@@ -1752,35 +1900,56 @@ function registerStakeholderMatrix(server: McpServer): void {
         }
 
         const guideItems: Bilingual[] = [];
+        guideItems.push(
+          bi(
+            `内訳: ${L.manageClosely.ja} ${byQuadrant.manageClosely.length} / ${L.keepSatisfied.ja} ${byQuadrant.keepSatisfied.length} / ${L.keepInformed.ja} ${byQuadrant.keepInformed.length} / ${L.monitor.ja} ${byQuadrant.monitor.length}(計 ${points.length} 名)。${
+              borderlineNames.length > 0
+                ? `うち ${borderlineNames.length} 名(${named(borderlineNames, 'ja')})は中を含む境界線上。`
+                : ''
+            }`,
+            `Breakdown: ${L.manageClosely.en} ${byQuadrant.manageClosely.length} / ${L.keepSatisfied.en} ${byQuadrant.keepSatisfied.length} / ${L.keepInformed.en} ${byQuadrant.keepInformed.length} / ${L.monitor.en} ${byQuadrant.monitor.length} (${points.length} total).${
+              borderlineNames.length > 0
+                ? ` ${borderlineNames.length} of them (${named(borderlineNames, 'en')}) sit on the boundary because of a medium rating.`
+                : ''
+            }`,
+          ),
+        );
         if (dangerous.length > 0) {
           guideItems.push(
             bi(
-              `左上(影響力が高く関心が低い)に ${dangerous.length} 名: ${dangerous.map((p) => md(p.name, '(名称未設定)', 24)).join('、')}。この層が最も危険で、終盤に一言で計画をひっくり返す。今のうちに 1 枚もので合意を取っておく。`,
-              `${dangerous.length} ${plural(dangerous.length, 'person sits', 'people sit')} top-left, with high influence and low interest: ${dangerous.map((p) => md(p.name, '(unnamed)', 24)).join(', ')}. This is the dangerous quadrant — they overturn the plan late, in one sentence. Get their agreement now, on a single page.`,
+              `左上・${L.keepSatisfied.ja}(影響力は高いが関心が低い)に ${dangerous.length} 名: ${named(dangerous, 'ja')}。この層が最も危険で、終盤に一言で計画をひっくり返す。今のうちに 1 枚もので合意を取っておく。`,
+              `${dangerous.length} ${plural(dangerous.length, 'person sits', 'people sit')} top-left in "${L.keepSatisfied.en}" — high influence, low interest: ${named(dangerous, 'en')}. This is the dangerous quadrant — they overturn the plan late, in one sentence. Get their agreement now, on a single page.`,
             ),
           );
         }
         if (champions.length > 0) {
           guideItems.push(
             bi(
-              `右上の ${champions.map((p) => md(p.name, '(名称未設定)', 24)).join('、')} は推進の中核。この人たちの言葉で書かれた懸念事項がビューポイントの出発点になる。`,
-              `Top-right — ${champions.map((p) => md(p.name, '(unnamed)', 24)).join(', ')} — ${plural(champions.length, 'is the driver', 'are the drivers')}. Their concerns, in their own words, are the starting point for your viewpoints.`,
+              `右上・${L.manageClosely.ja}の ${named(champions, 'ja')} は推進の中核。この人たちの言葉で書かれた懸念事項がビューポイントの出発点になる。`,
+              `Top-right in "${L.manageClosely.en}" — ${named(champions, 'en')} — ${plural(champions.length, 'is the driver', 'are the drivers')}. Their concerns, in their own words, are the starting point for your viewpoints.`,
             ),
           );
         }
-        guideItems.push(
+        if (withoutApproach.length > 0) {
+          guideItems.push(
+            bi(
+              `関与方針が未設定: ${named(withoutApproach, 'ja')}(${withoutApproach.length} 名)。この人たちの行だけ一般論が入っている。「誰が・どの頻度で・何を渡すか」を 1 行で決めて \`update_engagement\` の stakeholders に approach として書き戻すと、次からこの図がそのまま配布物になる。`,
+              `No approach recorded: ${named(withoutApproach, 'en')} (${withoutApproach.length}). Those rows are the only generic ones. Decide who contacts them, how often, and with what — one line each — and write it back as \`approach\` via \`update_engagement\`; after that this chart is handout-ready as it stands.`,
+            ),
+          );
+        }
+        // 案件依存の指摘は 4 件までに絞り、共通の「次の一手」は必ず残す
+        const closingItems: Bilingual[] = [
           bi(
             '象限は固定ではない。関心は説明の頻度と内容で動かせるので、右方向に動かしたい人を 2 名決めて働きかける。',
             'The quadrants are not fixed. Interest moves with how often and how well you explain, so pick two people you want to move to the right and work on them.',
           ),
-        );
-        guideItems.push(
           bi(
             '次の一手: 各ステークホルダーの懸念事項を 1 つずつ言葉で書き取り、それに応えるビューを成果物に含める。懸念が書けない相手は、まだ会話が足りていない。',
             'Next: write down one concern per stakeholder in their own words, and include a view that answers it. Anyone whose concern you cannot write down has not been talked to enough.',
           ),
-        );
-        out.push(readingGuide(l, guideItems.slice(0, 4)));
+        ];
+        out.push(readingGuide(l, [...guideItems.slice(0, 4), ...closingItems]));
 
         return textResult(out.join('\n'));
       });

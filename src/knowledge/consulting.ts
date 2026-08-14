@@ -3,18 +3,35 @@
  *
  * 状況の自由記述に含まれるキーワードから、着目すべきフェーズ・技法・成果物と
  * 推奨アクション・確認質問を導く。独自の実務知見に基づくルール。
+ *
+ * キーワードは 2 段階に分ける。
+ * - `strongKeywords`: そのルールの主題そのものを指す語。1 語当たれば見立てとして採用してよい。
+ * - `keywords`: 周辺語。複数の状況に出てくる汎用語や製品名(固有名詞)を置く。
+ *   これ単独の一致は「弱い証拠」であり、他に強い一致が無いときだけ低い確信度で扱う。
+ *   例: 「ベンダー」「調達」「統合」「削減」「監査」「salesforce」。
+ *   1 語だけ当たったからといってルール一式(アクション 5 件・質問 4 件)を出さない。
  */
 
-import type { ConsultRule } from './types.js';
+import type { Bilingual, ConsultRule } from './types.js';
 
-export const CONSULT_RULES: ConsultRule[] = [
+/**
+ * 強弱を区別できるコンサルティングルール。
+ * `ConsultRule` を拡張しているだけなので、従来通り `ConsultRule` として扱える。
+ */
+export interface WeightedConsultRule extends ConsultRule {
+  /** 主題そのものを指す強いキーワード / Keywords that name the rule's subject itself */
+  strongKeywords?: string[];
+}
+
+export const CONSULT_RULES: WeightedConsultRule[] = [
   {
     id: 'legacy-modernization',
     name: { ja: 'レガシーシステムの刷新', en: 'Legacy Modernization' },
-    keywords: [
-      'レガシー', '刷新', '基幹系', '基幹システム', '老朽', 'メインフレーム', 'リプレース', '再構築', '塩漬け', '2025年の崖', 'cobol',
-      'legacy', 'modernization', 'modernisation', 'mainframe', 'replatform', 'rewrite', 'end of life', 'eol',
+    strongKeywords: [
+      'レガシー', '刷新', '基幹系', '基幹システム', '老朽', 'メインフレーム', 'リプレース', '塩漬け', '2025年の崖', 'cobol',
+      'legacy', 'modernization', 'modernisation', 'mainframe', 'replatform',
     ],
+    keywords: ['再構築', 'rewrite', 'end of life', 'eol'],
     diagnosis: {
       ja: 'レガシー刷新は技術課題に見えて、実際は「現行仕様が誰にも分からない」「業務が現行システムの形に固定されている」という業務・情報の問題であることがほとんど。技術選定から入ると必ず失敗するため、ビジネスアーキテクチャとデータの正本整理から入る。',
       en: 'Legacy renewal looks technical but is almost always a business and information problem: nobody knows the current specification, and the operating model has been shaped by the old system. Starting from technology selection reliably fails; start from business architecture and settling the systems of record.',
@@ -39,10 +56,12 @@ export const CONSULT_RULES: ConsultRule[] = [
   {
     id: 'ea-practice-launch',
     name: { ja: 'EA / DX の立ち上げ', en: 'Launching an EA or DX Practice' },
-    keywords: [
-      'dx', '立ち上げ', '導入したい', 'ea を始め', 'ea をはじめ', 'これから', '新設', '組織を作', '体制を作', '何から',
-      'start', 'launch', 'set up', 'establish', 'kick off', 'kickoff', 'greenfield', 'first time', 'digital transformation',
+    strongKeywords: [
+      '立ち上げ', 'ea を始め', 'ea をはじめ', '新設', '組織を作', '体制を作',
+      'launch', 'establish', 'kick off', 'kickoff', 'greenfield', 'digital transformation',
     ],
+    // 「dx」「何から」は多くの相談に現れる汎用語なので周辺語に置く
+    keywords: ['dx', '導入したい', 'これから', '何から', 'start', 'set up', 'first time'],
     diagnosis: {
       ja: '立ち上げ期の失敗要因はほぼ 2 つ — 「成果物を作りすぎる」ことと「決定権のない体制で始める」こと。予備フェーズで範囲・原則・意思決定権限を絞り込み、最初のサイクルは小さな対象で 1 周回して実績を作るのが定石。',
       en: 'Launches fail for two reasons almost every time: producing too many deliverables, and starting without decision rights. Narrow scope, principles, and decision authority in the Preliminary Phase, then run one full cycle on something small to build a track record.',
@@ -67,10 +86,12 @@ export const CONSULT_RULES: ConsultRule[] = [
   {
     id: 'cloud-migration',
     name: { ja: 'クラウド移行', en: 'Cloud Migration' },
-    keywords: [
-      'クラウド', 'aws', 'azure', 'gcp', 'saas', 'iaas', 'paas', 'オンプレ', 'リフトアンドシフト', 'リフト&シフト', 'コンテナ', 'kubernetes',
+    strongKeywords: [
+      'クラウド', 'オンプレ', 'リフトアンドシフト', 'リフト&シフト', 'iaas', 'paas',
       'cloud', 'migration to cloud', 'lift and shift', 'rehost', 'on-premise', 'on-prem', 'hybrid cloud',
     ],
+    // 製品・サービス名の単独出現は弱い証拠として扱う
+    keywords: ['aws', 'azure', 'gcp', 'saas', 'コンテナ', 'kubernetes'],
     diagnosis: {
       ja: 'クラウド移行の本質的な論点は技術ではなく、① データ所在地・規制、② 運用モデルの変更、③ コスト構造の変化(資産から経費へ)の 3 点。フェーズ D 単独の話に見えるが、運用組織とコスト管理が変わる以上、B(組織・プロセス)にも必ず波及する。',
       en: 'The real issues in a cloud migration are not technical: data residency and regulation, a changed operating model, and a changed cost structure (capex to opex). It looks like a Phase D topic, but because operations and cost management change, it always reaches back into Phase B.',
@@ -95,10 +116,11 @@ export const CONSULT_RULES: ConsultRule[] = [
   {
     id: 'stakeholder-conflict',
     name: { ja: 'ステークホルダーの対立・合意形成', en: 'Stakeholder Conflict and Alignment' },
-    keywords: [
-      '対立', '揉め', 'もめ', '合意', '調整', '反対', '説得', 'political', 'politics', '部門間', '縦割り', 'サイロ', '意見が割れ', '決まらない',
-      'conflict', 'disagree', 'alignment', 'resistance', 'buy-in', 'consensus', 'stakeholder',
+    strongKeywords: [
+      '対立', '揉め', 'もめ', '部門間', '縦割り', '意見が割れ', '決まらない', '合意形成',
+      'conflict', 'disagree', 'resistance', 'consensus',
     ],
+    keywords: ['合意', '調整', '反対', '説得', 'サイロ', 'political', 'politics', 'alignment', 'buy-in', 'stakeholder'],
     diagnosis: {
       ja: '「意見の対立」は多くの場合、判断基準が共有されていないことの症状。アーキテクチャ原則と評価軸を先に合意すれば、個別案件の議論は自動的に収束する。逆に、対立を個別案件の場で解決しようとすると、同じ議論が毎回再燃する。',
       en: 'Disagreement is usually a symptom of unshared decision criteria. Agree the principles and the evaluation axes first and individual debates converge by themselves. Try to settle it case by case and the same argument reignites every time.',
@@ -123,10 +145,11 @@ export const CONSULT_RULES: ConsultRule[] = [
   {
     id: 'governance-decay',
     name: { ja: 'ガバナンスの形骸化', en: 'Governance Not Working' },
-    keywords: [
-      '守られない', '形骸', '無視', '標準が', 'ガバナンス', '統制', '勝手に', '野良', 'シャドー', '逸脱', 'ルールが',
-      'governance', 'not followed', 'ignored', 'shadow it', 'compliance', 'standards', 'deviation', 'exception',
+    strongKeywords: [
+      '守られない', '守られてい', '形骸', '勝手に', '野良', 'シャドー', '逸脱', 'ガバナンス', '統制',
+      'governance', 'not followed', 'shadow it', 'deviation',
     ],
+    keywords: ['無視', '標準が', 'ルールが', 'ignored', 'compliance', 'standards', 'exception'],
     diagnosis: {
       ja: '標準が守られない原因は、ほぼ常に「守るコストが高い」「例外申請の窓口がない」「レビューが遅すぎる」のいずれか。取り締まりを強化しても改善しない。摩擦を下げる方向で設計し直す。',
       en: 'Standards get ignored for one of three reasons almost always: compliance is expensive, there is no route to request an exception, or reviews come too late. Tightening enforcement does not help; redesign to reduce friction.',
@@ -151,10 +174,11 @@ export const CONSULT_RULES: ConsultRule[] = [
   {
     id: 'requirements-churn',
     name: { ja: '要件の頻繁な変更・スコープクリープ', en: 'Requirements Churn and Scope Creep' },
-    keywords: [
-      '要件が変', '要件変更', 'コロコロ', '仕様変更', 'スコープ', '膨らむ', '増え続け', '後出し', 'ちゃぶ台',
-      'scope creep', 'requirements change', 'churn', 'moving target', 'changing requirements',
+    strongKeywords: [
+      '要件が変', '要件変更', 'コロコロ', '仕様変更', 'スコープクリープ', '膨らむ', '増え続け', '後出し', 'ちゃぶ台',
+      'scope creep', 'requirements change', 'moving target', 'changing requirements',
     ],
+    keywords: ['スコープ', 'churn'],
     diagnosis: {
       ja: '要件が動き続ける原因は、たいてい「元の要求の目的が合意されていない」ことにある。機能一覧として要件を管理している限り、追加は無限に続く。目的(ビジネスシナリオ)と成功条件に紐付けて初めて、追加要求の可否を判断できるようになる。',
       en: 'Requirements keep moving mostly because the purpose behind the original ask was never agreed. Managed as a feature list, additions never stop. Only when each requirement is tied to a scenario and a success criterion can you judge whether a new ask belongs.',
@@ -179,10 +203,11 @@ export const CONSULT_RULES: ConsultRule[] = [
   {
     id: 'ma-integration',
     name: { ja: 'M&A・組織統合に伴うシステム統合', en: 'M&A and Post-Merger Integration' },
-    keywords: [
-      'm&a', '買収', '合併', '統合', '子会社', 'グループ会社', 'カーブアウト', '分社',
-      'merger', 'acquisition', 'post-merger', 'pmi', 'divestiture', 'carve-out', 'integration',
+    strongKeywords: [
+      'm&a', '買収', '合併', '経営統合', '被買収', '両社', 'post-merger', 'pmi', 'merger', 'acquisition',
     ],
+    // 「統合」「integration」は API 連携やデータ統合でも出るため周辺語
+    keywords: ['統合', '子会社', 'グループ会社', 'integration'],
     diagnosis: {
       ja: '統合の難所は技術ではなくデータ定義とコード体系。「顧客」「商品」「勘定科目」の定義が両社で違うことが、統合コストの大半を生む。統合の深さ(共存/部分統合/完全統合)を先に決めないと、際限なく費用が膨らむ。',
       en: 'The hard part of integration is data definitions and code systems, not technology. Most of the cost comes from the two sides defining "customer", "product", and "account" differently. Without first deciding the depth of integration — coexist, partially integrate, fully integrate — cost expands without limit.',
@@ -207,10 +232,11 @@ export const CONSULT_RULES: ConsultRule[] = [
   {
     id: 'data-silo',
     name: { ja: 'データのサイロ化・マスタ整備', en: 'Data Silos and Master Data' },
-    keywords: [
-      'データ', 'マスタ', 'サイロ', '名寄せ', '重複', 'データ活用', 'dwh', 'データ基盤', 'bi', '分析', '数字が合わ', '二重入力',
-      'data silo', 'master data', 'mdm', 'data quality', 'single source of truth', 'data platform', 'analytics', 'data warehouse',
+    strongKeywords: [
+      'マスタ', 'サイロ化', '名寄せ', 'データ活用', 'dwh', 'データ基盤', '数字が合わ', '二重入力', '正本',
+      'data silo', 'master data', 'mdm', 'data quality', 'single source of truth', 'data platform', 'data warehouse',
     ],
+    keywords: ['データ', '重複', 'bi', '分析', 'サイロ', 'analytics'],
     diagnosis: {
       ja: '「データが活用できない」の実態は、ほぼ常に「同じ概念の定義が部門ごとに違う」「正本が決まっていない」こと。データ基盤を先に作っても、定義が揃っていなければ集めたデータは使えない。フェーズ C のデータアーキテクチャが本丸。',
       en: 'When data "cannot be used", the reality is almost always that the same concept is defined differently per unit and no system of record has been designated. Building a data platform first does not help: without agreed definitions, the collected data is unusable. Phase C data architecture is the real work.',
@@ -235,10 +261,11 @@ export const CONSULT_RULES: ConsultRule[] = [
   {
     id: 'cost-reduction',
     name: { ja: 'IT コスト削減・システム統廃合', en: 'IT Cost Reduction and Rationalization' },
-    keywords: [
-      'コスト削減', '費用削減', '統廃合', '削減', '予算が', 'コスト高', '保守費', 'ライセンス', '無駄', '重複投資',
-      'cost reduction', 'cost cutting', 'rationalization', 'rationalisation', 'consolidation', 'savings', 'licence', 'license',
+    strongKeywords: [
+      'コスト削減', '費用削減', '統廃合', 'コスト高', '保守費', '重複投資',
+      'cost reduction', 'cost cutting', 'rationalization', 'rationalisation', 'consolidation', 'savings',
     ],
+    keywords: ['削減', '予算が', 'ライセンス', '無駄', 'licence', 'license'],
     diagnosis: {
       ja: 'コスト削減は「何を止めるか」を決める作業。アプリケーションポートフォリオを事業価値 × 技術的健全性で評価すれば、廃止候補は機械的に出てくる。難所は分析ではなく、廃止を決める意思決定と、利用部門との調整。',
       en: 'Cost reduction is the work of deciding what to stop. Rate the application portfolio on business value against technical health and the retirement candidates fall out mechanically. The hard part is not the analysis but the decision to retire and the negotiation with the users.',
@@ -263,10 +290,11 @@ export const CONSULT_RULES: ConsultRule[] = [
   {
     id: 'security-compliance',
     name: { ja: 'セキュリティ・規制対応', en: 'Security and Regulatory Compliance' },
-    keywords: [
-      'セキュリティ', '規制', 'コンプライアンス', '監査', '個人情報', 'gdpr', '内部統制', 'j-sox', 'ゼロトラスト', '認証', 'インシデント', '脆弱性',
-      'security', 'compliance', 'regulation', 'audit', 'privacy', 'zero trust', 'identity', 'incident', 'vulnerability',
+    strongKeywords: [
+      'セキュリティ', '規制', 'コンプライアンス', '個人情報', 'gdpr', '内部統制', 'j-sox', 'ゼロトラスト', '脆弱性',
+      'security', 'compliance', 'regulation', 'privacy', 'zero trust', 'vulnerability',
     ],
+    keywords: ['監査', '認証', 'インシデント', 'audit', 'identity', 'incident'],
     diagnosis: {
       ja: 'セキュリティ要件は非機能要件として ID を振って管理しないと、設計の後半で「追加要件」として現れてコストを跳ね上げる。規制対応は期日が動かないため、ロードマップ上の固定制約として最初に置く。',
       en: 'Unless security requirements are tracked as non-functional requirements with IDs, they surface late in design as "new requirements" and blow up the cost. Regulatory dates do not move, so place them on the roadmap first as fixed constraints.',
@@ -291,9 +319,15 @@ export const CONSULT_RULES: ConsultRule[] = [
   {
     id: 'package-selection',
     name: { ja: 'パッケージ / SaaS 選定', en: 'Package and SaaS Selection' },
+    strongKeywords: [
+      'パッケージ', '製品選定', 'ベンダー選定', '選定基準', '製品比較', 'rfp', 'アドオン', 'fit&gap', 'フィットギャップ',
+      'package', 'product selection', 'off the shelf', 'fit gap', 'request for proposal',
+    ],
+    // 「ベンダー」「調達」「製品」や製品名は、選定以外の相談にも普通に出てくる。
+    // これらだけが当たった場合は主題ではないとみなす(体制崩壊の話でベンダーと書いただけ、等)。
     keywords: [
-      'パッケージ', '製品選定', '選定', 'rfp', 'ベンダー', '調達', 'erp', 'sap', 'salesforce', 'アドオン', 'カスタマイズ', 'fit&gap', 'フィットギャップ',
-      'package', 'product selection', 'vendor', 'procurement', 'rfp', 'erp', 'off the shelf', 'fit gap', 'customization',
+      '選定', 'ベンダー', '調達', '製品', 'erp', 'sap', 'salesforce', 'カスタマイズ',
+      'vendor', 'procurement', 'customization', 'customisation',
     ],
     diagnosis: {
       ja: 'パッケージ選定の失敗は、ほぼ常に「要件を機能一覧で書いた」ことに起因する。機能比較表では差が出ず、結局は価格と営業力で決まる。ビジネス能力と非機能要件、そして「標準機能に業務を寄せられるか」の判断が本質。',
@@ -319,10 +353,11 @@ export const CONSULT_RULES: ConsultRule[] = [
   {
     id: 'project-rescue',
     name: { ja: '炎上プロジェクトの立て直し', en: 'Troubled Project Recovery' },
-    keywords: [
-      '炎上', '火消し', '遅延', '遅れ', '立て直し', 'リカバリ', '破綻', '間に合わ', '止まっ', 'デスマ', '赤字',
-      'troubled', 'rescue', 'recovery', 'delayed', 'behind schedule', 'over budget', 'failing project', 'death march',
+    strongKeywords: [
+      '炎上', '火消し', '立て直し', 'リカバリ', '破綻', '間に合わ', 'デスマ',
+      'troubled', 'rescue', 'behind schedule', 'over budget', 'failing project', 'death march',
     ],
+    keywords: ['遅延', '遅れ', '止まっ', '赤字', 'recovery', 'delayed'],
     diagnosis: {
       ja: '炎上時に真っ先にやるべきは、範囲の再定義と「止められる中間状態」の再設計。人を増やす判断は最後。アーキテクチャの観点では、当初の目標像が現在の制約下で到達可能かを再評価し、到達できないなら目標像自体を下げる判断をスポンサーに返す。',
       en: 'The first moves on a troubled project are redefining scope and re-cutting the plan into stoppable intermediate states. Adding people comes last. Architecturally, re-assess whether the original target is still reachable under current constraints, and if it is not, hand the sponsor the decision to lower the target.',
@@ -345,12 +380,48 @@ export const CONSULT_RULES: ConsultRule[] = [
     ],
   },
   {
+    id: 'repeated-failure',
+    name: { ja: '過去に頓挫した取り組みの再挑戦', en: 'Restarting an Initiative That Failed Before' },
+    strongKeywords: [
+      '頓挫', '二の舞', '同じ失敗', '繰り返さない', '繰り返したくない', '前回の失敗', '前回なぜ', '失敗要因', '失敗している', '失敗した',
+      '過去に失敗', '過去に頓挫', '過去 2 回', '過去2回', 'また止ま', 'また同じ', '白紙', 'リベンジ', '再挑戦', '仕切り直し',
+      '3 度目', '3度目', '三度目', '立ち消え', '中断した',
+      'failed before', 'failed twice', 'previous attempt', 'earlier attempt', 'last attempt', 'second attempt', 'third attempt',
+      'stalled twice', 'abandoned', 'went nowhere', 'same mistake',
+    ],
+    keywords: [
+      '失敗', '前回', '前回は', '過去に', '2 回目', '2回目', '二度目', '断念', '棚上げ', '振り出し',
+      'lessons learned', 'last time', 'stalled', 'restart', 'again', 'tried before',
+    ],
+    diagnosis: {
+      ja: '同じ構想が二度止まっているとき、止めたのは技術ではなく組織側の条件であることがほとんど。前回なぜ止まったかを因子に分解しないまま再挑戦すると、同じ場所で同じ理由で止まる。スポンサーの交代・現場の余力・過去の失敗経験そのものが、今回の変革準備度を下げる要因として効いている。まずビジネス変革準備度評価で前回の停止要因を因子として評価し直し、「今回は何が違うのか」を 1 枚で言えるようにするところから始める。',
+      en: 'When the same initiative has stopped twice, what stopped it was almost never the technology — it was a condition on the organizational side. Restart without decomposing why it stopped and it stops again at the same place for the same reason. A changed sponsor, no slack in the operating units, and the memory of the earlier failure itself all pull this attempt\'s readiness down. Start by re-scoring the previous stopping factors as readiness factors, so that "what is different this time" fits on one page.',
+    },
+    phaseIds: ['preliminary', 'a', 'e', 'h'],
+    techniqueIds: ['business-transformation-readiness', 'stakeholder-management', 'risk-management', 'architecture-maturity'],
+    deliverableIds: ['architecture-vision', 'statement-of-architecture-work', 'stakeholder-map', 'organizational-model', 'architecture-roadmap'],
+    actions: [
+      { ja: '前回の停止要因を、人に紐付けず事実として棚卸しする(意思決定が止まった / 予算が切れた / 主要要員が抜けた / 目的が合意されていなかった のどれか)。犯人探しになった瞬間に情報が出てこなくなる。', en: 'Inventory why the last attempt stopped as facts, not as people: the decision stalled, the funding ended, key people left, or the purpose was never agreed. The moment it becomes a hunt for who was at fault, the information dries up.' },
+      { ja: '洗い出した停止要因をビジネス変革準備度の因子として登録し、現在の状態を点数で付け直す。前回と同じ点数の因子が残っていれば、それが今回も止める。', en: 'Register each stopping factor as a business transformation readiness factor and re-score it as it stands today. Any factor still scoring where it did last time is what stops you again.' },
+      { ja: '「今回は何が違うのか」を 3 点以内で書き、スポンサーに読み上げてもらう。本人の口から出てこないなら、まだ何も変わっていない。', en: 'Write down what is different this time in three points or fewer and have the sponsor say them out loud. If they cannot, nothing has actually changed yet.' },
+      { ja: '前回の成果物(調査資料、要件、設計、契約)のうち再利用できるものを特定する。ゼロから作り直すと、組織は「また同じことをやっている」と受け取る。', en: 'Identify what from the previous attempt can be reused — studies, requirements, designs, contracts. Rebuilding from zero tells the organization you are simply doing the same thing over again.' },
+      { ja: '最初の中間状態を、前回到達できなかった地点より手前に置き、そこを必ず通過して見せる。過去 2 回止まった組織に必要なのは大きな絵ではなく、1 回完走した実績。', en: 'Set the first transition state short of where the last attempt died, and be seen to pass it. An organization that has stopped twice needs one completed lap far more than a bigger picture.' },
+    ],
+    questions: [
+      { ja: '前回止まったのは、いつ、どの段階で、直接のきっかけは何でしたか?', en: 'When did the last attempt stop, at which stage, and what was the immediate trigger?' },
+      { ja: '前回のスポンサーは今も同じ人ですか。交代している場合、前回の経緯は引き継がれていますか?', en: 'Is the sponsor the same person as last time? If not, has the history been handed over?' },
+      { ja: '前回関わった人のうち、今も在籍しているのは誰ですか。その人たちは今回に前向きですか、それとも疲れていますか?', en: 'Who from the previous attempt is still here, and are they willing this time — or worn out?' },
+      { ja: '今回止まったとしたら、最も可能性が高い理由は何だと思いますか。その予防策は計画に入っていますか?', en: 'If this attempt stops, what is the most likely reason — and is the countermeasure in the plan?' },
+    ],
+  },
+  {
     id: 'ai-adoption',
     name: { ja: 'AI / 生成 AI の活用', en: 'AI and Generative AI Adoption' },
-    keywords: [
-      'ai', '生成ai', 'llm', '機械学習', '自動化', 'ml', 'rag', 'エージェント', 'chatgpt', 'claude', 'copilot',
-      'artificial intelligence', 'generative ai', 'machine learning', 'agent', 'automation',
+    strongKeywords: [
+      '生成ai', '生成 ai', 'llm', '機械学習', 'rag', 'chatgpt', 'copilot',
+      'artificial intelligence', 'generative ai', 'machine learning',
     ],
+    keywords: ['ai', 'ml', '自動化', 'エージェント', 'claude', 'agent', 'automation'],
     diagnosis: {
       ja: 'AI 活用は「どのビジネス能力を、どの程度引き上げるのか」で語らないと、PoC 止まりになる。アーキテクチャ上の論点は、データの品質と正本、権限管理、出力の検証プロセス、そして運用時のコスト構造。フェーズ B(どの業務に効かせるか)と C(データが揃っているか)が先で、D は後。',
       en: 'AI adoption that is not framed as "which business capability, raised by how much" stops at proof-of-concept. The architectural issues are data quality and systems of record, access control, the process for verifying outputs, and the run-time cost structure. Phase B (which operations benefit) and Phase C (is the data there) come first; Phase D comes after.',
@@ -375,10 +446,11 @@ export const CONSULT_RULES: ConsultRule[] = [
   {
     id: 'skills-and-people',
     name: { ja: '人材・スキル不足', en: 'Skills and Capacity Shortfall' },
-    keywords: [
-      '人材', 'スキル', '要員', '育成', '採用', '属人', '人が足りない', 'ベンダー依存', '内製', 'ノウハウ',
-      'skills', 'talent', 'staffing', 'headcount', 'training', 'vendor lock', 'in-house', 'knowledge transfer', 'key person',
+    strongKeywords: [
+      '人材', 'スキル', '要員', '育成', '属人', '人が足りない', '人手が足り', 'ベンダー依存', 'ノウハウ',
+      'skills', 'talent', 'staffing', 'headcount', 'training', 'knowledge transfer', 'key person',
     ],
+    keywords: ['採用', '内製', 'vendor lock', 'in-house'],
     diagnosis: {
       ja: 'スキル不足は「教育で解決」の一行で片付けられがちだが、実際には工数・期間・機会損失を伴う投資。ビジネス変革準備度評価で因子として明示的に評価し、ロードマップに育成・採用の期間を組み込まないと、計画通りに人は現れない。',
       en: 'A skills gap is usually dismissed with "we will train them", but it is an investment with effort, elapsed time, and opportunity cost. Assess it explicitly as a readiness factor and build the hiring and training time into the roadmap — otherwise the people simply do not appear on schedule.',
@@ -403,10 +475,11 @@ export const CONSULT_RULES: ConsultRule[] = [
   {
     id: 'insourcing-and-lock-in',
     name: { ja: '内製化・ベンダーロックインからの脱却', en: 'Insourcing and Escaping Vendor Lock-in' },
-    keywords: [
-      '内製化', 'ベンダーロックイン', 'ロックイン', '脱却', '丸投げ', '外注', '再委託', 'マルチベンダー', '特定ベンダー', '囲い込ま', '自社で作れ',
-      'insourcing', 'insource', 'outsourcing', 'lock-in', 'locked in', 'vendor lock-in', 'in-house', 'in house', 'multi-vendor', 'second source', 'exit strategy',
+    strongKeywords: [
+      '内製化', 'ベンダーロックイン', 'ロックイン', '丸投げ', '再委託', 'マルチベンダー', '特定ベンダー', '囲い込ま', '自社で作れ',
+      'insourcing', 'insource', 'lock-in', 'locked in', 'vendor lock-in', 'multi-vendor', 'second source', 'exit strategy',
     ],
+    keywords: ['脱却', '外注', 'outsourcing', 'in-house', 'in house'],
     diagnosis: {
       ja: '内製化を人員計画の話として始めると必ず失敗する。ロックインの実体は要員ではなく、① 仕様と設計の知識が社外にしかない、② データとインタフェースが特定製品の形式に縛られている、③ 契約に出口条項がない、の 3 つ。どの層(業務知識・設計知識・運用手順・データ形式)を取り戻すのかを分けて決める。',
       en: 'Starting insourcing as a headcount plan reliably fails. Lock-in is not about staffing; it is three things — the specification and design knowledge exists only outside the company, the data and interfaces are shaped by one product\'s formats, and the contract has no exit clause. Decide layer by layer which you are taking back: domain knowledge, design knowledge, operating procedures, data formats.',
@@ -431,10 +504,11 @@ export const CONSULT_RULES: ConsultRule[] = [
   {
     id: 'microservices-decomposition',
     name: { ja: 'マイクロサービス化・モノリス分割', en: 'Microservices and Monolith Decomposition' },
-    keywords: [
-      'マイクロサービス', 'モノリス', 'モノリシック', 'サービス分割', '分割', '疎結合', 'ドメイン駆動', '境界づけ', 'イベント駆動',
+    strongKeywords: [
+      'マイクロサービス', 'モノリス', 'モノリシック', 'サービス分割', '疎結合', 'ドメイン駆動', '境界づけ', 'イベント駆動',
       'microservice', 'microservices', 'monolith', 'monolithic', 'decomposition', 'bounded context', 'strangler', 'ddd', 'event driven',
     ],
+    keywords: ['分割'],
     diagnosis: {
       ja: 'マイクロサービス化の相談は、ほぼ常に「デプロイが遅い」「変更が他に波及する」という納期の問題として持ち込まれる。しかし分割線を決めるのはデータの境界であって技術構成ではない。正本が割れたまま分割すると、結合はそのままで運用負荷だけが増える分散モノリスになる。',
       en: 'Requests for microservices almost always arrive as a delivery problem: deployments are slow, changes ripple. But the split is determined by data boundaries, not by technology. Decompose while systems of record are still contested and you get a distributed monolith — the same coupling with far higher operational load.',
@@ -459,10 +533,11 @@ export const CONSULT_RULES: ConsultRule[] = [
   {
     id: 'api-strategy',
     name: { ja: 'API 戦略・連携ガバナンス', en: 'API Strategy and Integration Governance' },
-    keywords: [
-      'api', 'apis', 'rest api', 'graphql', 'openapi', 'ゲートウェイ', '連携基盤', 'システム間連携', 'インタフェース仕様', '外部公開', 'エコシステム',
+    strongKeywords: [
+      'api', 'apis', 'rest api', 'graphql', 'openapi', 'ゲートウェイ', '連携基盤', 'システム間連携', 'インタフェース仕様',
       'esb', 'ipaas', 'webhook', 'api gateway', 'integration platform',
     ],
+    keywords: ['外部公開', 'エコシステム'],
     diagnosis: {
       ja: 'API の相談は技術標準の話に見えて、実際は「誰がインタフェースの互換性に責任を持つか」というガバナンスの問題。ゲートウェイを導入しても、命名・粒度・バージョニング・廃止手順が決まっていなければ、点対点連携がゲートウェイ経由になるだけで結合は減らない。',
       en: 'API questions look like a technology-standards topic but are really governance: who is accountable for interface compatibility. Installing a gateway changes nothing if naming, granularity, versioning, and deprecation are undecided — the point-to-point tangle simply routes through the gateway.',
@@ -487,10 +562,11 @@ export const CONSULT_RULES: ConsultRule[] = [
   {
     id: 'global-rollout',
     name: { ja: 'グローバル展開・多国展開', en: 'Global and Multi-country Rollout' },
-    keywords: [
-      'グローバル', '海外展開', '多国', '現地法人', 'ローカライズ', '現地化', '各国', '越境', '多言語', '時差',
-      'global rollout', 'global template', 'multi-country', 'multinational', 'countries', 'localization', 'localisation', 'subsidiary', 'cross-border',
+    strongKeywords: [
+      'グローバル', '海外展開', '現地法人', 'ローカライズ', '現地化', '越境',
+      'global rollout', 'global template', 'multi-country', 'multinational', 'localization', 'localisation', 'cross-border',
     ],
+    keywords: ['多国', '各国', '多言語', '時差', 'countries', 'subsidiary'],
     diagnosis: {
       ja: 'グローバル展開の論点は「どこまで統一し、どこから現地に任せるか」の線を、業務単位ではなくデータ単位で引けるかどうか。統一か現地裁量かの判断を各国との個別交渉に委ねると、必ず全部が例外になる。共通とする範囲(コード体系、勘定科目、顧客・商品マスタ)を原則として先に固定し、それ以外を現地に開放する。',
       en: 'The question in a global rollout is where to standardize and where to let local units decide — and that line has to be drawn per data entity, not per business area. Leave it to country-by-country negotiation and everything becomes an exception. Fix the globally common scope first as a principle — code systems, chart of accounts, customer and product master — and open everything else to local choice.',
@@ -515,10 +591,11 @@ export const CONSULT_RULES: ConsultRule[] = [
   {
     id: 'carve-out-separation',
     name: { ja: '事業売却・カーブアウトに伴うシステム分離', en: 'Divestment and Carve-out Separation' },
-    keywords: [
-      '事業売却', '売却', '事業譲渡', '切り出し', 'システム分離', '分離', 'スピンオフ', '持株会社', 'カーブアウト', '譲渡先',
-      'divestment', 'spin-off', 'spinoff', 'separation', 'disentanglement', 'carve-out', 'carve out', 'carveout', 'carving out', 'transition service',
+    strongKeywords: [
+      '事業売却', '事業譲渡', '切り出し', 'システム分離', 'スピンオフ', 'カーブアウト', '譲渡先', '分社',
+      'divestment', 'divestiture', 'spin-off', 'spinoff', 'disentanglement', 'carve-out', 'carve out', 'carveout', 'carving out', 'transition service',
     ],
+    keywords: ['売却', '分離', '持株会社', 'separation'],
     diagnosis: {
       ja: '分離は統合の逆ではなく、統合より難しい。期限が契約で固定され、共有していた基盤・ライセンス・共通マスタを「切る」判断を短期間で下さなければならないため。移行サービス契約(TSA)の期間だけが実質的な猶予であり、その期間内に切り離せない依存関係を最初に特定できるかどうかで勝負が決まる。',
       en: 'Separation is not the inverse of integration; it is harder. The deadline is fixed by contract, and decisions to cut shared platforms, licences, and common master data must be made in a short window. The transition service agreement is the only real grace period, so the outcome turns on identifying, first, the dependencies you cannot sever inside it.',
@@ -543,10 +620,11 @@ export const CONSULT_RULES: ConsultRule[] = [
   {
     id: 'sustainability-esg',
     name: { ja: 'サステナビリティ・ESG 対応', en: 'Sustainability and ESG' },
-    keywords: [
-      'esg', 'サステナビリティ', 'サステナブル', '脱炭素', 'カーボン', '温室効果ガス', '排出量', '環境負荷', '省エネ', 'グリーン', 'sdgs',
-      'co2', 'sustainability', 'carbon', 'emissions', 'net zero', 'green it',
+    strongKeywords: [
+      'esg', 'サステナビリティ', 'サステナブル', '脱炭素', '温室効果ガス', '排出量', 'sdgs',
+      'co2', 'sustainability', 'emissions', 'net zero', 'green it',
     ],
+    keywords: ['カーボン', '環境負荷', '省エネ', 'グリーン', 'carbon'],
     diagnosis: {
       ja: 'ESG 対応の相談は環境活動の話に見えて、実務上は開示のためのデータ収集・算定・監査証跡の問題、つまりデータアーキテクチャの課題。報告のたびに手作業で集計している限り、開示範囲が広がった時点で破綻する。算定ロジックとデータの出所を最初から仕組みに載せる。',
       en: 'ESG work looks like an environmental programme but in practice it is a disclosure problem — collecting the data, computing the figures, and leaving an audit trail. That makes it a data architecture problem. As long as every report is assembled by hand, the process collapses the moment the disclosure scope widens. Put the calculation logic and the data lineage into the system from the start.',
@@ -571,10 +649,11 @@ export const CONSULT_RULES: ConsultRule[] = [
   {
     id: 'technical-debt',
     name: { ja: '技術的負債の可視化と返済計画', en: 'Making Technical Debt Visible and Payable' },
-    keywords: [
-      '技術的負債', '技術負債', '負債', '保守性', 'リファクタ', '継ぎ足し', 'スパゲッティ', '改修が難し', '設計書がない', '手を入れられな',
-      'technical debt', 'tech debt', 'refactoring', 'maintainability', 'code rot',
+    strongKeywords: [
+      '技術的負債', '技術負債', '継ぎ足し', 'スパゲッティ', '改修が難し', '設計書がない', '手を入れられな',
+      'technical debt', 'tech debt', 'code rot',
     ],
+    keywords: ['負債', '保守性', 'リファクタ', 'refactoring', 'maintainability'],
     diagnosis: {
       ja: '技術的負債は「IT 側の言い分」として扱われる限り予算が付かない。返済計画を通すには、負債を技術用語ではなく事業側が読める単位 — 変更にかかる日数、障害件数、サポート切れによる強制コスト — に翻訳する必要がある。アプリケーションポートフォリオの技術的健全性軸として定量化し、事業価値と並べて初めて投資判断の対象になる。',
       en: 'Technical debt gets no budget as long as it is presented as IT\'s complaint. To get a repayment plan approved, translate it out of technical vocabulary into units the business reads: days per change, incident counts, forced spend from expiring support. Quantify it as the technical-health axis of the application portfolio; only alongside business value does it become an investment decision.',
@@ -599,10 +678,11 @@ export const CONSULT_RULES: ConsultRule[] = [
   {
     id: 'business-continuity',
     name: { ja: 'BCP・災害対策・可用性設計', en: 'Business Continuity, Disaster Recovery, and Availability' },
-    keywords: [
-      'bcp', '事業継続', '災害', '被災', '冗長', '可用性', '復旧', 'バックアップ', 'ディザスタリカバリ', '二重化', '停止時間',
-      'rto', 'rpo', 'business continuity', 'disaster recovery', 'resilience', 'failover', 'high availability', 'outage',
+    strongKeywords: [
+      'bcp', '事業継続', '災害', '被災', '冗長', 'ディザスタリカバリ', '二重化', '停止時間',
+      'rto', 'rpo', 'business continuity', 'disaster recovery', 'failover', 'high availability',
     ],
+    keywords: ['可用性', '復旧', 'バックアップ', 'resilience', 'outage'],
     diagnosis: {
       ja: 'BCP の相談は「どこまで冗長化するか」の技術論として持ち込まれるが、決めるべきは業務側の許容停止時間と許容データ損失量。これを業務ごとに数値で合意しないまま設計すると、全システムを最高水準で守る過剰投資か、優先順位のない机上の計画のどちらかになる。復旧目標は業務が決め、実現手段を IT が設計する。',
       en: 'Continuity arrives as a technical question about how much redundancy to buy, but what must be settled is the tolerable downtime and tolerable data loss on the business side. Design without agreeing those numbers per process and you get either over-investment protecting everything to the highest tier, or a paper plan with no priorities. The business sets the recovery targets; IT designs how to meet them.',
@@ -627,10 +707,11 @@ export const CONSULT_RULES: ConsultRule[] = [
   {
     id: 'over-standardization',
     name: { ja: '標準化と現場裁量のバランス', en: 'Balancing Standardization Against Local Autonomy' },
-    keywords: [
-      '標準化', '過剰', '縛り', '自由度', '硬直', '一律', '画一', '足かせ', '融通が利かない', '窮屈', '重すぎ',
-      'over-standardization', 'bureaucracy', 'red tape', 'rigid', 'autonomy', 'one size fits all', 'ivory tower',
+    strongKeywords: [
+      '過剰', '縛り', '硬直', '一律', '画一', '足かせ', '融通が利かない', '窮屈', '重すぎ',
+      'over-standardization', 'bureaucracy', 'red tape', 'one size fits all', 'ivory tower',
     ],
+    keywords: ['標準化', '自由度', 'rigid', 'autonomy'],
     diagnosis: {
       ja: '統制が強すぎるという相談の実体は、標準の量ではなく「標準ごとの適用範囲が宣言されていない」こと。全社一律に適用しているから、事業特性の違う領域で摩擦が起きる。標準ごとに適用範囲(全社必須 / 推奨 / 領域限定)と逸脱してよい条件を明示すれば、数を減らさずに摩擦は下がる。',
       en: 'When people say the controls are too tight, the problem is rarely how many standards there are; it is that no standard states where it applies. Applied uniformly across the enterprise, they grate in areas with different business characteristics. Declare per standard where it is mandatory, where it is advisory, and on what conditions deviation is legitimate, and friction drops without cutting the count.',
@@ -655,10 +736,11 @@ export const CONSULT_RULES: ConsultRule[] = [
   {
     id: 'ea-value-communication',
     name: { ja: 'EA の価値が経営に伝わらない', en: 'Explaining the Value of Architecture to Executives' },
-    keywords: [
+    strongKeywords: [
       '価値が伝わ', '評価されない', '経営に説明', '役員に説明', '予算が付かない', '予算を取れ', '存在意義', '成果が見えない', '効果測定', '投資対効果',
-      'roi', 'kpi', 'business case', 'demonstrate value', 'value of architecture', 'see the value', 'buy-in', 'executive sponsorship', 'justify',
+      'business case', 'demonstrate value', 'value of architecture', 'see the value', 'executive sponsorship',
     ],
+    keywords: ['roi', 'kpi', 'buy-in', 'justify'],
     diagnosis: {
       ja: '価値が伝わらない原因は説明の巧拙ではなく、経営が見ている指標と EA の成果物が接続されていないこと。成果物の点数や網羅率を報告している限り評価はされない。報告単位を「回避したコスト」「短縮した意思決定日数」「取り下げた重複投資」に変え、経営会議で既に読まれている資料の中に差し込む。',
       en: 'Architecture fails to land not because the pitch is poor but because its outputs are not connected to the measures executives already watch. Reporting deliverable counts or coverage percentages earns nothing. Change the unit of reporting to cost avoided, decision days saved, and duplicate investment withdrawn — and place it inside the papers the executive meeting already reads.',
@@ -681,3 +763,774 @@ export const CONSULT_RULES: ConsultRule[] = [
     ],
   },
 ];
+
+// ---------------------------------------------------------------------------
+// 状況の読み取り / Reading the situation itself
+//
+// ルールのキーワード一致だけでは「同じ話題なら誰にでも同じ助言」になる。
+// 予算ゼロの相談者に予算潤沢向けの助言を返すのは有害なので、
+// (1) 打ち消されている話題を落とし、(2) 制約条件を本文から拾い、
+// (3) 出す項目を状況との関連で並べ替える、という 3 段の処理をここに置く。
+// ---------------------------------------------------------------------------
+
+/** 状況を分類する軸 / The axis a detected condition belongs to. */
+export type SituationAxis =
+  | 'budget'
+  | 'time'
+  | 'sponsorship'
+  | 'capacity'
+  | 'assets'
+  | 'authority'
+  | 'climate'
+  | 'regulation';
+
+/** 読み取れる状況条件の ID / Identifier of a detectable situational condition. */
+export type SituationConditionId =
+  | 'budget-none'
+  | 'budget-tight'
+  | 'budget-ample'
+  | 'deadline-urgent'
+  | 'deadline-fixed'
+  | 'deadline-none'
+  | 'sponsor-committed'
+  | 'sponsor-absent'
+  | 'team-solo'
+  | 'team-dedicated'
+  | 'assets-none'
+  | 'assets-available'
+  | 'authority-none'
+  | 'field-resistance'
+  | 'regulated';
+
+/**
+ * 状況条件 1 件 / One situational condition that changes what advice is useful.
+ *
+ * `favor` / `avoid` は、ルールが持つアクション・質問を並べ替えるための語。
+ * 位置で切るのをやめ、条件に合う項目を上に出すために使う。
+ */
+export interface SituationCondition {
+  id: SituationConditionId;
+  axis: SituationAxis;
+  /** 同じ軸で複数当たったときの優先度(大きいほど優先。困っている側を優先する) */
+  priority: number;
+  label: Bilingual;
+  /** 検出語。日本語は部分一致、英語は小文字で部分一致 */
+  cues: string[];
+  /** この条件があると助言がどう変わるか(見立ての補足として出す) */
+  implication: Bilingual;
+  /** この条件のときに効く具体行動 */
+  actions: Bilingual[];
+  /** この条件のときに確認すべきこと */
+  questions: Bilingual[];
+  /** ルール側の項目を選ぶときに優先する語 */
+  favor: string[];
+  /** ルール側の項目を選ぶときに後ろへ送る語 */
+  avoid: string[];
+}
+
+/** 軸の表示名 / Human-readable axis labels. */
+export const SITUATION_AXIS_LABELS: Record<SituationAxis, Bilingual> = {
+  budget: { ja: '予算', en: 'Budget' },
+  time: { ja: '期限', en: 'Time' },
+  sponsorship: { ja: '経営の関与', en: 'Sponsorship' },
+  capacity: { ja: '体制', en: 'Capacity' },
+  assets: { ja: '既存資料', en: 'Existing material' },
+  authority: { ja: '決定権', en: 'Decision rights' },
+  climate: { ja: '現場の空気', en: 'Ground-level climate' },
+  regulation: { ja: '規制', en: 'Regulation' },
+};
+
+export const SITUATION_CONDITIONS: SituationCondition[] = [
+  {
+    id: 'budget-none',
+    axis: 'budget',
+    priority: 3,
+    label: { ja: '予算が無い', en: 'No budget' },
+    cues: [
+      '予算はゼロ', '予算ゼロ', '予算がない', '予算が無い', '予算はない', '予算は無い',
+      '予算がつかない', '予算が付かない', '予算はつかない', '金がない', '金は出ない',
+      '費用は出ない', '費用が出ない', '手弁当', '投資はできない', '身銭',
+      'no budget', 'zero budget', 'without budget', 'unfunded', 'no funding', 'no money',
+    ],
+    implication: {
+      ja: '予算がゼロなら、最初の仕事は設計ではなく「次の予算を取りに行くための 1 枚」を作ること。金を前提にした施策は全部後ろに送り、手元の情報だけで作れて意思決定者に見せられるものから始める。',
+      en: 'With no budget, the first job is not design but producing the single page that wins the next budget. Push everything that assumes spend to the back and start with what you can build from information already in hand and show to a decision maker.',
+    },
+    actions: [
+      { ja: '対象を 1 業務・1 データに固定し、そこだけを「現状 / あるべき / 差分」の 3 段で 1 枚にまとめる。全社を描こうとした時点で予算も時間も足りなくなる。', en: 'Fix the scope to one business process and one data set, and put just that on a single page as current state, target state, and gap. The moment you try to draw the whole enterprise, neither budget nor time is enough.' },
+      { ja: 'その 1 枚に金額を 1 つだけ載せる。今かかっている手作業の人件費か、直近の障害の実損。予算要求は「これから使う額」ではなく「今失っている額」から始まる。', en: 'Put exactly one number on that page: the labour cost of the manual work today, or the real loss from the last incident. A budget request starts from what you are losing now, not from what you want to spend.' },
+      { ja: '金が要らない範囲(既存資料の棚卸し、関係者への聞き取り、決めごとの明文化)と、金が要る範囲を線引きして示す。線を引かないと「予算が無いから何もできない」で止まる。', en: 'Draw the line between what costs nothing — inventorying existing material, interviewing people, writing down decisions — and what needs money. Without that line the work stalls at "no budget, so nothing is possible".' },
+    ],
+    questions: [
+      { ja: '次に予算を検討する場はいつで、そこに載せるには何がいつまでに要りますか?', en: 'When is the next budget round, and what has to exist by when to be considered in it?' },
+      { ja: '今この状態を放置していることで、毎月いくら、または何人日が失われていますか?', en: 'What is the current situation costing per month, in money or in person-days?' },
+    ],
+    favor: ['絞', '1 枚', '小さ', '棚卸', '既存', 'まず', '優先', '止め', '捨て', 'narrow', 'one page', 'smallest', 'existing', 'stop', 'first'],
+    avoid: ['調達', '外部', 'ベンダー', '投資', '二重運用', '演習', '専任', 'procure', 'vendor', 'invest', 'dual running', 'dedicated', 'rehears'],
+  },
+  {
+    id: 'budget-tight',
+    axis: 'budget',
+    priority: 2,
+    label: { ja: '予算が限られる', en: 'Limited budget' },
+    cues: [
+      '予算が限ら', '予算は限ら', '限られた予算', '予算が少', '予算は少', '低予算',
+      '予算削減', 'コスト削減の圧力', '緊縮', '厳しい予算', '予算の制約',
+      'tight budget', 'limited budget', 'shoestring', 'budget pressure', 'cost pressure',
+    ],
+    implication: {
+      ja: '使える金が限られるときは、やる内容よりやる順番が結果を決める。効果が最初に出るものを先に置き、その効果を次の原資として説明できる形にしておく。',
+      en: 'When money is limited, sequence matters more than content. Put what pays back first at the front, and frame that payback so it can fund the next step.',
+    },
+    actions: [
+      { ja: '候補を効果が出る順に並べ替え、最初の 1 件で回収した分を次の原資にする筋書きを作る。同時に 3 件走らせない。', en: 'Order the candidates by how soon they pay back and write the story where the first one funds the second. Do not run three at once.' },
+      { ja: '「やらないこと」を先に決めて合意しておく。予算が限られる案件は、断る基準が無いと必ず範囲が膨らむ。', en: 'Decide and agree what you will not do, first. Without an explicit basis for refusal, a constrained initiative always creeps.' },
+    ],
+    questions: [
+      { ja: '今期この件に使える上限額はいくらですか。その枠は誰が持っていますか?', en: 'What is the ceiling for this work this period, and whose budget holds it?' },
+      { ja: 'その枠内で 1 件だけやるとしたら、事業側はどれを選びますか?', en: 'If only one item fits inside that ceiling, which one does the business choose?' },
+    ],
+    favor: ['絞', '順', '優先', '段階', 'まず', '効果', 'prioriti', 'phased', 'first', 'benefit'],
+    avoid: ['一括', '全社一斉', '網羅', 'big-bang', 'enterprise-wide', 'exhaustive'],
+  },
+  {
+    id: 'budget-ample',
+    axis: 'budget',
+    priority: 1,
+    label: { ja: '予算は確保されている', en: 'Budget is secured' },
+    cues: [
+      '予算は潤沢', '予算が潤沢', '潤沢', '予算は十分', '予算が十分', '予算は確保', '予算が確保',
+      '資金は十分', '投資枠', '金はある', '予算面の制約はな',
+      'ample budget', 'well funded', 'well-funded', 'budget is secured', 'funding is in place', 'plenty of budget',
+    ],
+    implication: {
+      ja: '金で買えるのは時間と人手だけで、決定の速度は買えない。予算があるうちにやるべきなのは、外注の拡大ではなく「後で通らなくなる決定」を先に通しておくこと。',
+      en: 'Money buys time and hands, never decision speed. What the funded period is for is not more outsourcing but pushing through the decisions that will not pass later.',
+    },
+    actions: [
+      { ja: '並行できる作業(現状調査、データの棚卸し、移行方式の比較検証)に先に人を投入する。ただし決定そのものは外に出さない。外注できるのは調査までで、判断は自分たちが持つ。', en: 'Put people onto the work that can run in parallel — current-state survey, data inventory, comparative trials of migration approaches — but keep the decisions in-house. You can outsource investigation, not judgement.' },
+      { ja: '予算がある時期にこそ、廃止・統合・標準の強制といった「減らす決定」を通す。金があるうちは代替手段を用意できるので通り、無くなると誰も飲まない。', en: 'Use the funded window for the subtractive decisions — retirement, consolidation, mandated standards. They pass while you can still fund an alternative, and stop passing once you cannot.' },
+      { ja: '検証(PoC)には合格条件と打ち切り条件を先に書く。予算があると検証が終わらなくなる。', en: 'Write the pass and stop criteria for any proof of concept before it starts. Well-funded trials never end on their own.' },
+    ],
+    questions: [
+      { ja: 'この予算はいつまで有効で、使い切れなかった分は翌期に繰り越せますか?', en: 'How long is this budget valid, and does unspent money carry to the next period?' },
+      { ja: 'その予算を出した側は、いつまでに何が出てくる前提で承認しましたか?', en: 'The people who approved it — what did they assume would exist by when?' },
+    ],
+    favor: ['並行', '検証', '比較', '外部', '専任', '演習', '投資', 'parallel', 'trial', 'pilot', 'compare', 'dedicated', 'rehears'],
+    avoid: ['無償', '手弁当', 'free of charge'],
+  },
+  {
+    id: 'deadline-urgent',
+    axis: 'time',
+    priority: 3,
+    label: { ja: '期限が逼迫している', en: 'Deadline is tight' },
+    cues: [
+      '至急', '大至急', '間に合わ', '時間がない', '時間が無い', '逼迫', 'ひっ迫', '待ったなし',
+      '火消し', '炎上', '今月中', '来月まで', '今期中', '残された時間', '残り期間', '遅れて',
+      'urgent', 'asap', 'running out of time', 'behind schedule', 'slipping', 'firefighting',
+    ],
+    implication: {
+      ja: '時間が無い状態で全部を順番にやると必ず落ちる。決める対象を絞り、並行できるものは並行させ、後戻りできる決定は仮決めして先に進む。',
+      en: 'Doing everything in sequence under time pressure guarantees something is dropped. Narrow what must be decided, parallelise what can run together, and provisionally settle anything that is reversible so the work keeps moving.',
+    },
+    actions: [
+      { ja: '今週決めないと後段が止まる決定を 3 つだけ選び、それ以外の決定には日付を付けて後ろに送る。全部を今決めようとしない。', en: 'Pick the three decisions that block everything downstream this week and give every other decision a later date. Do not try to settle them all now.' },
+      { ja: '調査に期限を切る。期限が来たら分かっている範囲で決め、決めた前提を文書に明記して進む。「完全に分かってから」は間に合わない。', en: 'Time-box the investigation. When the box closes, decide on what you know and write the assumptions down. "Once we fully understand it" does not arrive in time.' },
+      { ja: '後戻りできる決定と、できない決定を分ける。後戻りできる方は今すぐ仮決めして着手し、できない方に議論の時間を集中させる。', en: 'Separate reversible from irreversible decisions. Provisionally settle the reversible ones today and spend the argument time on the ones you cannot undo.' },
+    ],
+    questions: [
+      { ja: '動かせない日付は何で、それは何によって決まっていますか(契約 / 法規制 / 経営の対外公約)?', en: 'Which date cannot move, and what fixes it — a contract, a regulation, or a public commitment?' },
+      { ja: '間に合わない場合、範囲・品質・日付のどれを削る判断になりますか。決めるのは誰ですか?', en: 'If you cannot make it, which gives — scope, quality, or the date? And who decides that?' },
+    ],
+    favor: ['期限', '並行', '先に', 'まず', '絞', '優先', '仮決め', '日数', 'time-box', 'parallel', 'first', 'deadline'],
+    avoid: ['網羅', '完全', '全社一斉', '成熟度', 'exhaustive', 'comprehensive', 'maturity'],
+  },
+  {
+    id: 'deadline-fixed',
+    axis: 'time',
+    priority: 1,
+    label: { ja: '期限が決まっている', en: 'A fixed deadline exists' },
+    cues: [
+      '期限がある', '期限は', '期限が', '締切', '締め切り', 'デッドライン', 'までに',
+      'か月', 'ヶ月', 'カ月', 'ヵ月', '年内', '来期まで', '年度内',
+      'deadline', 'by the end of', 'target date', 'go-live',
+    ],
+    implication: {
+      ja: '日付が先に決まっている案件は、日付に合わせて範囲を削る設計にしておかないと、最後に品質で帳尻を合わせることになる。中間状態を先に置いて、どこで止まっても事業が回る形にする。',
+      en: 'When the date is fixed first, unless scope is designed to be cut against it, quality becomes the adjustment at the end. Define intermediate states up front so the business still runs wherever you stop.',
+    },
+    actions: [
+      { ja: '期限から逆算して中間状態を 2〜3 個置き、各中間状態で「ここで止めても業務は回るか」を確認する。止まれない計画は期限に負ける。', en: 'Work back from the date to two or three intermediate states and check at each one that the business can run if you stop there. A plan that cannot stop loses to the date.' },
+      { ja: '間に合わないときに削る範囲を、優先順位付きで先に合意しておく。当日に議論すると必ず品質が削られる。', en: 'Agree the ordered list of what gets cut if you run late, in advance. Debated on the day, it is always quality that gets cut.' },
+    ],
+    questions: [
+      { ja: 'その期限は何によって決まっていますか。動かせる余地はありますか?', en: 'What sets that deadline, and is there any room to move it?' },
+      { ja: '期限の時点で「必ず動いている必要があるもの」はどれですか。逆に後回しにできるものは?', en: 'What absolutely must be running on that date, and what can follow later?' },
+    ],
+    favor: ['中間', '段階', '逆算', '優先', '範囲', '移行', 'transition', 'phased', 'milestone', 'sequence'],
+    avoid: ['成熟度', 'maturity'],
+  },
+  {
+    id: 'deadline-none',
+    axis: 'time',
+    priority: 2,
+    label: { ja: '期限が決まっていない', en: 'No deadline set' },
+    cues: [
+      '期限は決まっていない', '期限が決まっていない', '期限は特にな', '締切はな', 'いつまでという',
+      'ゴールが曖昧', '終わりが見えない', 'no deadline', 'open-ended', 'no target date',
+    ],
+    implication: {
+      ja: '期限の無い活動は、他の全部より後回しになる。外から期限が来ないなら、自分で区切りを作って意思決定者に日付を持たせるところから始める。',
+      en: 'Work without a deadline is deprioritised against everything else. If no date comes from outside, create the boundary yourself and hand a date to the decision maker.',
+    },
+    actions: [
+      { ja: '自分で 90 日の区切りを置き、その日に誰に何を見せるかを 1 つ決める。日付が無いと成果物が完成しない。', en: 'Set your own 90-day boundary and name one thing you will show, to one audience, on that day. Nothing gets finished without a date.' },
+      { ja: '期限が無いこと自体をリスクとして記録し、意思決定者に「いつまでに判断するか」を持ち帰らせる。', en: 'Log the absence of a deadline as a risk and make the decision maker commit to when they will decide.' },
+    ],
+    questions: [
+      { ja: 'この検討結果を最初に使う会議や意思決定はいつですか?', en: 'What is the first meeting or decision that will actually use this work, and when is it?' },
+    ],
+    favor: ['区切', '期限', '日付', '90 日', '3 か月', 'time-box', 'milestone'],
+    avoid: [],
+  },
+  {
+    id: 'sponsor-committed',
+    axis: 'sponsorship',
+    priority: 1,
+    label: { ja: '経営が本気で関与している', en: 'Executives are committed' },
+    cues: [
+      '経営も本気', '経営は本気', '本気', '肝いり', 'トップダウン', '経営が主導', '役員が主導',
+      '経営がコミット', '経営の後押し', '社長直轄', '経営から指示',
+      'executive sponsor', 'board backing', 'top-down mandate', 'strong sponsorship', 'ceo is behind',
+    ],
+    implication: {
+      ja: '経営の支持は必ず薄れる。支持があるうちにやるのは丁寧な現状分析ではなく、後で反対が出る決定(廃止、統合、標準の強制、正本の指定)を先に決裁に通すこと。',
+      en: 'Executive backing always fades. What the backed period is for is not careful current-state analysis but getting the decisions that will later attract opposition — retirement, consolidation, mandated standards, naming systems of record — approved now.',
+    },
+    actions: [
+      { ja: '反対が出そうな決定を先に洗い出し、支持がある今のうちに決裁を取る。順番を後ろにすると同じ決定が通らなくなる。', en: 'List the decisions likely to attract opposition and get them approved while the backing lasts. The same decisions stop passing if you leave them until later.' },
+      { ja: '決定を人ではなく文書(原則、アーキテクチャ契約、標準)に残す。支持している役員は必ず異動する。', en: 'Anchor decisions in documents — principles, the architecture contract, standards — not in a person. The sponsoring executive will move on.' },
+      { ja: '経営が既に見ている資料に、この取り組みの進捗を 1 行だけ載せる。専用の報告会を作ると支持の維持コストが上がる。', en: 'Add one line about this work to the papers the executives already read. A dedicated review meeting raises the cost of keeping their attention.' },
+    ],
+    questions: [
+      { ja: 'その経営層は、いつまでに何が見えていれば「進んでいる」と判断しますか?', en: 'By when, and seeing what, will those executives judge that this is progressing?' },
+      { ja: '支持している役員が異動した場合、次に誰がこの取り組みを持ちますか?', en: 'If the sponsoring executive moves on, who owns this next?' },
+    ],
+    favor: ['決裁', '原則', '契約', '統廃合', '廃止', '標準', '権限', 'principle', 'contract', 'mandate', 'governance', 'retire'],
+    avoid: ['説得', '味方', '関心を', 'persuade', 'build a case'],
+  },
+  {
+    id: 'sponsor-absent',
+    axis: 'sponsorship',
+    priority: 2,
+    label: { ja: '経営が関与していない', en: 'No executive engagement' },
+    cues: [
+      '経営は無関心', '無関心', '関心がない', '関心が無い', '興味を示さ', '他人事', '丸投げ',
+      '現場任せ', '上が動かない', '理解がない', '理解されな', 'スポンサー不在', '経営に届いて',
+      'no sponsor', 'not interested', 'indifferent', 'no executive support', 'leadership is not engaged',
+    ],
+    implication: {
+      ja: '経営が関心を持っていない段階では、正しい計画より「関心を持たせる 1 枚」が先。網羅的な資料は読まれないので、経営が今期気にしている論点に接続したものだけを出す。',
+      en: 'Before executives care, the page that makes them care matters more than the correct plan. Comprehensive material is not read; produce only what connects to the issue they are already worried about this period.',
+    },
+    actions: [
+      { ja: '経営が今期繰り返し話題にしている問題(コスト、事故、規制、人手)を 1 つ選び、そこに接続した 1 枚だけを作る。EA の説明から入らない。', en: 'Pick one problem the executives keep returning to this period — cost, incidents, regulation, headcount — and build one page that connects to it. Do not open with an explanation of architecture.' },
+      { ja: 'IT の言葉で説明しない。金額、日数、件数の 3 つだけで書く。用語を使った瞬間に「IT の話」に分類されて終わる。', en: 'Do not explain it in IT vocabulary. Use money, days, and counts only. The moment jargon appears it is filed as an IT topic and ignored.' },
+      { ja: '最初の相手を経営全体にしない。実際に困っている事業部門の責任者を 1 人味方につけ、その人から言ってもらう。', en: 'Do not aim the first pitch at the whole executive team. Win one business leader who actually has the pain, and let them raise it.' },
+    ],
+    questions: [
+      { ja: '経営会議で今期繰り返し取り上げられている問題は何ですか?', en: 'Which problems keep coming back at the executive meeting this period?' },
+      { ja: 'この件で最初に味方になってくれそうな部門長は誰ですか?', en: 'Which department head is most likely to back this first?' },
+    ],
+    favor: ['1 枚', '金額', '日数', '件数', '味方', '経営', '伝わ', '報告', '効果', 'one page', 'money', 'days', 'executive', 'value'],
+    avoid: ['決裁', '強制', '必須', '成熟度', 'mandate', 'enforce', 'maturity'],
+  },
+  {
+    id: 'team-solo',
+    axis: 'capacity',
+    priority: 2,
+    label: { ja: '実質ひとり体制', en: 'Effectively a team of one' },
+    cues: [
+      'ひとり', '一人', '1人', '1 人', '独りで', '自分だけ', '私だけ', '自分しか', '私しか', 'しかいない',
+      '専任はいない', '専任がいない', '兼務', '片手間', '手が足りない', '人がいない', '人手不足',
+      'alone', 'one person', 'single-handed', 'solo', 'part-time', 'no dedicated', 'short-staffed',
+      'only architect', 'only one', 'just me', 'by myself', 'on my own', 'i am the only', 'no team',
+    ],
+    implication: {
+      ja: 'ひとりで回すなら、作る資料の数ではなく「他人に作業を渡せる形」が成果を決める。全部を自分で描こうとした時点で止まる。',
+      en: 'Running this alone, the result is decided by how much work you can hand to other people, not by how many documents you produce. It stalls the moment you try to draw everything yourself.',
+    },
+    actions: [
+      { ja: '成果物を 3 つまでに絞る。最初は「現状 1 枚 / あるべき 1 枚 / 差分 1 枚」で足りる。それ以上は作っても読まれない。', en: 'Cap the deliverables at three. Current state, target state, gap — one page each — is enough to start, and more will not be read anyway.' },
+      { ja: '情報収集を自分でやらない。各部門に「この表を埋めてください」という形にして渡す。空欄の表は、聞き取りより速く埋まる。', en: 'Do not gather the information yourself. Hand each department a table to fill in. An empty table comes back faster than interviews get scheduled.' },
+      { ja: 'レビューの場を新設しない。既存の定例に 10 分もらう。ひとりで会議体を運営すると、そこで時間が全部消える。', en: 'Do not create a new review forum; take ten minutes in an existing standing meeting. Running a governance body single-handed consumes all the time you have.' },
+    ],
+    questions: [
+      { ja: 'この作業に週何時間使えますか。それを承認しているのは誰ですか?', en: 'How many hours a week do you actually have for this, and who has agreed to that?' },
+      { ja: '各部門で、聞けば答えてくれる担当者の名前は分かっていますか?', en: 'In each department, do you know the name of the person who will answer when asked?' },
+    ],
+    favor: ['絞', '1 枚', '既存', '渡', '依頼', '定例', '3 つ', 'narrow', 'existing', 'delegate', 'one page'],
+    avoid: ['専任', 'チームを', '演習', '委員会', '網羅', 'dedicated team', 'board', 'rehears', 'exhaustive'],
+  },
+  {
+    id: 'team-dedicated',
+    axis: 'capacity',
+    priority: 1,
+    label: { ja: '専任の体制がある', en: 'A dedicated team exists' },
+    cues: [
+      '専任チーム', '専任が', '専任を', '専任で', '要員を確保', 'チームを確保', '体制は整',
+      'dedicated team', 'full-time team', 'staffed team',
+    ],
+    implication: {
+      ja: '人がいるときの典型的な失敗は、全員が同時に別々の資料を作り始めること。並行させる対象と、誰がどの決定に責任を持つかを先に決める。',
+      en: 'The typical failure with people available is everyone starting a different document at once. Decide first what runs in parallel and who owns which decision.',
+    },
+    actions: [
+      { ja: '同時に走らせる作業を 3 本までにし、それぞれに「いつ何が出るか」を置く。人数に比例して作業を増やさない。', en: 'Hold parallel workstreams to three, each with a stated output and date. Do not scale the number of workstreams with headcount.' },
+      { ja: '役割を成果物ではなく決定単位で割る。「誰がどの決定の責任者か」が決まっていないチームは資料だけ増える。', en: 'Split roles by decision, not by document. A team without named decision owners produces documents and nothing else.' },
+    ],
+    questions: [
+      { ja: '専任は何名で、いつまで確保されていますか?', en: 'How many people are dedicated, and until when are they committed?' },
+    ],
+    favor: ['並行', '分担', '役割', 'チーム', 'parallel', 'role', 'workstream'],
+    avoid: [],
+  },
+  {
+    id: 'assets-none',
+    axis: 'assets',
+    priority: 2,
+    label: { ja: '現状の資料が無い', en: 'No current-state material' },
+    cues: [
+      '資料がない', '資料が無い', '設計書がない', '設計書が無い', 'ドキュメントがない', 'ドキュメントが無い',
+      '一覧がない', '台帳がない', '図がない', '把握できていない', '棚卸しされていない',
+      '仕様が分から', '現状が分から', '中身が分から', '誰も知らな', '誰も分から',
+      'undocumented', 'no documentation', 'nobody knows', 'no inventory',
+    ],
+    implication: {
+      ja: '資料が無い状態で正確な現状図を作ろうとすると、そこで半年溶ける。現状は「これから使う目的に必要な粒度」までで止め、足りない部分は前提として明記する。',
+      en: 'Trying to build an accurate current-state picture with no documentation burns half a year. Stop at the granularity the next decision actually needs and write the rest down as stated assumptions.',
+    },
+    actions: [
+      { ja: '現状把握は「次の決定に必要な粒度」で止める。足りない部分は前提として本文に明記し、後で検証する印を付けておく。', en: 'Stop the current-state work at the granularity the next decision needs. Write the gaps down as stated assumptions in the document itself and flag them for later verification.' },
+      { ja: '文書を探すより、頭の中にある情報を取りに行く。関係者 3 人に 1 時間ずつ聞くほうが、書庫を漁るより速く正確。', en: 'Go after what is in people\'s heads rather than hunting for documents. Three one-hour interviews beat an archive search on both speed and accuracy.' },
+    ],
+    questions: [
+      { ja: '現行の仕様を説明できる人は誰で、あと何年在籍しますか?', en: 'Who can explain the current system, and how many more years will they be here?' },
+      { ja: '正しいと信じてよい資料は 1 つでもありますか。あるとしたらどれですか?', en: 'Is there a single document you can trust as accurate? Which one?' },
+    ],
+    favor: ['期限', '聞き取り', '前提', '粒度', '調査', 'time-box', 'interview', 'assumption', 'survey'],
+    avoid: ['網羅', '完全', 'exhaustive', 'complete inventory'],
+  },
+  {
+    id: 'assets-available',
+    axis: 'assets',
+    priority: 1,
+    label: { ja: '既存の資料がある', en: 'Existing material is available' },
+    cues: [
+      '資料はある', '設計書はある', 'ドキュメントはある', '一覧はある', '台帳はある', '棚卸し済',
+      '既に整理', 'すでに整理', 'documentation exists', 'we have an inventory', 'already documented',
+    ],
+    implication: {
+      ja: '資料があるなら、新しく作るより「どれが今も正しいか」の判定が先。古い資料を土台にした計画は、実装段階で全部やり直しになる。',
+      en: 'With material already in hand, judging which parts are still true comes before writing anything new. A plan built on stale documents is redone from scratch at implementation.',
+    },
+    actions: [
+      { ja: '既存資料を「今も正しい / 古い / 不明」の 3 つに仕分けし、正しいものだけを土台にする。仕分けは作成者に聞けば 1 日で終わる。', en: 'Sort the existing material into still true, stale, and unknown, and build only on the first. Asking the authors settles it in a day.' },
+      { ja: '作り直す前に、各資料の最終更新日と作成者を確認する。更新が 2 年以上止まっている資料は、現状ではなく過去の計画。', en: 'Before rewriting anything, check each document\'s last-updated date and author. Anything untouched for two years describes a past plan, not the present.' },
+    ],
+    questions: [
+      { ja: 'その資料は最後にいつ更新され、実態と合っていることを誰が確認しましたか?', en: 'When was that material last updated, and who has confirmed it matches reality?' },
+    ],
+    favor: ['既存', '再利用', '更新', '確認', 'existing', 'reuse', 'verify'],
+    avoid: ['ゼロから', '新しく作', 'from scratch'],
+  },
+  {
+    id: 'authority-none',
+    axis: 'authority',
+    priority: 1,
+    label: { ja: '自分に決定権が無い', en: 'You do not hold the decision' },
+    cues: [
+      '決定権がない', '決定権が無い', '権限がない', '権限が無い', '決められない', '決裁権',
+      '自分では決め', '上に諮', '説得しないと',
+      'no authority', 'cannot decide', 'not my call', 'need approval from',
+    ],
+    implication: {
+      ja: '決定権が無い立場でやるべきなのは決めることではなく、決める人が決められる材料を出すこと。意見を持っていくと止まり、選択肢を持っていくと進む。',
+      en: 'Without the decision rights, the job is not to decide but to make the decision decidable. Bringing an opinion stalls; bringing options moves.',
+    },
+    actions: [
+      { ja: '案を「選択肢 A / B と、それぞれで諦めるもの」の形にして持っていく。推奨は付けるが、決めるのは相手だと明示する。', en: 'Bring it as option A, option B, and what each one gives up. State a recommendation, but make clear the decision is theirs.' },
+      { ja: '決定の期限と、決めなかった場合に何が起きるかを添える。放置のコストが見えないと決定は先送りされる。', en: 'Attach a decision deadline and what happens if nothing is decided. Without a visible cost of delay, the decision is deferred.' },
+    ],
+    questions: [
+      { ja: 'この件の最終決定者は誰で、その人が判断するには何が必要ですか?', en: 'Who is the final decision maker here, and what do they need in order to decide?' },
+    ],
+    favor: ['選択肢', '決定', '権限', '決裁', 'option', 'decision', 'authority', 'trade-off'],
+    avoid: [],
+  },
+  {
+    id: 'field-resistance',
+    axis: 'climate',
+    priority: 1,
+    label: { ja: '現場の抵抗がある', en: 'Resistance on the ground' },
+    cues: [
+      '反発', '抵抗', '非協力', '協力が得られ', '現場が動かない', '嫌がら', '押し付け',
+      '納得していない', '不満',
+      // 「反対」は語尾が揺れるので前方一致で拾う(「正反対」「反対側」を巻き込まない形にする)
+      '反対し', '反対され', '反対が', '反対の声', '猛反対', '賛同が得られな', '乗り気でな',
+      'resistance', 'pushback', 'push back', 'not cooperating', 'imposed', 'opposed', 'opposition',
+    ],
+    implication: {
+      ja: '現場が抵抗する原因はほぼ「決まった後に知らされた」こと。説明の仕方ではなく、関与のさせ方を変えないと同じことが繰り返される。',
+      en: 'Resistance almost always traces to being told after the fact. Change how people are involved, not how the decision is explained, or it repeats.',
+    },
+    actions: [
+      { ja: '反対している部門から 1 人を検討の側に入れる。決まった後の説明会では遅い。', en: 'Bring one person from the objecting department into the work itself. A briefing after the decision is too late.' },
+      { ja: 'その部門が今困っていることを 1 つ、この取り組みの中で先に解決する。取引材料が無い提案は通らない。', en: 'Solve one thing that department is actually struggling with, first, inside this initiative. A proposal with nothing to trade does not land.' },
+    ],
+    questions: [
+      { ja: '反対している人は、具体的に何を失うと思っていますか?', en: 'What exactly do the people objecting believe they will lose?' },
+    ],
+    favor: ['巻き込', '関与', '対話', '味方', '説明', 'involve', 'engage', 'stakeholder'],
+    avoid: ['強制', '必須', 'enforce', 'mandate'],
+  },
+  {
+    id: 'regulated',
+    axis: 'regulation',
+    priority: 1,
+    label: { ja: '規制・監査が関わる', en: 'Regulation or audit is involved' },
+    cues: [
+      '規制', '当局', '金融庁', '監査', 'コンプライアンス', '法令', '個人情報', '内部統制',
+      'gdpr', 'regulator', 'regulatory', 'audit', 'compliance',
+    ],
+    implication: {
+      ja: '規制が絡むと、期限と証跡が外から決まる。設計より先に「何を、いつまでに、誰に、どう示すか」を確定させないと、後から証跡は作れない。',
+      en: 'Once regulation is involved, both the deadline and the evidence requirements come from outside. Settle what must be shown, by when, and to whom before design — evidence cannot be manufactured afterwards.',
+    },
+    actions: [
+      { ja: '適用される制度と最初の提出期日を確定し、そこから逆算して設計の締切を置く。', en: 'Confirm which regime applies and the first submission date, then set the design deadlines by working backwards from it.' },
+      { ja: '決定の根拠を残す仕組みを最初から入れる。「誰が、いつ、何を根拠に決めたか」を後から再現できるかで監査の結果が決まる。', en: 'Build the decision-record mechanism in from the start. Audits turn on whether you can reconstruct who decided what, when, and on what basis.' },
+    ],
+    questions: [
+      { ja: '適用される規制と最初の期日は確定していますか。それを確認したのは誰ですか?', en: 'Are the applicable regulation and the first deadline confirmed, and who confirmed them?' },
+    ],
+    favor: ['証跡', '監査', '規制', '根拠', '記録', 'audit', 'evidence', 'regulat', 'trace'],
+    avoid: [],
+  },
+];
+
+/**
+ * 条件の組み合わせに対する助言 / Advice that only applies to a combination of conditions.
+ *
+ * `requires` は OR グループの配列。全グループにそれぞれ 1 つ以上該当したときだけ成立する。
+ */
+export interface ConditionCombo {
+  id: string;
+  requires: SituationConditionId[][];
+  label: Bilingual;
+  advice: Bilingual;
+}
+
+export const CONDITION_COMBOS: ConditionCombo[] = [
+  {
+    id: 'no-money-no-people',
+    requires: [['budget-none', 'budget-tight'], ['team-solo']],
+    label: { ja: '金も人も無い', en: 'Neither money nor people' },
+    advice: {
+      ja: '金も人も無い状態で全社の絵を描くのは物理的に不可能なので、範囲を 1 業務・1 データに固定するところから始める。順番は「範囲を固定 → 90 日で 1 枚 → その 1 枚で次の予算と人を取る」。この順番を崩すと、途中で力尽きて何も残らない。',
+      en: 'Drawing the whole enterprise with neither money nor people is physically impossible, so start by fixing scope to one process and one data set. The order is: fix scope, produce one page in ninety days, use that page to win the next budget and the next pair of hands. Break the order and the effort runs out with nothing to show.',
+    },
+  },
+  {
+    id: 'no-money-no-sponsor',
+    requires: [['budget-none', 'budget-tight'], ['sponsor-absent']],
+    label: { ja: '金も経営の関心も無い', en: 'Neither money nor executive attention' },
+    advice: {
+      ja: '金も関心も無いときに正論を出しても動かない。今まさに現場が痛がっている作業を 1 つ選び、その作業に毎月かかっている人日と失敗件数だけを数字にして持っていく。抽象的な将来像ではなく、目の前の損失が唯一の入り口になる。',
+      en: 'With neither funding nor attention, a correct argument changes nothing. Pick one task the organisation is visibly hurting on and bring only two numbers: the person-days it consumes monthly and how often it goes wrong. Present loss, not a future-state vision — that is the only door open.',
+    },
+  },
+  {
+    id: 'money-but-no-time',
+    requires: [['budget-ample'], ['deadline-urgent', 'deadline-fixed']],
+    label: { ja: '金はあるが時間が無い', en: 'Funded but out of time' },
+    advice: {
+      ja: '金で買えるのは並行実行だけで、意思決定の速度は買えない。増員する前に「誰が何を、いつまでに決めるか」を先に固める。外部要員は調査・検証・移行作業に投入し、判断そのものは外に出さない。判断を外注した案件は、期限直前に必ず差し戻される。',
+      en: 'Money buys parallelism and nothing else; decision speed is not for sale. Fix who decides what by when before adding people. Put external hands on investigation, trials, and migration work, and keep judgement inside. Outsourced judgement always comes back for rework just before the deadline.',
+    },
+  },
+  {
+    id: 'money-and-sponsor',
+    requires: [['budget-ample'], ['sponsor-committed']],
+    label: { ja: '金も経営の支持もある', en: 'Both funding and executive backing' },
+    advice: {
+      ja: '予算と経営の支持が両方揃っている期間は長くは続かない。この期間に通しておくべきは、新しいものを作る決定より「減らす決定」— 廃止するシステム、統合する業務、正本にするデータ、必須にする標準。増やす決定は後からでも通るが、減らす決定はこの時期にしか通らない。',
+      en: 'A window with both funding and executive backing does not stay open long. What belongs in it is not the decision to build but the decisions to subtract — which systems retire, which processes merge, which data is the system of record, which standards become mandatory. Additive decisions can pass later; subtractive ones only pass now.',
+    },
+  },
+  {
+    id: 'solo-and-urgent',
+    requires: [['team-solo'], ['deadline-urgent']],
+    label: { ja: 'ひとりで期限に追われている', en: 'Alone and against the clock' },
+    advice: {
+      ja: 'ひとりで期限が迫っている状況で取れる手は、作る量を減らすことだけ。出す資料を 1 つに決め、それ以外は口頭と既存資料で済ませる。合わせて「今週決まらないと間に合わない決定」を関係者に明示し、決定待ちの時間を自分の作業時間から切り離す。',
+      en: 'Alone and against the clock, the only available lever is producing less. Choose one document to deliver and cover everything else verbally or with existing material. In parallel, tell stakeholders explicitly which decisions must land this week, so waiting for them stops eating your own working time.',
+    },
+  },
+];
+
+/** 打ち消しを示す語(日本語)。単独の「ない」は広すぎるので採らない */
+const NEGATION_MARKERS_JA = [
+  'やらない', 'やらん', 'やめた', 'やめる', '取りやめ', '取り止め', '中止', '白紙',
+  '見送', '対象外', 'スコープ外', '範囲外', '除外', '却下', '断念', '見合わせ',
+  '実施しない', '行わない', 'しないことに', 'ないことに決', '予定はない', '予定は無い', '予定なし',
+  '考えていない', '検討していない', '検討しない', '必要ない', '必要無い', '不要',
+  'なくなった', '無くなった', 'ボツ', 'ではない', 'ではありません', 'じゃない', 'ではなく',
+];
+
+/** 打ち消しを示す語(英語)。素の "not" は広すぎるので採らない */
+const NEGATION_MARKERS_EN = [
+  'not doing', 'decided not to', 'ruled out', 'out of scope', 'not in scope', 'off the table',
+  'no longer', 'cancelled', 'canceled', 'called off', 'shelved', 'abandoned', 'dropped',
+  'will not', "won't", 'not going ahead', 'not going to', 'is not happening', 'scrapped',
+];
+
+/** 打ち消しを補強する語(単独では打ち消しにしない) */
+const DECISION_MARKERS = ['決まった', '決定した', '決まりました', 'has been decided', 'was decided'];
+
+/**
+ * 打ち消しに見えて打ち消しではない言い回し(二重否定・留保)。
+ *
+ * 「予算が無いわけではない」は「予算はある」に近く、「予算が無い」でも
+ * 「予算の話題は対象外」でもない。どちらに数えても嘘になるので、
+ * この節は肯定にも打ち消しにも入れず、判断を保留する。
+ */
+const HEDGE_MARKERS = [
+  'わけではない', 'わけでは無い', 'わけではありません', 'わけじゃない', 'わけでもない',
+  'とは限らない', 'とも限らない', 'ないこともない', 'ないとは言えない', 'なくはない',
+  'not necessarily', 'not entirely', 'not that we', 'not to say',
+];
+
+/** 節 1 つ / One clause of the situation text. */
+export interface SituationClause {
+  text: string;
+  negated: boolean;
+  /** 打ち消しと判断した語 */
+  marker?: string;
+  /** 「決まった」など、打ち消しを補強する語 */
+  decided?: boolean;
+  /** 二重否定・留保のため、肯定にも打ち消しにも数えない節 */
+  hedged?: boolean;
+  /** 保留と判断した語 */
+  hedgeMarker?: string;
+}
+
+/** 検出した条件 1 件 / One detected condition with its evidence. */
+export interface DetectedCondition {
+  condition: SituationCondition;
+  /** 根拠になった語 */
+  cues: string[];
+}
+
+/** 状況の読み取り結果 / The result of reading a situation description. */
+export interface SituationReading {
+  clauses: SituationClause[];
+  /** 打ち消されていない部分だけを繋いだ文 */
+  positiveText: string;
+  /** 打ち消されている部分だけを繋いだ文 */
+  negatedText: string;
+  /** 打ち消しが 1 つでもあったか */
+  hasNegation: boolean;
+  /** 二重否定・留保のため判断を保留した節 */
+  hedged: SituationClause[];
+  /** 検出した条件(軸ごとに 1 件) */
+  conditions: DetectedCondition[];
+  /** 記述が無く判断していない軸 */
+  unknownAxes: SituationAxis[];
+  /** 成立した条件の組み合わせ */
+  combos: ConditionCombo[];
+  /** 並べ替えに使う内容語 */
+  terms: string[];
+}
+
+const CLAUSE_SPLIT = /[。．.!?！？\n;；、,]+/;
+
+/** 語が本文に出るか(英語は小文字化して比較) */
+function hasCue(haystack: string, lowerHaystack: string, cue: string): boolean {
+  return /^[\x20-\x7E]+$/.test(cue) ? lowerHaystack.includes(cue.toLowerCase()) : haystack.includes(cue);
+}
+
+/** 状況文を節に割り、節ごとに打ち消しの有無を判定する */
+export function splitSituationClauses(situation: string): SituationClause[] {
+  const parts = situation
+    .split(CLAUSE_SPLIT)
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0);
+  return parts.map((part) => {
+    const lower = part.toLowerCase();
+    // 二重否定・留保が先。「〜が無いわけではない」を打ち消しと読むと話題を誤って外す
+    const hedgeMarker = HEDGE_MARKERS.find((m) => hasCue(part, lower, m));
+    if (hedgeMarker) return { text: part, negated: false, hedged: true, hedgeMarker };
+    const marker =
+      NEGATION_MARKERS_JA.find((m) => part.includes(m)) ??
+      NEGATION_MARKERS_EN.find((m) => lower.includes(m));
+    const decided = DECISION_MARKERS.some((m) => part.includes(m) || lower.includes(m));
+    return marker ? { text: part, negated: true, marker, decided } : { text: part, negated: false };
+  });
+}
+
+const TERM_STOPLIST = new Set([
+  'こと', 'もの', 'ため', '場合', '状況', '現在', '今回', '自分', '我々', '相談', '課題', '問題',
+  '必要', '検討', '実施', '対応', '状態', '方法', '内容', '部分', '以下', '以上', '結果',
+  'that', 'this', 'with', 'from', 'have', 'been', 'they', 'them', 'what', 'when', 'which', 'there',
+  'about', 'would', 'could', 'should', 'their', 'because', 'want', 'need', 'like', 'just', 'also',
+]);
+
+/** 並べ替えに使う内容語を取り出す(形態素解析は使わず、文字種の連続で切る) */
+export function extractSituationTerms(situation: string): string[] {
+  const found = new Set<string>();
+  const add = (t: string): void => {
+    const v = t.trim().toLowerCase();
+    if (v.length < 2 || TERM_STOPLIST.has(v)) return;
+    found.add(v);
+  };
+  for (const m of situation.matchAll(/[一-鿿々]{2,}/gu)) {
+    const run = m[0];
+    add(run);
+    if (run.length >= 4) {
+      for (let i = 0; i + 2 <= run.length; i += 1) add(run.slice(i, i + 2));
+    }
+  }
+  for (const m of situation.matchAll(/[ァ-ー]{3,}/gu)) add(m[0]);
+  for (const m of situation.toLowerCase().matchAll(/[a-z][a-z-]{3,}/g)) add(m[0]);
+  return Array.from(found);
+}
+
+/** 条件を検出する。同じ軸で複数当たった場合は根拠の数、次に priority で 1 件に絞る */
+export function detectSituationConditions(text: string): DetectedCondition[] {
+  const lower = text.toLowerCase();
+  const byAxis = new Map<SituationAxis, DetectedCondition>();
+  for (const condition of SITUATION_CONDITIONS) {
+    const cues = condition.cues.filter((c) => hasCue(text, lower, c));
+    if (cues.length === 0) continue;
+    const found: DetectedCondition = { condition, cues };
+    const current = byAxis.get(condition.axis);
+    if (!current) {
+      byAxis.set(condition.axis, found);
+      continue;
+    }
+    const better =
+      cues.length > current.cues.length ||
+      (cues.length === current.cues.length && condition.priority > current.condition.priority);
+    if (better) byAxis.set(condition.axis, found);
+  }
+  const order = SITUATION_CONDITIONS.map((c) => c.id);
+  return Array.from(byAxis.values()).sort(
+    (a, b) => order.indexOf(a.condition.id) - order.indexOf(b.condition.id),
+  );
+}
+
+/** 成立している条件の組み合わせを返す */
+export function matchConditionCombos(conditions: DetectedCondition[]): ConditionCombo[] {
+  const ids = new Set(conditions.map((c) => c.condition.id));
+  return CONDITION_COMBOS.filter((combo) =>
+    combo.requires.every((group) => group.some((id) => ids.has(id))),
+  );
+}
+
+/**
+ * 状況文を読み取る。
+ *
+ * 打ち消された節は条件検出と話題の一致から外す。ただし全部の節が打ち消されている場合は
+ * 「打ち消しではなく、そういう書き方をしているだけ」の可能性が高いので、打ち消しを適用しない。
+ */
+export function readSituation(situation: string): SituationReading {
+  const clauses = splitSituationClauses(situation);
+  const positives = clauses.filter((c) => !c.negated && !c.hedged);
+  const applyNegation = positives.length > 0 && positives.some((c) => c.text.length >= 4);
+  const effective = applyNegation ? clauses : clauses.map((c) => ({ ...c, negated: false }));
+  // 保留した節はどちらの文にも入れない(肯定として読むのも打ち消すのも誤りになる)
+  const positiveText = effective.filter((c) => !c.negated && !c.hedged).map((c) => c.text).join('。');
+  const negatedText = effective.filter((c) => c.negated).map((c) => c.text).join('。');
+  const conditions = detectSituationConditions(positiveText);
+  const axes = new Set(conditions.map((c) => c.condition.axis));
+  const unknownAxes = (Object.keys(SITUATION_AXIS_LABELS) as SituationAxis[]).filter(
+    (a) => !axes.has(a),
+  );
+  return {
+    clauses: effective,
+    positiveText,
+    negatedText,
+    hasNegation: effective.some((c) => c.negated),
+    hedged: effective.filter((c) => c.hedged),
+    conditions,
+    unknownAxes,
+    combos: matchConditionCombos(conditions),
+    terms: extractSituationTerms(positiveText),
+  };
+}
+
+/**
+ * ルールが持つ項目を、状況との関連が強い順に並べ替えて先頭から返す。
+ *
+ * 位置で切ると入力に関係なく同じ項目が出てしまうので、
+ * (1) 状況文の内容語、(2) 一致したキーワード、(3) 条件の favor / avoid で重み付けする。
+ * どれにも当たらなければ元の順序を保つので、短い相談文でも従来どおりの並びになる。
+ */
+export function rankByRelevance(
+  items: Bilingual[],
+  reading: SituationReading,
+  extraTerms: string[],
+  limit: number,
+): Bilingual[] {
+  if (limit <= 0) return [];
+  if (items.length <= 1) return items.slice(0, limit);
+  const scored = items.map((item, index) => {
+    const hay = `${item.ja} ${item.en}`.toLowerCase();
+    let score = 0;
+    for (const t of reading.terms) if (hay.includes(t)) score += 2;
+    for (const t of extraTerms) {
+      const v = t.toLowerCase();
+      if (v.length >= 2 && hay.includes(v)) score += 2;
+    }
+    for (const d of reading.conditions) {
+      for (const f of d.condition.favor) if (hay.includes(f.toLowerCase())) score += 3;
+      for (const a of d.condition.avoid) if (hay.includes(a.toLowerCase())) score -= 4;
+    }
+    return { item, index, score };
+  });
+  scored.sort((a, b) => b.score - a.score || a.index - b.index);
+  return scored.slice(0, limit).map((s) => s.item);
+}
+
+/** 条件から出す助言をまとめる(数が増えすぎないよう上限を掛ける) */
+export function situationAdvice(
+  reading: SituationReading,
+  actionLimit = 5,
+  questionLimit = 4,
+): { actions: Bilingual[]; questions: Bilingual[] } {
+  const actions: Bilingual[] = [];
+  const questions: Bilingual[] = [];
+  const seenA = new Set<string>();
+  const seenQ = new Set<string>();
+  // 条件ごとに 1 件ずつ拾ってから 2 件目に回る(1 つの条件で枠を使い切らせない)
+  const maxDepth = Math.max(
+    0,
+    ...reading.conditions.map((c) => Math.max(c.condition.actions.length, c.condition.questions.length)),
+  );
+  for (let depth = 0; depth < maxDepth; depth += 1) {
+    for (const d of reading.conditions) {
+      const a = d.condition.actions[depth];
+      if (a && !seenA.has(a.ja) && actions.length < actionLimit) {
+        seenA.add(a.ja);
+        actions.push(a);
+      }
+      const q = d.condition.questions[depth];
+      if (q && !seenQ.has(q.ja) && questions.length < questionLimit) {
+        seenQ.add(q.ja);
+        questions.push(q);
+      }
+    }
+  }
+  return { actions, questions };
+}

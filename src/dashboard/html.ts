@@ -93,7 +93,7 @@ export function renderDashboardHtml(lang: Lang = 'both'): string {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>TOGAF 10 EAP — ${strings.dashboard}</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232f5d8a'/%3E%3Ctext x='16' y='23' font-size='15' font-family='sans-serif' font-weight='700' text-anchor='middle' fill='white'%3EEA%3C/text%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23101c2e'/%3E%3Cg transform='rotate(-90 16 16)'%3E%3Ccircle cx='16' cy='16' r='11' fill='none' stroke='%23e8a52c' stroke-width='4.4' stroke-dasharray='15.3 53.8' stroke-dashoffset='0'/%3E%3Ccircle cx='16' cy='16' r='11' fill='none' stroke='%233f7fd6' stroke-width='4.4' stroke-dasharray='15.3 53.8' stroke-dashoffset='-17.3'/%3E%3Ccircle cx='16' cy='16' r='11' fill='none' stroke='%235f8fd2' stroke-width='4.4' stroke-dasharray='15.3 53.8' stroke-dashoffset='-34.6'/%3E%3Ccircle cx='16' cy='16' r='11' fill='none' stroke='%233ec9e0' stroke-width='4.4' stroke-dasharray='15.3 53.8' stroke-dashoffset='-51.9'/%3E%3C/g%3E%3Ccircle cx='16' cy='16' r='3' fill='%23f2f6fb'/%3E%3C/svg%3E">
 <script>
 /* 描画前にテーマを適用してちらつきを防ぐ */
 (function () {

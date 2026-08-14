@@ -14,13 +14,17 @@ import {
   CAPABILITY_LEVELS,
   CAPABILITY_METHOD,
   CROSS_MAPPING,
+  INDUSTRY_CAPABILITY_SETS,
   NAMING_LEXICON,
   REFERENCE_CAPABILITIES,
   VALUE_STREAM_METHOD,
+  detectIndustryCapabilitySets,
   findAntiPattern,
   findCrossMapping,
+  findIndustryCapabilitySet,
   type CapabilityGroup,
   type CrossMapping,
+  type IndustryCapabilitySet,
   type Method,
   type ReferenceCapability,
 } from '../knowledge/business-architecture.js';
@@ -189,6 +193,32 @@ interface ScoredCapability {
   hits: string[];
 }
 
+/**
+ * 草案に載る能力 1 件。
+ * 汎用セットと業界セットを同じ形にして、描画側が区別せず並べられるようにする。
+ */
+interface DraftItem {
+  cap: ReferenceCapability;
+  /** 事業説明の語に反応した手がかり */
+  hits: string[];
+  /** 業界セット由来か */
+  fromIndustry: boolean;
+  /** 業界セット名(業界由来のときだけ) */
+  setName?: Bilingual;
+}
+
+/** 業界セットの決定結果 */
+interface IndustryResolution {
+  /** 適用した業界セット(0〜2 件) */
+  sets: IndustryCapabilitySet[];
+  /** 記述から推定したか(true なら出力で必ず断る) */
+  inferred: boolean;
+  /** industry の指定はあったが、対応するセットが無かったときの入力値 */
+  unknownInput?: string;
+  /** 推定・照合に使った語(強い順) */
+  matched: string[];
+}
+
 function scoreCapabilities(haystackLower: string): ScoredCapability[] {
   return REFERENCE_CAPABILITIES.map((cap) => ({
     cap,
@@ -196,12 +226,98 @@ function scoreCapabilities(haystackLower: string): ScoredCapability[] {
   }));
 }
 
+/** 用意がある業界セットの一覧を 1 行にする(指定できる値を利用者に見せるため) */
+function industryMenu(lang: Lang): string {
+  return INDUSTRY_CAPABILITY_SETS.map((s) => `\`${s.id}\`(${lang === 'en' ? s.name.en : s.name.ja})`).join(' / ');
+}
+
+/**
+ * industry 引数と事業説明から、適用する業界セットを決める。
+ * - 指定があればそれを優先する
+ * - 指定が無ければ記述から推定する(推定した事実は必ず出力に出す)
+ * - 記述が別の業界を強く示すときは 2 つ目として足す(銀行が保険窓販を主力にしている等)
+ */
+function resolveIndustry(businessDescription: string, industry: string | undefined): IndustryResolution {
+  const detections = detectIndustryCapabilitySets(businessDescription);
+  const specifiedRaw = industry?.trim() ?? '';
+  const specified = specifiedRaw.length > 0 ? findIndustryCapabilitySet(specifiedRaw) : undefined;
+
+  if (specified) {
+    const sets = [specified];
+    // 指定された業界とは別の業界を記述が強く示している場合だけ、2 つ目を足す
+    const extra = detections.find((d) => d.set.id !== specified.id && d.confident && d.score >= 8);
+    if (extra) sets.push(extra.set);
+    const matched = detections.find((d) => d.set.id === specified.id)?.matched ?? [];
+    return { sets, inferred: false, matched };
+  }
+
+  const unknownInput = specifiedRaw.length > 0 ? specifiedRaw : undefined;
+  // 当たり所が 1 つの能力に偏っている候補(confident=false)は推定に使わない。
+  // 素点 4 未満も「その語がたまたま出ただけ」の可能性が高いので推定しない。
+  const top = detections.find((d) => d.confident);
+  if (top && top.score >= 4) {
+    return { sets: [top.set], inferred: true, matched: top.matched, unknownInput };
+  }
+  return { sets: [], inferred: false, matched: [], unknownInput };
+}
+
+/** 業界セット + 汎用セットから草案を組み立てる */
+function buildDraftItems(
+  haystack: string,
+  resolution: IndustryResolution,
+): {
+  drafted: DraftItem[];
+  deferred: ScoredCapability[];
+  /** 業界能力に置き換えた汎用能力(汎用 → 置き換えた業界能力) */
+  replaced: { generic: ReferenceCapability; by: DraftItem }[];
+} {
+  const industryItems: DraftItem[] = [];
+  const supersededBy = new Map<string, DraftItem>();
+  for (const set of resolution.sets) {
+    for (const cap of set.capabilities) {
+      const item: DraftItem = {
+        cap,
+        hits: cap.triggers.filter((t) => matchesKeyword(haystack, t)),
+        fromIndustry: true,
+        setName: set.name,
+      };
+      industryItems.push(item);
+      for (const superseded of cap.supersedes ?? []) {
+        if (!supersededBy.has(superseded)) supersededBy.set(superseded, item);
+      }
+    }
+  }
+
+  const scored = scoreCapabilities(haystack);
+  const genericItems: DraftItem[] = scored
+    .filter((s) => (s.cap.universal || s.hits.length > 0) && !supersededBy.has(s.cap.id))
+    .map((s) => ({ cap: s.cap, hits: s.hits, fromIndustry: false }));
+  const deferred = scored.filter((s) => !s.cap.universal && s.hits.length === 0 && !supersededBy.has(s.cap.id));
+  const replaced = scored
+    .filter((s) => supersededBy.has(s.cap.id))
+    .map((s) => ({ generic: s.cap, by: supersededBy.get(s.cap.id)! }));
+
+  // 分類ごとに「業界固有 → 汎用」の順で並べる。事業側が最初に見るのは業界の言葉。
+  const drafted: DraftItem[] = [];
+  for (const g of GROUP_ORDER) {
+    drafted.push(...industryItems.filter((i) => i.cap.group === g));
+    drafted.push(...genericItems.filter((i) => i.cap.group === g));
+  }
+  return { drafted, deferred, replaced };
+}
+
+/** 一覧に付ける印(◆ = 業界固有、★ = 説明文の語に反応) */
+function marks(item: DraftItem): string {
+  const m = `${item.fromIndustry ? '◆' : ''}${item.hits.length > 0 ? '★' : ''}`;
+  return m;
+}
+
 function renderDraftCapabilityMap(businessDescription: string, industry: string | undefined, lang: Lang): string {
   const haystack = `${businessDescription} ${industry ?? ''}`.toLowerCase();
-  const scored = scoreCapabilities(haystack);
-
-  const drafted = scored.filter((s) => s.cap.universal || s.hits.length > 0);
-  const deferred = scored.filter((s) => !s.cap.universal && s.hits.length === 0);
+  const resolution = resolveIndustry(businessDescription, industry);
+  const { drafted, deferred, replaced } = buildDraftItems(haystack, resolution);
+  const industryCount = drafted.filter((d) => d.fromIndustry).length;
+  const hitCount = drafted.filter((d) => d.hits.length > 0).length;
 
   const out: string[] = [];
   out.push(`# ${inline('レベル 1 能力マップ(草案)', 'Level-1 capability map — draft', lang)}`);
@@ -217,13 +333,92 @@ function renderDraftCapabilityMap(businessDescription: string, industry: string 
   );
   if (industry && industry.trim().length > 0) {
     out.push('');
-    out.push(msg(`**業界**: ${industry.trim()}`, `**Industry**: ${industry.trim()}`, lang));
+    out.push(msg(`**業界(指定)**: ${industry.trim()}`, `**Industry (as given)**: ${industry.trim()}`, lang));
+  }
+  out.push('');
+
+  // --- 業界の判定結果 / Which industry set was applied -----------------------
+  out.push(`## ${inline('適用した業界セット', 'Industry set applied', lang)}`);
+  out.push('');
+  if (resolution.sets.length === 0) {
+    if (resolution.unknownInput) {
+      out.push(
+        msg(
+          `industry に「${resolution.unknownInput}」が指定されましたが、この業界の能力セットはまだ用意がありません。汎用セットだけで草案を作りました。用意がある業界: ${industryMenu('ja')}。`,
+          `You passed industry "${resolution.unknownInput}", but there is no capability set for it yet, so this draft uses the generic set only. Sets available: ${industryMenu('en')}.`,
+          lang,
+        ),
+      );
+    } else {
+      out.push(
+        msg(
+          `事業の説明から業界を判定できなかったため、**汎用セットだけ**で草案を作っています。このままだと同業他社と同じ図になります。\`industry\` を指定すると、その業界の実務で通る能力(例: 銀行なら「与信・審査」「AML / 金融犯罪対策」)を足せます。指定できる業界: ${industryMenu('ja')}。`,
+          `No industry could be inferred from your description, so this draft uses **the generic set only** — as it stands it will look like every competitor. Pass \`industry\` to add capabilities named the way the industry actually names them (for a bank: credit underwriting, financial crime). Available: ${industryMenu('en')}.`,
+          lang,
+        ),
+      );
+    }
+  } else {
+    for (const set of resolution.sets) {
+      out.push(`- **${line(set.name, lang)}** — ${line(set.essence, lang)}`);
+    }
+    out.push('');
+    if (resolution.inferred) {
+      const setName = resolution.sets[0]!.name;
+      if (resolution.unknownInput) {
+        out.push(
+          msg(
+            `industry に指定された「${resolution.unknownInput}」に対応する能力セットが無かったため、事業の説明から業界を推定しました。`,
+            `There is no capability set matching the industry you passed ("${resolution.unknownInput}"), so the industry was inferred from your description instead.`,
+            lang,
+          ),
+        );
+        out.push('');
+      }
+      out.push(
+        msg(
+          `**記述から「${setName.ja}」と判断しました。違う場合は \`industry\` で指定してください。** 指定できる業界: ${industryMenu('ja')}。`,
+          `**Inferred "${setName.en}" from your description. If that is wrong, pass \`industry\` explicitly.** Available: ${industryMenu('en')}.`,
+          lang,
+        ),
+      );
+    } else {
+      out.push(
+        msg(
+          `\`industry\` の指定に基づいて業界セットを適用しました。`,
+          `The industry set was applied from your \`industry\` argument.`,
+          lang,
+        ),
+      );
+    }
+    if (resolution.matched.length > 0) {
+      const words = resolution.matched.slice(0, 10).join(' / ');
+      out.push('');
+      out.push(
+        msg(`判定に効いた語: ${words}`, `Words that drove this: ${words}`, lang),
+      );
+    }
+    if (resolution.sets.length > 1) {
+      // 2 セットになるのは「industry で指定した業界」と「説明文が強く示した別の業界」が
+      // 食い違ったときだけ。どちらがどちらから来たのかを書かないと、利用者は
+      // 指定していない業界の能力が混ざった理由を辿れない。
+      const asked = resolution.sets[0]!.name;
+      const added = resolution.sets[1]!.name;
+      out.push('');
+      out.push(
+        msg(
+          `\`industry\` に指定された「${asked.ja}」に加えて、事業の説明が別の業界「${added.ja}」を強く示したため、両方の能力セットを足しています。指定した業界だけでよければ「${added.ja}」側の能力を落とし、落とした旨を記録してください。`,
+          `On top of "${asked.en}" from your \`industry\` argument, the description pointed strongly at "${added.en}", so both sets were added. If only the industry you named applies, drop the "${added.en}" capabilities and record that you did.`,
+          lang,
+        ),
+      );
+    }
   }
   out.push('');
   out.push(
     msg(
-      `草案 ${drafted.length} 件(うち事業説明に反応した重点候補 ${drafted.filter((d) => d.hits.length > 0).length} 件)。★ = 説明文の語に反応した能力。`,
-      `${drafted.length} capabilities drafted; ${drafted.filter((d) => d.hits.length > 0).length} of them reacted to wording in your description. ★ marks those.`,
+      `草案 ${drafted.length} 件(業界固有 ${industryCount} 件 / 汎用 ${drafted.length - industryCount} 件、うち説明文の語に反応 ${hitCount} 件)。◆ = 業界固有の能力、★ = 説明文の語に反応した能力。`,
+      `${drafted.length} capabilities drafted: ${industryCount} industry-specific, ${drafted.length - industryCount} generic, ${hitCount} of them reacting to wording in your description. ◆ marks industry-specific, ★ marks the reactions.`,
       lang,
     ),
   );
@@ -242,7 +437,8 @@ function renderDraftCapabilityMap(businessDescription: string, industry: string 
     for (const item of items) {
       idx += 1;
       const name = mermaidLabel(lang === 'en' ? item.cap.name.en : item.cap.name.ja);
-      out.push(`    C${idx}["${name}${item.hits.length > 0 ? ' ★' : ''}"]`);
+      const mark = marks(item);
+      out.push(`    C${idx}["${name}${mark.length > 0 ? ` ${mark}` : ''}"]`);
     }
     out.push('  end');
   }
@@ -253,17 +449,50 @@ function renderDraftCapabilityMap(businessDescription: string, industry: string 
   out.push(`## ${inline('草案の中身', 'What is in the draft', lang)}`);
   out.push('');
   out.push(
-    `| ${inline('分類', 'Group', lang)} | ${inline('能力', 'Capability', lang)} | ★ | ${inline('この能力とは', 'What it means', lang)} | ${inline('弱いと起きること', 'Symptoms when weak', lang)} |`,
+    `| ${inline('分類', 'Group', lang)} | ${inline('能力', 'Capability', lang)} | ${inline('由来', 'Source', lang)} | ★ | ${inline('この能力とは', 'What it means', lang)} | ${inline('弱いと起きること', 'Symptoms when weak', lang)} |`,
   );
-  out.push('| --- | --- | :-: | --- | --- |');
+  out.push('| --- | --- | --- | :-: | --- | --- |');
   for (const g of GROUP_ORDER) {
     for (const item of drafted.filter((d) => d.cap.group === g)) {
+      const origin =
+        item.fromIndustry && item.setName
+          ? `◆ ${cellBi(item.setName, lang)}`
+          : inline('汎用', 'Generic', lang);
       out.push(
-        `| ${cellBi(CAPABILITY_GROUP_LABELS[g], lang)} | **${cellBi(item.cap.name, lang)}** | ${item.hits.length > 0 ? '★' : ''} | ${cellBi(item.cap.definition, lang)} | ${cellBi(item.cap.weakSigns[0] ?? { ja: '—', en: '—' }, lang)} |`,
+        `| ${cellBi(CAPABILITY_GROUP_LABELS[g], lang)} | **${cellBi(item.cap.name, lang)}** | ${origin} | ${item.hits.length > 0 ? '★' : ''} | ${cellBi(item.cap.definition, lang)} | ${cellBi(item.cap.weakSigns[0] ?? { ja: '—', en: '—' }, lang)} |`,
       );
     }
   }
   out.push('');
+
+  // 置き換えた汎用能力 / Generic capabilities replaced by industry wording
+  if (replaced.length > 0) {
+    out.push(`## ${inline('業界の言葉に置き換えた汎用能力', 'Generic capabilities replaced by industry wording', lang)}`);
+    out.push('');
+    out.push(
+      msg(
+        '汎用セットにある次の能力は、この業界では下の名前で呼ぶほうが事業側に通るため、置き換えて草案に入れています。汎用名のほうが社内で通じるなら戻してください。勝手に消したわけではありません。',
+        'The generic capabilities below were replaced with the industry wording, because that is what the business will recognise. If the generic name is what your organisation actually says, put it back. Nothing was silently dropped.',
+        lang,
+      ),
+    );
+    out.push('');
+    for (const r of replaced) {
+      out.push(`- ${line(r.generic.name, lang)} → **${line(r.by.cap.name, lang)}**`);
+    }
+    out.push('');
+  }
+
+  // 業界固有の注意 / Industry notes
+  if (resolution.sets.length > 0) {
+    out.push(`## ${inline('この業界で先に確認すること', 'Check these before you go further — industry specific', lang)}`);
+    out.push('');
+    for (const set of resolution.sets) {
+      if (resolution.sets.length > 1) out.push(`**${line(set.name, lang)}**`);
+      out.push(bullets(set.notes, lang));
+      out.push('');
+    }
+  }
 
   // 質問 / Questions
   out.push(`## ${inline('各能力について事業側に問うこと', 'What to ask the business about each capability', lang)}`);
@@ -277,7 +506,8 @@ function renderDraftCapabilityMap(businessDescription: string, industry: string 
   );
   out.push('');
   for (const item of drafted) {
-    out.push(`### ${line(item.cap.name, lang)}${item.hits.length > 0 ? ' ★' : ''}`);
+    const mark = marks(item);
+    out.push(`### ${line(item.cap.name, lang)}${mark.length > 0 ? ` ${mark}` : ''}`);
     out.push(bullets(item.cap.probes, lang));
     out.push('');
     out.push(
@@ -311,33 +541,45 @@ function renderDraftCapabilityMap(businessDescription: string, industry: string 
   // 固有能力 / Company-specific
   out.push(`## ${inline('次にやること', 'What to do next', lang)}`);
   out.push('');
-  out.push(
-    bullets(
-      [
-        {
-          ja: '**自社固有の能力を 2〜4 件足す。** 上の一覧は「どの会社にもある型」なので、このままだと競合と同じ図になる。「うちが競合より上手いこと」「この会社にしか無い稼ぎ方」を能力名にして追加する。ここが空だと経営層は読まない。',
-          en: '**Add 2–4 capabilities unique to this company.** The list above is the generic shape, so as it stands it looks identical to a competitor\'s. Name what this company does better, or the way it makes money that nobody else does. Without this, executives will not read it.',
-        },
-        {
-          ja: '**名前を事業側の言葉に置き換える。** 社内で通じない用語は、通じる語に直す。ただし部署名・システム名にはしないこと。',
-          en: '**Rewrite the names in the words the business actually uses** — but never into department names or system names.',
-        },
-        {
-          ja: '**`check_capability_map` に名前の一覧を渡して検査する。** 動詞・組織名・IT 用語・粒度のばらつきを機械的に検出できる。',
-          en: '**Run the names through `check_capability_map`** to mechanically catch verbs, org names, IT vocabulary, and inconsistent granularity.',
-        },
-        {
-          ja: '**`capability_method` のステップ 5 以降に戻る。** 草案を出発点にしても、束ね直しと評価の工程は省略できない。',
-          en: '**Return to `capability_method` from step 5.** Even starting from a draft, the re-bundling and scoring steps cannot be skipped.',
-        },
-        {
-          ja: '**`cross_map` で能力 × バリューストリームを作る。** どの能力が価値に効いていないかは、この表でしか見えない。',
-          en: '**Build the capability × value stream matrix with `cross_map`.** Nothing else shows which capabilities serve no value.',
-        },
-      ],
-      lang,
-    ),
+  const nextMoves: Bilingual[] = [];
+  if (resolution.sets.length > 0) {
+    nextMoves.push({
+      ja: '**業界の型で埋まっているのはここまで。自社固有の能力を 2〜4 件足す。** 上の ◆ は「この業界ならどこも持っている力」なので、これだけでは同業他社と同じ図になる。「うちが競合より上手いこと」「この会社にしか無い稼ぎ方」を能力名にして追加する。ここが空だと経営層は読まない。',
+      en: '**The industry shape is now filled in — add 2–4 capabilities unique to this company.** Everything marked ◆ is what every competitor in this industry also has. Name what this company does better, or the way it makes money that nobody else does. Without that, executives will not read it.',
+    });
+    nextMoves.push({
+      ja: '**業界セットの能力名を、社内で実際に使われている語に直す。** 業界標準の名前と社内の呼び名がずれている箇所は、そのずれ自体が組織の癖なので記録しておく。',
+      en: '**Rewrite the industry names into the words this organisation actually uses.** Where the two differ, the difference itself is a fact about the organisation — record it.',
+    });
+  } else {
+    nextMoves.push({
+      ja: '**`industry` を指定して呼び直す。** 業界を指定すると、その業界の実務で通る能力が足される。汎用セットだけの草案を事業側に見せると「うちの話ではない」で終わる。',
+      en: '**Call again with `industry`.** With an industry the draft gains capabilities named the way that industry names them. A generic-only draft gets dismissed by the business as "not about us".',
+    });
+    nextMoves.push({
+      ja: '**自社固有の能力を 2〜4 件足す。** 上の一覧は「どの会社にもある型」なので、このままだと競合と同じ図になる。「うちが競合より上手いこと」を能力名にして追加する。',
+      en: '**Add 2–4 capabilities unique to this company.** The list above is the generic shape; as it stands it looks identical to a competitor. Name what this company does better than the others.',
+    });
+    nextMoves.push({
+      ja: '**名前を事業側の言葉に置き換える。** 社内で通じない用語は、通じる語に直す。ただし部署名・システム名にはしないこと。',
+      en: '**Rewrite the names in the words the business actually uses** — but never into department names or system names.',
+    });
+  }
+  nextMoves.push(
+    {
+      ja: '**`check_capability_map` に名前の一覧を渡して検査する。** 動詞・組織名・IT 用語・粒度のばらつきを機械的に検出できる。',
+      en: '**Run the names through `check_capability_map`** to mechanically catch verbs, org names, IT vocabulary, and inconsistent granularity.',
+    },
+    {
+      ja: '**`capability_method` のステップ 5 以降に戻る。** 草案を出発点にしても、束ね直しと評価の工程は省略できない。',
+      en: '**Return to `capability_method` from step 5.** Even starting from a draft, the re-bundling and scoring steps cannot be skipped.',
+    },
+    {
+      ja: '**`cross_map` で能力 × バリューストリームを作る。** どの能力が価値に効いていないかは、この表でしか見えない。',
+      en: '**Build the capability × value stream matrix with `cross_map`.** Nothing else shows which capabilities serve no value.',
+    },
   );
+  out.push(bullets(nextMoves, lang));
   return out.join('\n');
 }
 
@@ -966,16 +1208,16 @@ export function registerBusinessArchitectureTools(server: McpServer): void {
     {
       title: 'Draft a level-1 capability map',
       description:
-        '事業の説明から、レベル 1 能力マップの草案(図+表)と、各能力について事業側に問うべき質問を返す。汎用の参考セットに事業説明の語を突き合わせて重点候補を印付けする。出力はあくまで草案で、事業側との対話による確定が必須。 / From a business description, draft a level-1 capability map (diagram plus table) and the questions to ask the business about each capability. A generic reference set is matched against your wording to mark likely focus areas. The output is a draft and must be confirmed with the business.',
+        '事業の説明から、レベル 1 能力マップの草案(図+表)と、各能力について事業側に問うべき質問を返す。業界別の能力セット(銀行・保険・製造・医療・小売/EC・公共・通信)を持ち、`industry` の指定があればその業界の実務で通る能力名(例: 与信・審査、AML / 金融犯罪対策)を汎用セットに足す。指定が無ければ説明文から業界を推定し、推定した旨を明示する。出力はあくまで草案で、事業側との対話による確定が必須。 / From a business description, draft a level-1 capability map (diagram plus table) plus the questions to ask the business. Industry sets (banking, insurance, manufacturing, healthcare, retail, public sector, telecom) add capabilities named the way that industry names them; without `industry` the set is inferred from the description and the inference is stated. The output is a draft and must be confirmed with the business.',
       inputSchema: {
         businessDescription: z
           .string()
           .min(1)
-          .describe('事業の説明。何を誰に提供して対価を得ているか、規模、特徴など / What the business does: what is offered to whom in return for what, scale, distinctive traits'),
+          .describe('事業の説明。何を誰に提供して対価を得ているか、規模、特徴など。具体的な業務語(預金・融資・受注生産・レセプトなど)を書くほど業界固有の能力が当たる / What the business does: what is offered to whom in return for what, scale, distinctive traits. The more concrete the operational vocabulary, the better the industry match'),
         industry: z
           .string()
           .optional()
-          .describe('業界(任意)。例: 製造, 金融, 小売, SaaS / Industry, optional'),
+          .describe('業界(任意)。banking / insurance / manufacturing / healthcare / retail-ecommerce / public-sector / telecommunications、または「金融」「製造」「地方銀行」などの語でも可。省略時は説明文から推定する / Industry, optional; id or free wording. Inferred from the description when omitted'),
         lang: langSchema,
       },
     },

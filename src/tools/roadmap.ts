@@ -14,8 +14,10 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { findPhase, type Bilingual, type Lang } from '../knowledge/index.js';
 import {
+  OUTPUT_LIMITS,
   PRIORITIES,
   WORK_PACKAGE_STATUSES,
+  capCell,
   makeId,
   now,
   type Engagement,
@@ -24,7 +26,25 @@ import {
   type WorkPackage,
 } from '../engagement/model.js';
 import { loadEngagement, saveEngagement } from '../engagement/store.js';
+// 入力長の検査は engagement.ts に集約している(common.ts は他作業と衝突するため触らない)
+import {
+  ID_HINT,
+  PHASE_HINT,
+  QUARTER_HINT,
+  checkText,
+  checkTextList,
+  limitErrorResult,
+  runChecks,
+  unexpectedErrorResult,
+} from './engagement.js';
 import { L, PRIORITY_LABEL, WORK_PACKAGE_STATUS_LABEL, label } from '../dashboard/labels.js';
+// コストの解析・集計はダッシュボードと同じ実装を使う(数字が 2 か所で食い違わないように)
+import {
+  formatAmountRange,
+  parseCostEstimate,
+  renderCostSection,
+  summarizeCosts,
+} from '../dashboard/markdown.js';
 import { errorResult, langSchema, msg, textResult } from './common.js';
 
 // --- このファイル内だけで使うラベル(labels.ts は編集しないためローカルに置く) ---
@@ -571,130 +591,147 @@ export function registerRoadmapTools(server: McpServer): void {
     },
     async (input) => {
       const l = input.lang as Lang;
-      const e = loadEngagement();
-      if (!e) return errorResult(noEngagement(l));
+      try {
+        // 上限検査は状態を読む前に。長い名前は保存 JSON とタイムラインの両方を壊す。
+        const problem = runChecks([
+          () => checkText('id', input.id, 'title', l, ID_HINT),
+          () => checkText('name', input.name, 'title', l),
+          () => checkText('targetQuarter', input.targetQuarter, 'title', l, QUARTER_HINT),
+          () => checkTextList('capabilities', input.capabilities, 'title', l),
+          () => checkText('interim', input.interim, 'text', l),
+          () => checkText('disposalPlan', input.disposalPlan, 'text', l),
+          () => checkText('note', input.note, 'text', l),
+        ]);
+        if (problem) return limitErrorResult(problem, l);
 
-      const timestamp = now();
-      const warnings: string[] = [];
-      let transition: TransitionState;
-      let created = false;
+        const e = loadEngagement();
+        if (!e) return errorResult(noEngagement(l));
 
-      if (input.id) {
-        const found = e.transitions.find((t) => t.id === input.id);
-        if (!found) {
-          return errorResult(
-            msg(
-              `移行状態 ID「${input.id}」が見つかりません。get_roadmap で一覧を確認してください。`,
-              `Transition id "${input.id}" not found. Use get_roadmap to list them.`,
-              l,
-            ),
-          );
+        const timestamp = now();
+        const warnings: string[] = [];
+        let transition: TransitionState;
+        let created = false;
+
+        if (input.id) {
+          const found = e.transitions.find((t) => t.id === input.id);
+          if (!found) {
+            return errorResult(
+              msg(
+                `移行状態 ID「${capCell(input.id, 60)}」が見つかりません。get_roadmap で一覧を確認してください。`,
+                `Transition id "${capCell(input.id, 60)}" not found. Use get_roadmap to list them.`,
+                l,
+              ),
+            );
+          }
+          transition = found;
+        } else {
+          const maxOrder = e.transitions.reduce((max, t) => Math.max(max, t.order), 0);
+          transition = {
+            id: makeId('trn'),
+            name: input.name,
+            order: maxOrder + 1,
+            capabilities: [],
+            standalone: false,
+            createdAt: timestamp,
+            updatedAt: timestamp,
+          };
+          e.transitions.push(transition);
+          created = true;
+          if (input.standalone === undefined) {
+            warnings.push(
+              msg(
+                '単独稼働の可否が指定されていないため「不可」として登録した。フェーズ E では、各中間状態がそれ自体で事業を回せるかを明示的に確認する。確認できたら standalone=true で更新すること。',
+                'You did not say whether the business can run at this state, so it was recorded as "no". Phase E expects an explicit answer for every intermediate state. Update with standalone=true once you have confirmed it.',
+                l,
+              ),
+            );
+          }
         }
-        transition = found;
-      } else {
-        const maxOrder = e.transitions.reduce((max, t) => Math.max(max, t.order), 0);
-        transition = {
-          id: makeId('trn'),
-          name: input.name,
-          order: maxOrder + 1,
-          capabilities: [],
-          standalone: false,
-          createdAt: timestamp,
-          updatedAt: timestamp,
-        };
-        e.transitions.push(transition);
-        created = true;
-        if (input.standalone === undefined) {
+
+        transition.name = input.name;
+        if (input.order !== undefined) transition.order = input.order;
+        if (input.targetQuarter !== undefined) transition.targetQuarter = normalizeQuarter(input.targetQuarter);
+        if (input.capabilities !== undefined) transition.capabilities = input.capabilities;
+        if (input.standalone !== undefined) transition.standalone = input.standalone;
+        if (input.interim !== undefined) transition.interim = input.interim;
+        if (input.disposalPlan !== undefined) transition.disposalPlan = input.disposalPlan;
+        if (input.note !== undefined) transition.note = input.note;
+        transition.updatedAt = timestamp;
+
+        // --- 中間状態としての妥当性 ---
+        if (!transition.standalone) {
           warnings.push(
             msg(
-              '単独稼働の可否が指定されていないため「不可」として登録した。フェーズ E では、各中間状態がそれ自体で事業を回せるかを明示的に確認する。確認できたら standalone=true で更新すること。',
-              'You did not say whether the business can run at this state, so it was recorded as "no". Phase E expects an explicit answer for every intermediate state. Update with standalone=true once you have confirmed it.',
+              'ここで止めても事業が回らない中間状態は、予算が切れた時点で負債になる。分割の仕方を見直すか、事業が回る単位まで作業を前倒しすること。',
+              'An intermediate state the business cannot run on becomes debt the moment the budget stops. Either re-cut the increments or pull work forward until the state can stand alone.',
               l,
             ),
           );
         }
-      }
+        if (transition.interim && !transition.disposalPlan) {
+          warnings.push(
+            msg(
+              '暫定の仕組みがあるのに廃棄計画がない。暫定が恒久化する典型的な入り口。廃棄の期限・責任者・費用をいま決めて disposalPlan に書くこと。',
+              'There is an interim mechanism but no disposal plan. This is the standard entry point for "temporary" becoming permanent. Fix the date, the owner, and the cost of removal now and record them in disposalPlan.',
+              l,
+            ),
+          );
+        }
+        if (transition.capabilities.length === 0) {
+          warnings.push(
+            msg(
+              '実現する能力が書かれていない。何ができるようになるかを言えない状態は、状態ではなく日付にすぎない。',
+              'No capabilities recorded. A state you cannot describe in terms of new capability is just a date.',
+              l,
+            ),
+          );
+        }
+        if (!transition.targetQuarter) {
+          warnings.push(
+            msg('到達目標時期が未設定。四半期(YYYY-Qn)で置くこと。月単位は精度を装った嘘になる。', 'No target timing. Use quarters (YYYY-Qn); months fake a precision you do not have.', l),
+          );
+        } else if (parseQuarter(transition.targetQuarter) === null) {
+          warnings.push(
+            msg(
+              `時期「${transition.targetQuarter}」は四半期表記として解釈できないため、タイムラインでは末尾に寄せる。`,
+              `Timing "${transition.targetQuarter}" is not a quarter, so it is pushed to the end of the timeline.`,
+              l,
+            ),
+          );
+        }
 
-      transition.name = input.name;
-      if (input.order !== undefined) transition.order = input.order;
-      if (input.targetQuarter !== undefined) transition.targetQuarter = normalizeQuarter(input.targetQuarter);
-      if (input.capabilities !== undefined) transition.capabilities = input.capabilities;
-      if (input.standalone !== undefined) transition.standalone = input.standalone;
-      if (input.interim !== undefined) transition.interim = input.interim;
-      if (input.disposalPlan !== undefined) transition.disposalPlan = input.disposalPlan;
-      if (input.note !== undefined) transition.note = input.note;
-      transition.updatedAt = timestamp;
+        saveEngagement(e);
 
-      // --- 中間状態としての妥当性 ---
-      if (!transition.standalone) {
-        warnings.push(
-          msg(
-            'ここで止めても事業が回らない中間状態は、予算が切れた時点で負債になる。分割の仕方を見直すか、事業が回る単位まで作業を前倒しすること。',
-            'An intermediate state the business cannot run on becomes debt the moment the budget stops. Either re-cut the increments or pull work forward until the state can stand alone.',
-            l,
-          ),
+        const out: string[] = [];
+        out.push(
+          `# ${label(L.transition, l)}: ${transition.name} — ${created ? label(R.added, l) : label(R.updated, l)}`,
         );
-      }
-      if (transition.interim && !transition.disposalPlan) {
-        warnings.push(
-          msg(
-            '暫定の仕組みがあるのに廃棄計画がない。暫定が恒久化する典型的な入り口。廃棄の期限・責任者・費用をいま決めて disposalPlan に書くこと。',
-            'There is an interim mechanism but no disposal plan. This is the standard entry point for "temporary" becoming permanent. Fix the date, the owner, and the cost of removal now and record them in disposalPlan.',
-            l,
-          ),
-        );
-      }
-      if (transition.capabilities.length === 0) {
-        warnings.push(
-          msg(
-            '実現する能力が書かれていない。何ができるようになるかを言えない状態は、状態ではなく日付にすぎない。',
-            'No capabilities recorded. A state you cannot describe in terms of new capability is just a date.',
-            l,
-          ),
-        );
-      }
-      if (!transition.targetQuarter) {
-        warnings.push(
-          msg('到達目標時期が未設定。四半期(YYYY-Qn)で置くこと。月単位は精度を装った嘘になる。', 'No target timing. Use quarters (YYYY-Qn); months fake a precision you do not have.', l),
-        );
-      } else if (parseQuarter(transition.targetQuarter) === null) {
-        warnings.push(
-          msg(
-            `時期「${transition.targetQuarter}」は四半期表記として解釈できないため、タイムラインでは末尾に寄せる。`,
-            `Timing "${transition.targetQuarter}" is not a quarter, so it is pushed to the end of the timeline.`,
-            l,
-          ),
-        );
-      }
-
-      saveEngagement(e);
-
-      const out: string[] = [];
-      out.push(
-        `# ${label(L.transition, l)}: ${transition.name} — ${created ? label(R.added, l) : label(R.updated, l)}`,
-      );
-      out.push('');
-      out.push(`- ID: \`${transition.id}\``);
-      out.push(`- ${label(L.roadmap, l)} #${transition.order}`);
-      out.push(`- ${label(L.quarter, l)}: ${transition.targetQuarter ?? label(L.none, l)}`);
-      out.push(
-        `- ${label(L.standalone, l)}: ${transition.standalone ? label(L.standaloneYes, l) : `**${label(L.standaloneNo, l)}**`}`,
-      );
-      if (transition.capabilities.length > 0) {
-        out.push(`- ${label(L.capabilities, l)}:`);
-        for (const c of transition.capabilities) out.push(`  - ${c}`);
-      }
-      if (transition.interim) out.push(`- ${label(L.interim, l)}: ${transition.interim}`);
-      if (transition.disposalPlan) out.push(`- ${label(L.disposalPlan, l)}: ${transition.disposalPlan}`);
-      if (transition.note) out.push(`- ${label(L.note, l)}: ${transition.note}`);
-
-      if (warnings.length > 0) {
         out.push('');
-        out.push(`## ${label(R.warnings, l)}`);
-        out.push('');
-        for (const w of warnings) out.push(`- ${w}`);
+        out.push(`- ID: \`${transition.id}\``);
+        out.push(`- ${label(L.roadmap, l)} #${transition.order}`);
+        out.push(`- ${label(L.quarter, l)}: ${transition.targetQuarter ?? label(L.none, l)}`);
+        out.push(
+          `- ${label(L.standalone, l)}: ${transition.standalone ? label(L.standaloneYes, l) : `**${label(L.standaloneNo, l)}**`}`,
+        );
+        if (transition.capabilities.length > 0) {
+          out.push(`- ${label(L.capabilities, l)}:`);
+          for (const c of transition.capabilities) out.push(`  - ${c}`);
+        }
+        if (transition.interim) out.push(`- ${label(L.interim, l)}: ${transition.interim}`);
+        if (transition.disposalPlan) out.push(`- ${label(L.disposalPlan, l)}: ${transition.disposalPlan}`);
+        if (transition.note) out.push(`- ${label(L.note, l)}: ${transition.note}`);
+
+        if (warnings.length > 0) {
+          out.push('');
+          out.push(`## ${label(R.warnings, l)}`);
+          out.push('');
+          for (const w of warnings) out.push(`- ${w}`);
+        }
+        return textResult(out.join('\n'));
+      } catch (error) {
+        // CLAUDE.md: ハンドラは例外を投げない。
+        return unexpectedErrorResult('add_transition_state', error, l);
       }
-      return textResult(out.join('\n'));
     },
   );
 
@@ -728,211 +765,276 @@ export function registerRoadmapTools(server: McpServer): void {
     },
     async (input) => {
       const l = input.lang as Lang;
-      const e = loadEngagement();
-      if (!e) return errorResult(noEngagement(l));
+      try {
+        // 上限検査は状態を読む前に。作業パッケージ名はタイムラインの行頭に出るので特に短く保つ。
+        const problem = runChecks([
+          () => checkText('id', input.id, 'title', l, ID_HINT),
+          () => checkText('name', input.name, 'title', l),
+          () => checkText('description', input.description, 'text', l),
+          () => checkText('transitionId', input.transitionId, 'title', l, ID_HINT),
+          () => checkText('phase', input.phase, 'title', l, PHASE_HINT),
+          () => checkText('owner', input.owner, 'title', l),
+          () => checkText('startQuarter', input.startQuarter, 'title', l, QUARTER_HINT),
+          () => checkText('endQuarter', input.endQuarter, 'title', l, QUARTER_HINT),
+          () => checkTextList('dependsOn', input.dependsOn, 'title', l, ID_HINT),
+          () => checkText('costEstimate', input.costEstimate, 'title', l),
+          () => checkText('benefit', input.benefit, 'text', l),
+          () => checkText('benefitOwner', input.benefitOwner, 'title', l),
+        ]);
+        if (problem) return limitErrorResult(problem, l);
 
-      const timestamp = now();
-      const warnings: string[] = [];
+        const e = loadEngagement();
+        if (!e) return errorResult(noEngagement(l));
 
-      // --- 参照先の検証(先に済ませ、壊れた状態を保存しない) ---
-      if (input.transitionId && !e.transitions.some((t) => t.id === input.transitionId)) {
-        return errorResult(
-          msg(
-            `移行状態 ID「${input.transitionId}」が見つかりません。先に add_transition_state で登録してください。`,
-            `Transition id "${input.transitionId}" not found. Register it with add_transition_state first.`,
-            l,
-          ),
-        );
-      }
+        const timestamp = now();
+        const warnings: string[] = [];
 
-      let target: WorkPackage;
-      let created = false;
-      if (input.id) {
-        const found = e.workPackages.find((w) => w.id === input.id);
-        if (!found) {
+        // --- 参照先の検証(先に済ませ、壊れた状態を保存しない) ---
+        if (input.transitionId && !e.transitions.some((t) => t.id === input.transitionId)) {
           return errorResult(
             msg(
-              `作業パッケージ ID「${input.id}」が見つかりません。get_roadmap で一覧を確認してください。`,
-              `Work package id "${input.id}" not found. Use get_roadmap to list them.`,
+              `移行状態 ID「${capCell(input.transitionId, 60)}」が見つかりません。先に add_transition_state で登録してください。`,
+              `Transition id "${capCell(input.transitionId, 60)}" not found. Register it with add_transition_state first.`,
               l,
             ),
           );
         }
-        target = found;
-      } else {
-        target = {
-          id: makeId('wp'),
-          name: input.name,
-          status: 'proposed',
-          dependsOn: [],
-          businessValue: 'medium',
-          effort: 'medium',
-          createdAt: timestamp,
-          updatedAt: timestamp,
-        };
-        created = true;
-      }
 
-      if (input.dependsOn) {
-        const unknown = input.dependsOn.filter(
-          (id) => id !== target.id && !e.workPackages.some((w) => w.id === id),
-        );
-        if (unknown.length > 0) {
-          return errorResult(
-            msg(
-              `依存先の作業パッケージ ID が見つかりません: ${unknown.join(', ')}。存在する ID だけを dependsOn に指定してください。`,
-              `Unknown work package ids in dependsOn: ${unknown.join(', ')}. Only existing ids may be referenced.`,
-              l,
-            ),
-          );
-        }
-        if (input.dependsOn.includes(target.id)) {
-          return errorResult(
-            msg('作業パッケージが自分自身に依存することはできません。', 'A work package cannot depend on itself.', l),
-          );
-        }
-      }
-
-      // --- 反映 ---
-      target.name = input.name;
-      if (input.description !== undefined) target.description = input.description;
-      if (input.status !== undefined) target.status = input.status;
-      if (input.transitionId !== undefined) target.transitionId = input.transitionId;
-      if (input.owner !== undefined) target.owner = input.owner;
-      if (input.startQuarter !== undefined) target.startQuarter = normalizeQuarter(input.startQuarter);
-      if (input.endQuarter !== undefined) target.endQuarter = normalizeQuarter(input.endQuarter);
-      target.dependsOn =
-        input.dependsOn !== undefined ? Array.from(new Set(input.dependsOn)) : depsOf(target);
-      if (input.businessValue !== undefined) target.businessValue = input.businessValue;
-      if (input.effort !== undefined) target.effort = input.effort;
-      if (input.costEstimate !== undefined) target.costEstimate = input.costEstimate;
-      if (input.benefit !== undefined) target.benefit = input.benefit;
-      if (input.benefitOwner !== undefined) target.benefitOwner = input.benefitOwner;
-      if (input.phase !== undefined) {
-        const phaseId = resolvePhaseId(input.phase);
-        if (!phaseId) {
-          warnings.push(
-            msg(`フェーズ「${input.phase}」が見つからないため設定しなかった。`, `Phase "${input.phase}" not found, so it was not set.`, l),
-          );
+        let target: WorkPackage;
+        let created = false;
+        if (input.id) {
+          const found = e.workPackages.find((w) => w.id === input.id);
+          if (!found) {
+            return errorResult(
+              msg(
+                `作業パッケージ ID「${capCell(input.id, 60)}」が見つかりません。get_roadmap で一覧を確認してください。`,
+                `Work package id "${capCell(input.id, 60)}" not found. Use get_roadmap to list them.`,
+                l,
+              ),
+            );
+          }
+          target = found;
         } else {
-          target.phaseId = phaseId;
+          target = {
+            id: makeId('wp'),
+            name: input.name,
+            status: 'proposed',
+            dependsOn: [],
+            businessValue: 'medium',
+            effort: 'medium',
+            createdAt: timestamp,
+            updatedAt: timestamp,
+          };
+          created = true;
         }
-      }
-      target.updatedAt = timestamp;
 
-      const candidate = created ? [...e.workPackages, target] : e.workPackages;
-      const cycle = findDependencyCycle(candidate);
-      if (cycle) {
-        return errorResult(
-          msg(
-            `依存関係が循環します: ${cycle.map((id) => nameOf(e, id)).join(' → ')}。この形では誰も着手できないため保存しませんでした。`,
-            `This would create a dependency cycle: ${cycle.map((id) => nameOf(e, id)).join(' → ')}. Nothing was saved, because nobody could start under this ordering.`,
-            l,
-          ),
-        );
-      }
-      if (created) e.workPackages.push(target);
+        if (input.dependsOn) {
+          const unknown = input.dependsOn.filter(
+            (id) => id !== target.id && !e.workPackages.some((w) => w.id === id),
+          );
+          if (unknown.length > 0) {
+            // 100 件まで渡せるので、そのまま並べるとエラー文が ID の羅列で埋まる
+            const shown = unknown.slice(0, OUTPUT_LIMITS.highlights).map((id) => capCell(id, 40)).join(', ');
+            const rest = unknown.length - Math.min(unknown.length, OUTPUT_LIMITS.highlights);
+            return errorResult(
+              msg(
+                `依存先の作業パッケージ ID が見つかりません(${unknown.length} 件): ${shown}${rest > 0 ? ` ほか ${rest} 件` : ''}。存在する ID だけを dependsOn に指定してください。`,
+                `Unknown work package ids in dependsOn (${unknown.length}): ${shown}${rest > 0 ? ` and ${rest} more` : ''}. Only existing ids may be referenced.`,
+                l,
+              ),
+            );
+          }
+          if (input.dependsOn.includes(target.id)) {
+            return errorResult(
+              msg('作業パッケージが自分自身に依存することはできません。', 'A work package cannot depend on itself.', l),
+            );
+          }
+        }
 
-      // --- 助言 ---
-      if (target.benefit && !target.benefitOwner) {
-        warnings.push(
-          msg(
-            '便益が書かれているのに便益責任者がいない。責任者のいない便益は、完了報告の後に誰も測らない。名前を 1 つ入れること。',
-            'A benefit is stated but no benefit owner is named. Nobody measures a benefit that belongs to nobody. Put one name against it.',
-            l,
-          ),
-        );
-      }
-      if (!target.benefit) {
-        warnings.push(
-          msg(
-            '便益が未記入。便益のない作業パッケージは、予算表の上ではコスト行にしか見えない。',
-            'No benefit recorded. On a budget sheet, a work package without a stated benefit is only a cost line.',
-            l,
-          ),
-        );
-      }
-      if (!target.transitionId) {
-        warnings.push(
-          msg(
-            'どの移行状態にも属していない。どの中間状態を作るための作業かを決めると、順序と打ち切り判断がしやすくなる。',
-            'Not tied to any transition state. Deciding which intermediate state this builds makes both sequencing and stop/go decisions easier.',
-            l,
-          ),
-        );
-      }
-      if (!target.startQuarter && !target.endQuarter) {
-        warnings.push(
-          msg('時期が未設定。時期の書けない作業は、まだ計画ではなく願望。', 'No timing set. Work without a quarter is not yet a plan.', l),
-        );
-      }
-      for (const value of [target.startQuarter, target.endQuarter]) {
-        if (value && parseQuarter(value) === null) {
-          warnings.push(
+        // --- 反映 ---
+        target.name = input.name;
+        if (input.description !== undefined) target.description = input.description;
+        if (input.status !== undefined) target.status = input.status;
+        if (input.transitionId !== undefined) target.transitionId = input.transitionId;
+        if (input.owner !== undefined) target.owner = input.owner;
+        if (input.startQuarter !== undefined) target.startQuarter = normalizeQuarter(input.startQuarter);
+        if (input.endQuarter !== undefined) target.endQuarter = normalizeQuarter(input.endQuarter);
+        target.dependsOn =
+          input.dependsOn !== undefined ? Array.from(new Set(input.dependsOn)) : depsOf(target);
+        if (input.businessValue !== undefined) target.businessValue = input.businessValue;
+        if (input.effort !== undefined) target.effort = input.effort;
+        if (input.costEstimate !== undefined) target.costEstimate = input.costEstimate;
+        if (input.benefit !== undefined) target.benefit = input.benefit;
+        if (input.benefitOwner !== undefined) target.benefitOwner = input.benefitOwner;
+        if (input.phase !== undefined) {
+          const phaseId = resolvePhaseId(input.phase);
+          if (!phaseId) {
+            warnings.push(
+              msg(
+                `フェーズ「${capCell(input.phase, 60)}」が見つからないため設定しなかった。`,
+                `Phase "${capCell(input.phase, 60)}" not found, so it was not set.`,
+                l,
+              ),
+            );
+          } else {
+            target.phaseId = phaseId;
+          }
+        }
+        target.updatedAt = timestamp;
+
+        const candidate = created ? [...e.workPackages, target] : e.workPackages;
+        const cycle = findDependencyCycle(candidate);
+        if (cycle) {
+          return errorResult(
             msg(
-              `時期「${value}」は四半期表記(YYYY-Qn)として解釈できないため、そのまま保存したがタイムラインには描かれない。`,
-              `Timing "${value}" could not be read as a quarter (YYYY-Qn). It was stored as typed, but this work will not appear on the timeline.`,
+              `依存関係が循環します: ${cycle.map((id) => nameOf(e, id)).join(' → ')}。この形では誰も着手できないため保存しませんでした。`,
+              `This would create a dependency cycle: ${cycle.map((id) => nameOf(e, id)).join(' → ')}. Nothing was saved, because nobody could start under this ordering.`,
               l,
             ),
           );
         }
-      }
-      const start = parseQuarter(target.startQuarter);
-      const end = parseQuarter(target.endQuarter);
-      if (start !== null && end !== null && end < start) {
-        warnings.push(
-          msg(
-            `終了(${target.endQuarter})が開始(${target.startQuarter})より前になっている。`,
-            `The end (${target.endQuarter}) is before the start (${target.startQuarter}).`,
-            l,
-          ),
+        if (created) e.workPackages.push(target);
+
+        // --- 助言 ---
+        if (target.benefit && !target.benefitOwner) {
+          warnings.push(
+            msg(
+              '便益が書かれているのに便益責任者がいない。責任者のいない便益は、完了報告の後に誰も測らない。名前を 1 つ入れること。',
+              'A benefit is stated but no benefit owner is named. Nobody measures a benefit that belongs to nobody. Put one name against it.',
+              l,
+            ),
+          );
+        }
+        if (!target.benefit) {
+          warnings.push(
+            msg(
+              '便益が未記入。便益のない作業パッケージは、予算表の上ではコスト行にしか見えない。',
+              'No benefit recorded. On a budget sheet, a work package without a stated benefit is only a cost line.',
+              l,
+            ),
+          );
+        }
+        if (!target.transitionId) {
+          warnings.push(
+            msg(
+              'どの移行状態にも属していない。どの中間状態を作るための作業かを決めると、順序と打ち切り判断がしやすくなる。',
+              'Not tied to any transition state. Deciding which intermediate state this builds makes both sequencing and stop/go decisions easier.',
+              l,
+            ),
+          );
+        }
+        if (!target.startQuarter && !target.endQuarter) {
+          warnings.push(
+            msg('時期が未設定。時期の書けない作業は、まだ計画ではなく願望。', 'No timing set. Work without a quarter is not yet a plan.', l),
+          );
+        }
+        for (const value of [target.startQuarter, target.endQuarter]) {
+          if (value && parseQuarter(value) === null) {
+            warnings.push(
+              msg(
+                `時期「${capCell(value, 60)}」は四半期表記(YYYY-Qn)として解釈できないため、そのまま保存したがタイムラインには描かれない。`,
+                `Timing "${capCell(value, 60)}" could not be read as a quarter (YYYY-Qn). It was stored as typed, but this work will not appear on the timeline.`,
+                l,
+              ),
+            );
+          }
+        }
+        const start = parseQuarter(target.startQuarter);
+        const end = parseQuarter(target.endQuarter);
+        if (start !== null && end !== null && end < start) {
+          warnings.push(
+            msg(
+              `終了(${target.endQuarter})が開始(${target.startQuarter})より前になっている。`,
+              `The end (${target.endQuarter}) is before the start (${target.startQuarter}).`,
+              l,
+            ),
+          );
+        }
+        // --- コスト表記が合計に載るか ---
+        // 合計を出すのはこちらの仕事だが、読めない書き方をされたら黙って落とさずその場で言う。
+        const parsedCost = parseCostEstimate(target.costEstimate);
+        if (!target.costEstimate) {
+          warnings.push(
+            msg(
+              '概算コストが未記入。金額の入っていない作業パッケージがある限り、ロードマップの合計は「下限」であって総額ではない。桁が合っていればよいので costEstimate に「約 2 億円」程度で入れること。',
+              'No rough cost. While any work package carries no figure, the roadmap total is a floor, not the bill. An order-of-magnitude entry such as "約 2 億円" in costEstimate is enough.',
+              l,
+            ),
+          );
+        } else if (!parsedCost) {
+          warnings.push(
+            msg(
+              `コスト「${target.costEstimate}」を金額として読めなかったため、合計には含めない(「約 2.1 億円」「4,000 万円」「50,000,000 円」「$1.2M」「2〜3 億円」の形なら読める)。`,
+              `The cost "${target.costEstimate}" could not be read as an amount, so it is excluded from the total. Forms such as "約 2.1 億円", "4,000 万円", "50,000,000 円", "$1.2M" and "2〜3 億円" are understood.`,
+              l,
+            ),
+          );
+        } else if (parsedCost.recurring) {
+          warnings.push(
+            msg(
+              `コスト「${target.costEstimate}」は期間あたりの費用と読んだため、総額には足していない。総額に載せたいなら期間分を掛けた一括額で書くこと。`,
+              `The cost "${target.costEstimate}" reads as a per-period figure, so it is not added to the total. Enter the multiplied lump sum if you want it counted.`,
+              l,
+            ),
+          );
+        }
+        if (target.businessValue === 'high' && target.effort === 'high') {
+          warnings.push(
+            msg(
+              '高価値かつ大規模。分割できないか検討すること。1 つの大玉は、途中で予算が切れたときに何も残らない。',
+              'High value and large effort. Look for a split: one big lump leaves nothing behind if the money stops halfway.',
+              l,
+            ),
+          );
+        }
+
+        saveEngagement(e);
+
+        const transition = target.transitionId ? e.transitions.find((t) => t.id === target.transitionId) : undefined;
+        const out: string[] = [];
+        out.push(`# ${label(R.workPackage, l)}: ${target.name} — ${created ? label(R.added, l) : label(R.updated, l)}`);
+        out.push('');
+        out.push(`- ID: \`${target.id}\``);
+        out.push(`- ${label(L.status, l)}: ${statusIcon(target.status)} ${statusLabel(target.status, l)}`);
+        if (transition) out.push(`- ${label(L.transition, l)}: ${transition.name} (\`${transition.id}\`)`);
+        out.push(
+          `- ${label(L.quarter, l)}: ${target.startQuarter ?? '?'} → ${target.endQuarter ?? '?'}`,
         );
-      }
-      if (target.businessValue === 'high' && target.effort === 'high') {
-        warnings.push(
-          msg(
-            '高価値かつ大規模。分割できないか検討すること。1 つの大玉は、途中で予算が切れたときに何も残らない。',
-            'High value and large effort. Look for a split: one big lump leaves nothing behind if the money stops halfway.',
-            l,
-          ),
+        out.push(
+          `- ${label(L.businessValue, l)}: ${priorityLabel(target.businessValue, l)} / ${label(L.effort, l)}: ${priorityLabel(target.effort, l)}`,
         );
-      }
+        if (target.owner) out.push(`- ${label(L.owner, l)}: ${target.owner}`);
+        if (target.costEstimate) {
+          // 入力そのままと、合計に載る金額の両方を見せる(どう読まれたかが分かるように)
+          const counted = parsedCost
+            ? ` → ${formatAmountRange(parsedCost.min, parsedCost.max, parsedCost.currency, l)}${
+                parsedCost.recurring ? ` (${inline('期間あたり・総額には未算入', 'per period, not in the total', l)})` : ''
+              }`
+            : ` → ${inline('金額として読めず合計に未算入', 'not readable as an amount; excluded from the total', l)}`;
+          out.push(`- ${label(L.cost, l)}: ${target.costEstimate}${counted}`);
+        }
+        if (target.benefit) {
+          out.push(`- ${label(L.benefit, l)}: ${target.benefit}${target.benefitOwner ? ` (${label(L.benefitOwner, l)}: ${target.benefitOwner})` : ''}`);
+        }
+        if (depsOf(target).length > 0) {
+          out.push(`- ${label(L.dependsOn, l)}: ${depsOf(target).map((id) => `${nameOf(e, id)} (\`${id}\`)`).join(', ')}`);
+        }
+        if (target.description) {
+          out.push('');
+          out.push(target.description);
+        }
 
-      saveEngagement(e);
-
-      const transition = target.transitionId ? e.transitions.find((t) => t.id === target.transitionId) : undefined;
-      const out: string[] = [];
-      out.push(`# ${label(R.workPackage, l)}: ${target.name} — ${created ? label(R.added, l) : label(R.updated, l)}`);
-      out.push('');
-      out.push(`- ID: \`${target.id}\``);
-      out.push(`- ${label(L.status, l)}: ${statusIcon(target.status)} ${statusLabel(target.status, l)}`);
-      if (transition) out.push(`- ${label(L.transition, l)}: ${transition.name} (\`${transition.id}\`)`);
-      out.push(
-        `- ${label(L.quarter, l)}: ${target.startQuarter ?? '?'} → ${target.endQuarter ?? '?'}`,
-      );
-      out.push(
-        `- ${label(L.businessValue, l)}: ${priorityLabel(target.businessValue, l)} / ${label(L.effort, l)}: ${priorityLabel(target.effort, l)}`,
-      );
-      if (target.owner) out.push(`- ${label(L.owner, l)}: ${target.owner}`);
-      if (target.costEstimate) out.push(`- ${label(L.cost, l)}: ${target.costEstimate}`);
-      if (target.benefit) {
-        out.push(`- ${label(L.benefit, l)}: ${target.benefit}${target.benefitOwner ? ` (${label(L.benefitOwner, l)}: ${target.benefitOwner})` : ''}`);
+        if (warnings.length > 0) {
+          out.push('');
+          out.push(`## ${label(R.warnings, l)}`);
+          out.push('');
+          for (const w of warnings) out.push(`- ${w}`);
+        }
+        return textResult(out.join('\n'));
+      } catch (error) {
+        // CLAUDE.md: ハンドラは例外を投げない。
+        return unexpectedErrorResult('add_work_package', error, l);
       }
-      if (depsOf(target).length > 0) {
-        out.push(`- ${label(L.dependsOn, l)}: ${depsOf(target).map((id) => `${nameOf(e, id)} (\`${id}\`)`).join(', ')}`);
-      }
-      if (target.description) {
-        out.push('');
-        out.push(target.description);
-      }
-
-      if (warnings.length > 0) {
-        out.push('');
-        out.push(`## ${label(R.warnings, l)}`);
-        out.push('');
-        for (const w of warnings) out.push(`- ${w}`);
-      }
-      return textResult(out.join('\n'));
     },
   );
 
@@ -980,13 +1082,21 @@ export function registerRoadmapTools(server: McpServer): void {
         return textResult(out.join('\n'));
       }
 
-      out.push(
-        [
-          `${label(L.transitions, l)}: ${transitions.length}`,
-          `${label(L.workPackages, l)}: ${packages.length}`,
-          `${label(WORK_PACKAGE_STATUS_LABEL.delivered, l)}: ${packages.filter((w) => w.status === 'delivered').length}`,
-        ].join(' | '),
-      );
+      // 役員の最初の質問は「いくらかかるのか」。見出し直下の 1 行目に金額を置く。
+      // 中止した作業は積まない(includeCancelled で表示していても金額には入れない)。
+      const costPackages = packages.filter((w) => w.status !== 'cancelled');
+      const rollup = summarizeCosts(costPackages);
+      const summary = [
+        `${label(L.transitions, l)}: ${transitions.length}`,
+        `${label(L.workPackages, l)}: ${packages.length}`,
+        `${label(WORK_PACKAGE_STATUS_LABEL.delivered, l)}: ${packages.filter((w) => w.status === 'delivered').length}`,
+      ];
+      for (const total of rollup.totals) {
+        summary.push(
+          `${label(L.cost, l)}: **${formatAmountRange(total.min, total.max, total.currency, l)}** (${total.count}/${costPackages.length})`,
+        );
+      }
+      out.push(summary.join(' | '));
       out.push('');
 
       // --- タイムライン ---
@@ -1078,6 +1188,9 @@ export function registerRoadmapTools(server: McpServer): void {
         }
       }
       out.push('');
+
+      // --- 概算コスト(合計・年ごとの山積み・予算との照合) ---
+      out.push(...renderCostSection(e, l, { detail: 'full' }));
 
       // --- 移行状態ごとの作業パッケージ ---
       out.push(`## ${label(L.transitions, l)}`);
@@ -1387,115 +1500,123 @@ export function registerRoadmapTools(server: McpServer): void {
     },
     async ({ id, confirm, lang }) => {
       const l = lang as Lang;
-      const e = loadEngagement();
-      if (!e) return errorResult(noEngagement(l));
+      try {
+        const problem = checkText('id', id, 'title', l, ID_HINT);
+        if (problem) return limitErrorResult(problem, l);
 
-      const transitionIndex = e.transitions.findIndex((t) => t.id === id);
-      const packageIndex = e.workPackages.findIndex((w) => w.id === id);
+        const e = loadEngagement();
+        if (!e) return errorResult(noEngagement(l));
 
-      if (transitionIndex < 0 && packageIndex < 0) {
-        return errorResult(
-          msg(
-            `ID「${id}」の移行状態・作業パッケージが見つかりません。get_roadmap で一覧を確認してください。`,
-            `No transition state or work package with id "${id}". Use get_roadmap to list them.`,
-            l,
-          ),
-        );
-      }
+        const transitionIndex = e.transitions.findIndex((t) => t.id === id);
+        const packageIndex = e.workPackages.findIndex((w) => w.id === id);
 
-      const out: string[] = [];
-      const impacts: string[] = [];
+        if (transitionIndex < 0 && packageIndex < 0) {
+          return errorResult(
+            msg(
+              `ID「${capCell(id, 60)}」の移行状態・作業パッケージが見つかりません。get_roadmap で一覧を確認してください。`,
+              `No transition state or work package with id "${capCell(id, 60)}". Use get_roadmap to list them.`,
+              l,
+            ),
+          );
+        }
 
-      if (transitionIndex >= 0) {
-        const transition = e.transitions[transitionIndex];
-        const referencing = e.workPackages.filter((w) => w.transitionId === transition.id);
-        if (referencing.length > 0) {
+        const out: string[] = [];
+        const impacts: string[] = [];
+
+        if (transitionIndex >= 0) {
+          const transition = e.transitions[transitionIndex];
+          const referencing = e.workPackages.filter((w) => w.transitionId === transition.id);
+          if (referencing.length > 0) {
+            impacts.push(
+              msg(
+                `${referencing.length} 件の作業パッケージがこの移行状態を参照している(${referencing.map((w) => w.name).join(', ')})。削除すると割当が外れ、どの中間状態を作る作業なのかが不明になる。`,
+                `${referencing.length} work package(s) reference this transition (${referencing.map((w) => w.name).join(', ')}). Deleting it detaches them, leaving no record of which intermediate state they were building.`,
+                l,
+              ),
+            );
+          }
+          if (!confirm) {
+            out.push(`# ${inline('削除の確認', 'Confirm deletion', l)}: ${transition.name}`);
+            out.push('');
+            out.push(`- ${label(L.transition, l)} \`${transition.id}\``);
+            if (impacts.length > 0) for (const i of impacts) out.push(`- ${i}`);
+            out.push('');
+            out.push(msg('削除するには confirm=true を指定してください。', 'Pass confirm=true to delete it.', l));
+            return textResult(out.join('\n'));
+          }
+          for (const w of referencing) {
+            w.transitionId = undefined;
+            w.updatedAt = now();
+          }
+          e.transitions.splice(transitionIndex, 1);
+          saveEngagement(e);
+          out.push(`# ${label(R.removed, l)}: ${transition.name}`);
+          out.push('');
+          out.push(`- ${label(L.transition, l)} \`${transition.id}\``);
+          if (referencing.length > 0) {
+            out.push('');
+            out.push(`## ${label(R.warnings, l)}`);
+            out.push('');
+            for (const i of impacts) out.push(`- ${i}`);
+            out.push(
+              `- ${msg(
+                `参照を外した作業パッケージ: ${referencing.map((w) => `${w.name} (\`${w.id}\`)`).join(', ')}。別の移行状態に割り当て直すこと。`,
+                `Detached work packages: ${referencing.map((w) => `${w.name} (\`${w.id}\`)`).join(', ')}. Reassign them to another transition state.`,
+                l,
+              )}`,
+            );
+          }
+          return textResult(out.join('\n'));
+        }
+
+        const target = e.workPackages[packageIndex];
+        const dependents = e.workPackages.filter((w) => w.id !== target.id && depsOf(w).includes(target.id));
+        if (dependents.length > 0) {
           impacts.push(
             msg(
-              `${referencing.length} 件の作業パッケージがこの移行状態を参照している(${referencing.map((w) => w.name).join(', ')})。削除すると割当が外れ、どの中間状態を作る作業なのかが不明になる。`,
-              `${referencing.length} work package(s) reference this transition (${referencing.map((w) => w.name).join(', ')}). Deleting it detaches them, leaving no record of which intermediate state they were building.`,
+              `${dependents.length} 件の作業パッケージがこれに依存している(${dependents.map((w) => w.name).join(', ')})。削除すると依存が外れ、先行条件が失われる。`,
+              `${dependents.length} work package(s) depend on this one (${dependents.map((w) => w.name).join(', ')}). Deleting it drops those links and the prerequisite disappears from the plan.`,
               l,
             ),
           );
         }
         if (!confirm) {
-          out.push(`# ${inline('削除の確認', 'Confirm deletion', l)}: ${transition.name}`);
+          out.push(`# ${inline('削除の確認', 'Confirm deletion', l)}: ${target.name}`);
           out.push('');
-          out.push(`- ${label(L.transition, l)} \`${transition.id}\``);
+          out.push(`- ${label(R.workPackage, l)} \`${target.id}\``);
           if (impacts.length > 0) for (const i of impacts) out.push(`- ${i}`);
           out.push('');
           out.push(msg('削除するには confirm=true を指定してください。', 'Pass confirm=true to delete it.', l));
           return textResult(out.join('\n'));
         }
-        for (const w of referencing) {
-          w.transitionId = undefined;
+        for (const w of dependents) {
+          w.dependsOn = depsOf(w).filter((x) => x !== target.id);
           w.updatedAt = now();
         }
-        e.transitions.splice(transitionIndex, 1);
+        e.workPackages.splice(packageIndex, 1);
         saveEngagement(e);
-        out.push(`# ${label(R.removed, l)}: ${transition.name}`);
+
+        out.push(`# ${label(R.removed, l)}: ${target.name}`);
         out.push('');
-        out.push(`- ${label(L.transition, l)} \`${transition.id}\``);
-        if (referencing.length > 0) {
+        out.push(`- ${label(R.workPackage, l)} \`${target.id}\``);
+        if (dependents.length > 0) {
           out.push('');
           out.push(`## ${label(R.warnings, l)}`);
           out.push('');
           for (const i of impacts) out.push(`- ${i}`);
           out.push(
             `- ${msg(
-              `参照を外した作業パッケージ: ${referencing.map((w) => `${w.name} (\`${w.id}\`)`).join(', ')}。別の移行状態に割り当て直すこと。`,
-              `Detached work packages: ${referencing.map((w) => `${w.name} (\`${w.id}\`)`).join(', ')}. Reassign them to another transition state.`,
+              `依存を外した作業パッケージ: ${dependents.map((w) => `${w.name} (\`${w.id}\`)`).join(', ')}。先行条件を別途確認すること。`,
+              `Dependency links removed from: ${dependents.map((w) => `${w.name} (\`${w.id}\`)`).join(', ')}. Re-check what they now wait for.`,
               l,
             )}`,
           );
         }
         return textResult(out.join('\n'));
+      } catch (error) {
+        // CLAUDE.md: ハンドラは例外を投げない。
+        return unexpectedErrorResult('remove_roadmap_item', error, l);
       }
-
-      const target = e.workPackages[packageIndex];
-      const dependents = e.workPackages.filter((w) => w.id !== target.id && depsOf(w).includes(target.id));
-      if (dependents.length > 0) {
-        impacts.push(
-          msg(
-            `${dependents.length} 件の作業パッケージがこれに依存している(${dependents.map((w) => w.name).join(', ')})。削除すると依存が外れ、先行条件が失われる。`,
-            `${dependents.length} work package(s) depend on this one (${dependents.map((w) => w.name).join(', ')}). Deleting it drops those links and the prerequisite disappears from the plan.`,
-            l,
-          ),
-        );
-      }
-      if (!confirm) {
-        out.push(`# ${inline('削除の確認', 'Confirm deletion', l)}: ${target.name}`);
-        out.push('');
-        out.push(`- ${label(R.workPackage, l)} \`${target.id}\``);
-        if (impacts.length > 0) for (const i of impacts) out.push(`- ${i}`);
-        out.push('');
-        out.push(msg('削除するには confirm=true を指定してください。', 'Pass confirm=true to delete it.', l));
-        return textResult(out.join('\n'));
-      }
-      for (const w of dependents) {
-        w.dependsOn = depsOf(w).filter((x) => x !== target.id);
-        w.updatedAt = now();
-      }
-      e.workPackages.splice(packageIndex, 1);
-      saveEngagement(e);
-
-      out.push(`# ${label(R.removed, l)}: ${target.name}`);
-      out.push('');
-      out.push(`- ${label(R.workPackage, l)} \`${target.id}\``);
-      if (dependents.length > 0) {
-        out.push('');
-        out.push(`## ${label(R.warnings, l)}`);
-        out.push('');
-        for (const i of impacts) out.push(`- ${i}`);
-        out.push(
-          `- ${msg(
-            `依存を外した作業パッケージ: ${dependents.map((w) => `${w.name} (\`${w.id}\`)`).join(', ')}。先行条件を別途確認すること。`,
-            `Dependency links removed from: ${dependents.map((w) => `${w.name} (\`${w.id}\`)`).join(', ')}. Re-check what they now wait for.`,
-            l,
-          )}`,
-        );
-      }
-      return textResult(out.join('\n'));
     },
   );
 }

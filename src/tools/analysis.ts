@@ -17,6 +17,10 @@ import {
   type Lang,
 } from '../knowledge/index.js';
 import {
+  OUTPUT_LIMITS,
+  capCell,
+  capNotice,
+  capRows,
   makeId,
   now,
   type Assessment,
@@ -39,6 +43,7 @@ import {
   label,
 } from '../dashboard/labels.js';
 import { errorResult, langSchema, msg, textResult, type ToolResult } from './common.js';
+import { checkText, checkTextList, limitErrorResult, runChecks } from './engagement.js';
 
 // ---------------------------------------------------------------------------
 // 共通ヘルパ / Shared helpers
@@ -100,6 +105,33 @@ function round1(value: number): number {
 /** 英文の単複を揃える(件数付きの語) */
 function plural(count: number, one: string, many: string): string {
   return `${count} ${count === 1 ? one : many}`;
+}
+
+/** 段落として日英を並べる(both では改行区切り。text() の「/」連結は長文だと読めない) */
+function para(value: Bilingual, lang: Lang): string {
+  return msg(value.ja, value.en, lang);
+}
+
+/**
+ * 保存の失敗を例外として投げず、本文で伝えるための包み。
+ * ツールハンドラから例外を投げると、利用者には「次に何をすればよいか」が何も残らない。
+ */
+function trySave(engagement: Engagement): { ok: true } | { ok: false; reason: string } {
+  try {
+    saveEngagement(engagement);
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/**
+ * 利用者が書いた文字列を本文中に引用するための整形。
+ * 改行を畳み、長すぎる場合は切り詰める(表に入れる場合は別途 cell() を通す)。
+ */
+function quote(value: string, max = 80): string {
+  const flat = value.replace(/\s+/g, ' ').trim();
+  return flat.length > max ? `${flat.slice(0, max)}…` : flat;
 }
 
 /** 技法・成果物への参照行(知識ベースに無ければ null) */
@@ -169,13 +201,37 @@ function renderFindings(findings: Finding[], lang: Lang): string[] {
     return out;
   }
   const sorted = [...findings].sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity]);
+  // 登録件数の多い案件では指摘が 100 件を超え、それだけで会話が埋まる。
+  // 深刻度順に上位だけ出し、残りが何件あるかと、その残りの見方を必ず添える。
+  const shown = capRows(sorted, OUTPUT_LIMITS.highlights);
   out.push(
     `| ${label(L.severity, lang)} | ${inline('対象', 'Subject', lang)} | ${inline('指摘', 'Issue', lang)} | ${label(L.recommendation, lang)} |`,
   );
   out.push('| :-: | --- | --- | --- |');
-  for (const f of sorted) {
+  for (const f of shown.rows) {
     out.push(
-      `| ${SEVERITY_MARK[f.severity]} ${label(SEVERITY_LABEL[f.severity], lang)} | ${cell(f.subject)} | ${cell(text(f.issue, lang))} | ${cell(text(f.recommendation, lang))} |`,
+      // 対象名は利用者が入れた文字列で、上限まで長いことがある(表が読めなくなる)
+      `| ${SEVERITY_MARK[f.severity]} ${label(SEVERITY_LABEL[f.severity], lang)} | ${cell(capCell(f.subject))} | ${cell(text(f.issue, lang))} | ${cell(text(f.recommendation, lang))} |`,
+    );
+  }
+  if (shown.capped) {
+    // 深刻度の内訳を出す。「残り 117 件」だけだと、重いものが隠れているのかが分からない。
+    const rest = sorted.slice(shown.rows.length);
+    const breakdown = (['high', 'medium', 'low'] as Severity[])
+      .map((s) => ({ s, n: rest.filter((f) => f.severity === s).length }))
+      .filter((x) => x.n > 0)
+      .map((x) => `${label(SEVERITY_LABEL[x.s], lang)} ${x.n}`)
+      .join(' / ');
+    out.push('');
+    out.push(
+      `_${capNotice(
+        shown,
+        {
+          ja: `指摘は深刻度順。非表示の内訳: ${breakdown}。上位から対処して同じ分析を再実行すると、残りが順に出る。`,
+          en: `Findings are ordered by severity. Hidden: ${breakdown}. Work through these and run the same analysis again to see the rest.`,
+        },
+        lang,
+      )}_`,
     );
   }
   out.push('');
@@ -276,7 +332,74 @@ interface GapAnalysisInput {
   target: string[];
   mappings?: { from: string; to: string; kind: MappingKind }[];
   domain?: string;
+  save?: boolean;
   lang: string;
+}
+
+/** ギャップから起こす作業パッケージの提案(add_work_package にそのまま渡せる形) */
+interface WorkPackageProposal {
+  name: string;
+  description: string;
+  status: 'proposed';
+  owner: string;
+  startQuarter: string;
+  endQuarter: string;
+  businessValue: 'low' | 'medium' | 'high';
+  effort: 'low' | 'medium' | 'high';
+  benefit: string;
+  benefitOwner: string;
+}
+
+/** 1 回の出力に載せる提案の上限(これを超えると読めなくなるため打ち切る) */
+const PROPOSAL_MAX = 10;
+
+/** 要素 1 つの行き先(1 要素 = 1 分類。維持 / 新設 / 廃止 を混ぜないための単位) */
+interface ClassifiedGapElement {
+  kind: 'new' | 'eliminated' | MappingKind;
+  /** 表示用の見出し。現行名、または「現行 → 目標」 */
+  label: string;
+}
+
+/**
+ * 現行要素と目標要素を、重複なく 1 要素 1 分類に割り当てる。
+ * - 現行要素: 行き先が無ければ廃止。同名で目標に残るなら維持(他に改修/置換があっても維持が優先)。
+ * - 目標要素: 現行からの対応が 1 つも無いものだけを新設として数える。
+ * 対応関係(mapping)の件数ではなく要素の件数を数えるので、同じ要素が維持と廃止に二重に現れない。
+ */
+function classifyGapElements(
+  baseline: string[],
+  target: string[],
+  outgoing: ResolvedMapping[][],
+  incoming: ResolvedMapping[][],
+  lang: Lang,
+): ClassifiedGapElement[] {
+  const result: ClassifiedGapElement[] = [];
+  const dest = (links: ResolvedMapping[]): string => links.map((l) => target[l.toIndex]).join(', ');
+  for (let i = 0; i < baseline.length; i += 1) {
+    const links = outgoing[i];
+    if (links.length === 0) {
+      result.push({ kind: 'eliminated', label: baseline[i] });
+      continue;
+    }
+    const retained = links.filter((l) => l.kind === 'retained');
+    const modified = links.filter((l) => l.kind === 'modified');
+    const replaced = links.filter((l) => l.kind === 'replaced');
+    if (retained.length > 0) {
+      const others = [...modified, ...replaced];
+      const note = others.length > 0 ? ` (${inline('ほかに', 'also', lang)} → ${dest(others)})` : '';
+      result.push({ kind: 'retained', label: `${baseline[i]}${note}` });
+    } else if (modified.length > 0) {
+      const note =
+        replaced.length > 0 ? ` (${inline('ほかに置換', 'also replaced by', lang)} → ${dest(replaced)})` : '';
+      result.push({ kind: 'modified', label: `${baseline[i]} → ${dest(modified)}${note}` });
+    } else {
+      result.push({ kind: 'replaced', label: `${baseline[i]} → ${dest(replaced)}` });
+    }
+  }
+  for (let j = 0; j < target.length; j += 1) {
+    if (incoming[j].length === 0) result.push({ kind: 'new', label: target[j] });
+  }
+  return result;
 }
 
 function runGapAnalysis(input: GapAnalysisInput): ToolResult {
@@ -327,15 +450,22 @@ function runGapAnalysis(input: GapAnalysisInput): ToolResult {
     resolved.push({ fromIndex, toIndex, kind: m.kind });
   }
 
-  // 明示の対応が無い現行要素は、同名の目標要素があれば「維持」とみなす
+  // 現行にも目標にも同名で存在する要素は「維持」。
+  // ここは以前、その現行要素に別の対応があるとき / その目標要素に別の対応が入っているときに
+  // 突き合わせを飛ばしていたため、両方に存在する要素が「廃止」や「新規」として出ていた。
+  // 同名の組を必ず結ぶことで、維持 / 新設 / 廃止の 3 分類が崩れないようにする。
   const autoMatched: string[] = [];
+  /** 同名の維持と、別の明示対応(改修・置換)が同居している要素 */
+  const ambiguous: string[] = [];
   for (let i = 0; i < baseline.length; i += 1) {
-    if (resolved.some((r) => r.fromIndex === i)) continue;
     const toIndex = targetKeys.indexOf(baselineKeys[i]);
-    if (toIndex >= 0 && !resolved.some((r) => r.toIndex === toIndex)) {
-      resolved.push({ fromIndex: i, toIndex, kind: 'retained' });
-      autoMatched.push(baseline[i]);
-    }
+    if (toIndex < 0) continue;
+    // 同じ組が明示されている場合は利用者の指定を優先する(from X to X kind=modified など)
+    if (resolved.some((r) => r.fromIndex === i && r.toIndex === toIndex)) continue;
+    const hasOther = resolved.some((r) => r.fromIndex === i || r.toIndex === toIndex);
+    resolved.push({ fromIndex: i, toIndex, kind: 'retained' });
+    autoMatched.push(baseline[i]);
+    if (hasOther) ambiguous.push(baseline[i]);
   }
 
   const outgoing = baseline.map((_, i) => resolved.filter((r) => r.fromIndex === i));
@@ -376,8 +506,18 @@ function runGapAnalysis(input: GapAnalysisInput): ToolResult {
   if (autoMatched.length > 0) {
     out.push(
       `> ${inline(
-        `同名のため自動で「維持」とみなした要素: ${autoMatched.join(', ')}`,
-        `Treated as retained by name match: ${autoMatched.join(', ')}`,
+        `現行にも目標にも同名で存在するため「維持」とみなした要素: ${autoMatched.join(', ')}`,
+        `Present in both baseline and target under the same name, so treated as retained: ${autoMatched.join(', ')}`,
+        lang,
+      )}`,
+    );
+    out.push('');
+  }
+  if (ambiguous.length > 0) {
+    out.push(
+      `> ${inline(
+        `次の要素は「目標にも同名で残る」と「別の要素へ改修・置換する」の両方が指定されています: ${ambiguous.join(', ')}。どちらが正しいのかを確認してください(名前が同じでも中身が別物なら、目標側の名前を変えると誤解が消えます)。`,
+        `The following elements are both kept under the same name in the target and mapped to something else as modified or replaced: ${ambiguous.join(', ')}. Confirm which is intended — if the same name means a different thing in the target, renaming the target element removes the ambiguity.`,
         lang,
       )}`,
     );
@@ -430,53 +570,68 @@ function runGapAnalysis(input: GapAnalysisInput): ToolResult {
     out.push('');
   }
 
-  // --- 集計 ---
-  out.push(`## ${inline('集計', 'Summary', lang)}`);
+  // --- 要素ごとの行き先(1 要素 = 1 行。維持 / 新設 / 廃止 の 3 分類が本体)---
+  const classified = classifyGapElements(baseline, target, outgoing, incoming, lang);
+  const countOf = (kind: 'new' | 'eliminated' | MappingKind): number =>
+    classified.filter((c) => c.kind === kind).length;
+  const namesOf = (kind: 'new' | 'eliminated' | MappingKind): string[] =>
+    classified.filter((c) => c.kind === kind).map((c) => c.label);
+  const retainedCount = countOf('retained');
+
+  out.push(`## ${inline('要素の行き先', 'Where each element ends up', lang)}`);
   out.push('');
   out.push(
-    `| ${inline('区分', 'Category', lang)} | ${inline('件数', 'Count', lang)} | ${inline('意味', 'Meaning', lang)} |`,
+    msg(
+      '現行の要素と、現行に対応の無い目標の要素を 1 つずつ数えています(1 要素は 1 行にだけ現れます)。現行にも目標にも同じ名前で存在する要素は「維持」であり、廃止にも新規にも入りません。',
+      'Every baseline element, plus every target element with no baseline counterpart, is counted exactly once here. Anything present in both states under the same name is retained — it is neither eliminated nor new.',
+      lang,
+    ),
   );
-  out.push('| --- | :-: | --- |');
-  const summaryRows: { kind: 'new' | 'eliminated' | MappingKind; count: number; meaning: Bilingual }[] = [
+  out.push('');
+  out.push(
+    `| ${inline('区分', 'Category', lang)} | ${inline('件数', 'Count', lang)} | ${inline('要素', 'Elements', lang)} | ${inline('意味', 'Meaning', lang)} |`,
+  );
+  out.push('| --- | :-: | --- | --- |');
+  const summaryRows: { kind: 'new' | 'eliminated' | MappingKind; meaning: Bilingual }[] = [
+    {
+      kind: 'retained',
+      meaning: { ja: '現行にも目標にもある。そのまま持ち越す', en: 'Present in both states; carried over unchanged' },
+    },
+    {
+      kind: 'modified',
+      meaning: { ja: '現行を手直しして目標に届かせる', en: 'Existing element reworked to meet the target' },
+    },
+    {
+      kind: 'replaced',
+      meaning: { ja: '現行を別のもので置き換える(旧側は止める)', en: 'Swapped for something else; the old side is switched off' },
+    },
     {
       kind: 'new',
-      count: newIdx.length,
       meaning: {
         ja: '目標にあって現行に無い。作る・買う・借りるの判断が要る',
         en: 'In the target, absent today. Needs a build/buy/rent decision',
       },
     },
     {
-      kind: 'modified',
-      count: byKind.modified.length,
-      meaning: { ja: '現行を手直しして目標に届かせる', en: 'Existing element reworked to meet the target' },
-    },
-    {
-      kind: 'replaced',
-      count: byKind.replaced.length,
-      meaning: { ja: '現行を別のもので置き換える', en: 'Existing element swapped for something else' },
-    },
-    {
       kind: 'eliminated',
-      count: eliminatedIdx.length,
       meaning: { ja: '目標に居場所が無い。止める計画が要る', en: 'No place in the target. Needs a shutdown plan' },
-    },
-    {
-      kind: 'retained',
-      count: byKind.retained.length,
-      meaning: { ja: '変更なしで持ち越す', en: 'Carried over unchanged' },
     },
   ];
   for (const row of summaryRows) {
-    out.push(`| ${text(GAP_KIND_TITLE[row.kind], lang)} | ${row.count} | ${text(row.meaning, lang)} |`);
+    const names = namesOf(row.kind);
+    const shown = names.slice(0, 8).map((n) => cell(n)).join(', ');
+    const rest = names.length > 8 ? ` (+${names.length - 8})` : '';
+    out.push(
+      `| ${text(GAP_KIND_TITLE[row.kind], lang)} | ${names.length} | ${shown || '—'}${rest} | ${text(row.meaning, lang)} |`,
+    );
   }
   out.push('');
 
-  const workItems = newIdx.length + byKind.modified.length + byKind.replaced.length + eliminatedIdx.length;
+  const workItems = countOf('new') + countOf('modified') + countOf('replaced') + countOf('eliminated');
   out.push(
     msg(
-      `作業を伴うギャップは合計 ${workItems} 件です(維持 ${byKind.retained.length} 件を除く)。`,
-      `${workItems} gaps require work (excluding ${byKind.retained.length} retained elements).`,
+      `合計 ${classified.length} 要素のうち、作業を伴うのは ${workItems} 件です(維持 ${retainedCount} 件を除く)。`,
+      `Of ${plural(classified.length, 'element', 'elements')}, ${workItems} ${workItems === 1 ? 'requires' : 'require'} work; the ${plural(retainedCount, 'retained one', 'retained ones')} ${retainedCount === 1 ? 'does' : 'do'} not.`,
       lang,
     ),
   );
@@ -503,6 +658,14 @@ function runGapAnalysis(input: GapAnalysisInput): ToolResult {
     out.push('');
   } else {
     out.push(
+      msg(
+        '対応関係ごとに 1 行です。1 つの現行要素に複数の行き先があるときは複数行になるため、上の「要素の行き先」の件数とは一致しないことがあります。',
+        'One row per mapping. A baseline element with several destinations produces several rows, so the counts here can differ from the per-element table above.',
+        lang,
+      ),
+    );
+    out.push('');
+    out.push(
       `| ${inline('区分', 'Category', lang)} | ${inline('対象', 'Element', lang)} | ${label(L.recommendation, lang)} |`,
     );
     out.push('| --- | --- | --- |');
@@ -514,12 +677,167 @@ function runGapAnalysis(input: GapAnalysisInput): ToolResult {
     out.push('');
   }
 
-  if (byKind.retained.length > 0) {
+  if (retainedCount > 0) {
+    out.push(
+      `${inline('維持される要素', 'Retained elements', lang)}: ${namesOf('retained').map((n) => cell(n)).join(', ')}`,
+    );
+    out.push('');
     out.push(
       `${inline('維持される要素の注意点', 'A note on retained elements', lang)}: ${text(GAP_ACTION.retained, lang)}`,
     );
     out.push('');
   }
+
+  // --- 作業パッケージ提案(そのまま貼れる JSON)---
+  // 検出したギャップを手で登録し直させないため、add_work_package の引数の形で出す。
+  const proposals: WorkPackageProposal[] = [];
+  const en = lang === 'en';
+  const placeholder = (): Pick<
+    WorkPackageProposal,
+    'status' | 'owner' | 'startQuarter' | 'endQuarter' | 'businessValue' | 'effort' | 'benefitOwner'
+  > => ({
+    status: 'proposed',
+    owner: '',
+    startQuarter: '',
+    endQuarter: '',
+    businessValue: 'medium',
+    effort: 'medium',
+    benefitOwner: '',
+  });
+
+  if (eliminatedIdx.length > 0) {
+    const names = eliminatedIdx.map((i) => baseline[i]);
+    const shown = names.slice(0, 3).join(en ? ', ' : '・');
+    const suffix = names.length > 3 ? (en ? ` and ${names.length - 3} more` : ` ほか ${names.length - 3} 件`) : '';
+    proposals.push({
+      name: en ? `Retire: ${shown}${suffix}` : `廃止: ${shown}${suffix}`,
+      description: en
+        ? `Targets: ${names.join(', ')}. Include the consumer/interface survey, the shutdown date, data migration, contract termination, and staff reassignment in this one package.`
+        : `対象: ${names.join('・')}。利用者と連携先の洗い出し、停止日の決定、データ移行、契約解約、要員の再配置までを 1 つの単位に含める。`,
+      benefit: en
+        ? `Operating cost and support contracts released by retiring ${names.length} elements (fill in the amount yourself)`
+        : `廃止 ${names.length} 件分の運用費・保守契約の削減(金額は自分で入れる)`,
+      ...placeholder(),
+    });
+  }
+  for (const j of newIdx) {
+    proposals.push({
+      name: en ? `New: ${target[j]}` : `新規: ${target[j]}`,
+      description: en
+        ? `In the target, absent today. Decide build/buy/rent, the capability required, and the scope of the first release.`
+        : '目標側にあって現行に無い。作る/買う/借りるの判断、必要な能力、初回リリースの範囲を決める。',
+      benefit: '',
+      ...placeholder(),
+    });
+  }
+  for (const m of byKind.replaced) {
+    proposals.push({
+      name: en
+        ? `Replace: ${baseline[m.fromIndex]} -> ${target[m.toIndex]}`
+        : `置換: ${baseline[m.fromIndex]} → ${target[m.toIndex]}`,
+      description: en
+        ? `Replace ${baseline[m.fromIndex]} with ${target[m.toIndex]}. Agree the parallel-run period, the cutover criteria, and the shutdown date of the old side before switching.`
+        : `${baseline[m.fromIndex]} を ${target[m.toIndex]} で置き換える。並行期間・切替判定基準・旧側の停止日を切替前に決める。`,
+      benefit: '',
+      ...placeholder(),
+    });
+  }
+  for (const m of byKind.modified) {
+    proposals.push({
+      name: en
+        ? `Modify: ${baseline[m.fromIndex]} -> ${target[m.toIndex]}`
+        : `改修: ${baseline[m.fromIndex]} → ${target[m.toIndex]}`,
+      description: en
+        ? `Rework ${baseline[m.fromIndex]} into ${target[m.toIndex]}. Fix the change scope, how long backward compatibility is kept, and the impact on current consumers first.`
+        : `${baseline[m.fromIndex]} に手を入れて ${target[m.toIndex]} にする。変更範囲・後方互換を保つ期間・既存利用者への影響評価を先に決める。`,
+      benefit: '',
+      ...placeholder(),
+    });
+  }
+
+  if (proposals.length > 0) {
+    const shownProposals = proposals.slice(0, PROPOSAL_MAX);
+    out.push(
+      `## ${inline('作業パッケージとして登録する(コピーして使う)', 'Register these as work packages (copy and paste)', lang)}`,
+    );
+    out.push('');
+    out.push(
+      msg(
+        `検出した ${gapRows.length} 件のギャップを、${proposals.length} 個の作業パッケージ案にまとめました(廃止は 1 つに束ねています)。下の配列の要素を 1 つずつ \`add_work_package\` に渡してください。複数をまとめて登録するツールはこのサーバーにはないため、1 要素 = 1 回の呼び出しになります。`,
+        `The ${gapRows.length} detected gaps are grouped into ${proposals.length} proposed work packages (retirements bundled into one). Pass each element of the array below to \`add_work_package\`, one call per element — this server has no bulk-registration tool.`,
+        lang,
+      ),
+    );
+    out.push('');
+    out.push('```json');
+    out.push(JSON.stringify(shownProposals, null, 2));
+    out.push('```');
+    out.push('');
+    if (proposals.length > shownProposals.length) {
+      out.push(
+        msg(
+          `提案は ${proposals.length} 件ありますが、読める量に収めるため ${shownProposals.length} 件だけ載せています。残りはドメインや業務領域で分割して再実行すると出ます。`,
+          `There are ${proposals.length} proposals; only ${shownProposals.length} are shown to keep this readable. Re-run split by domain or business area to get the rest.`,
+          lang,
+        ),
+      );
+      out.push('');
+    }
+    out.push(
+      msg(
+        'owner・時期・便益は空欄にしてあります(この分析だけでは決められないため)。businessValue と effort は仮に medium を置いているだけなので、優先順位を議論する前に自分の判断で置き直してください。時期を空のまま登録すると `add_work_package` が「時期の書けない作業は、まだ計画ではなく願望」と警告します。',
+        'Owner, timing, and benefit are left blank because this analysis cannot decide them. businessValue and effort are placeholders set to medium; replace them with your own judgement before you prioritise. Registering with empty timing makes `add_work_package` warn that work with no date is a wish, not a plan.',
+        lang,
+      ),
+    );
+    out.push('');
+  }
+
+  // --- 案件メモへの記録 ---
+  out.push(`## ${inline('保存', 'Saving', lang)}`);
+  out.push('');
+  if (!input.save) {
+    out.push(
+      msg(
+        'この分析は案件データを変更していません(既定は save=false)。分析した事実を案件のメモに残す場合は save=true で再実行してください。作業パッケージ自体は、上の JSON を `add_work_package` に渡すと登録されます。',
+        'Nothing was written to the engagement (save defaults to false). Re-run with save=true to record this analysis as an engagement note. The work packages themselves are created by passing the JSON above to `add_work_package`.',
+        lang,
+      ),
+    );
+  } else {
+    const engagement = loadEngagement();
+    if (!engagement) {
+      out.push(
+        msg(
+          '案件が未作成のため保存していません。`start_engagement` で案件を作ってから save=true で再実行してください。',
+          'Not saved: no engagement exists. Create one with `start_engagement`, then re-run with save=true.',
+          lang,
+        ),
+      );
+    } else {
+      const stamp = now().slice(0, 10);
+      const summaryLine = en
+        ? `[${stamp}] Gap analysis${domainLabel ? ` (${domainLabel})` : ''}: baseline ${baseline.length} / target ${target.length}; new ${countOf('new')}, eliminated ${countOf('eliminated')}, modified ${countOf('modified')}, replaced ${countOf('replaced')}, retained ${retainedCount}. Gaps needing work: ${gapRows.map((r) => r.subject).join('; ') || 'none'}`
+        : `[${stamp}] ギャップ分析${domainLabel ? `(${domainLabel})` : ''}: 現行 ${baseline.length} / 目標 ${target.length}、新規 ${countOf('new')}・廃止 ${countOf('eliminated')}・改修 ${countOf('modified')}・置換 ${countOf('replaced')}・維持 ${retainedCount}。要作業のギャップ: ${gapRows.map((r) => r.subject).join('、') || 'なし'}`;
+      engagement.notes.push(quote(summaryLine, 600));
+      engagement.updatedAt = now();
+      const saved = trySave(engagement);
+      out.push(
+        saved.ok
+          ? msg(
+              `**保存しました** — 案件「${engagement.name}」のメモに、この分析の要約を 1 行追記しました(作業パッケージやリスクは追加していません)。保存したくない場合は save=false で実行してください。`,
+              `**Saved** — one summary line was appended to the notes of engagement "${engagement.name}". No work packages or risks were created. Run with save=false if you do not want this written.`,
+              lang,
+            )
+          : msg(
+              `保存に失敗しました(${saved.reason})。分析結果そのものは上に出ています。データ保存先(既定 \`~/.togaf-eap\`、環境変数 \`TOGAF_EAP_DATA_DIR\` で変更)の書き込み権限を確認してください。`,
+              `Saving failed (${saved.reason}). The analysis itself is above. Check write access to the data directory (default \`~/.togaf-eap\`, override with \`TOGAF_EAP_DATA_DIR\`).`,
+              lang,
+            ),
+      );
+    }
+  }
+  out.push('');
 
   // --- 解釈と次の一手 ---
   out.push(`## ${inline('解釈と次の一手', 'How to read this and what to do next', lang)}`);
@@ -739,31 +1057,48 @@ function runRiskMatrix(lang: Lang): ToolResult {
   }
 
   // --- リスク一覧 ---
+  // 上のマトリクスは全件の集計(切ると全体像が消える)。切るのはこの明細表だけ。
   out.push(`## ${label(L.risks, lang)}`);
   out.push('');
-  out.push(
-    `| ID | ${label(L.title, lang)} | ${label(L.level, lang)} | ${label(L.residual, lang)} | ${label(L.status, lang)} | ${label(L.owner, lang)} | ${label(L.mitigation, lang)} |`,
-  );
-  out.push('| --- | --- | :-: | :-: | :-: | --- | --- |');
   const sortedRisks = [...risks].sort(
     (a, b) =>
       RISK_LEVEL_RANK[b.level] - RISK_LEVEL_RANK[a.level] ||
       Number(isActive(b)) - Number(isActive(a)) ||
       a.title.localeCompare(b.title),
   );
-  for (const r of sortedRisks) {
+  const shownRisks = capRows(sortedRisks);
+  out.push(
+    `| ID | ${label(L.title, lang)} | ${label(L.level, lang)} | ${label(L.residual, lang)} | ${label(L.status, lang)} | ${label(L.owner, lang)} | ${label(L.mitigation, lang)} |`,
+  );
+  out.push('| --- | --- | :-: | :-: | :-: | --- | --- |');
+  for (const r of shownRisks.rows) {
     out.push(
       [
         '',
         `\`${r.id}\``,
-        cell(r.title),
+        // 見出しも 300 字まで入るので、行数を絞っても 1 行が長いと表が読めない
+        cell(capCell(r.title)),
         label(RISK_LEVEL_LABEL[r.level], lang),
         r.residualLevel ? label(RISK_LEVEL_LABEL[r.residualLevel], lang) : '—',
         label(RISK_STATUS_LABEL[r.status], lang),
-        cell(r.owner) || '—',
-        cell(r.mitigation) || '—',
+        cell(capCell(r.owner ?? '')) || '—',
+        // 1 行が長いと 20 件でも表が読めなくなるので、自由記述だけ長さを抑える
+        cell(capCell(r.mitigation ?? '')) || '—',
         '',
       ].join(' | ').trim(),
+    );
+  }
+  if (shownRisks.capped) {
+    out.push('');
+    out.push(
+      `_${capNotice(
+        shownRisks,
+        {
+          ja: '並びは深刻度順。上のマトリクスは全件の集計なので、件数は全体を反映している。明細を全件見るには `get_dashboard` に compact=false(件数を変えるなら limit=<件数>)、生データなら `get_engagement` の format="json"。',
+          en: 'Ordered by severity. The matrix above still counts every risk. For the full detail call `get_dashboard` with compact=false (or limit=<n>), or read the raw data with format="json" on `get_engagement`.',
+        },
+        lang,
+      )}_`,
     );
   }
   out.push('');
@@ -978,22 +1313,776 @@ function isHighSide(level: InfluenceLevel): boolean {
   return INFLUENCE_RANK[level] >= 1;
 }
 
-function quadrantOf(s: Stakeholder): Quadrant {
-  const inf = isHighSide(s.influence);
-  const int = isHighSide(s.interest);
-  if (inf && int) return 'manageClosely';
-  if (inf && !int) return 'keepSatisfied';
-  if (!inf && int) return 'keepInformed';
-  return 'monitor';
+// --- 象限判定の公開 API(図ツールと表ツールで同じ判定を使うため)---
+
+export type StakeholderQuadrant = Quadrant;
+
+/** 象限判定に必要な最小限の入力。登録済み Stakeholder でも図ツールの引数でもそのまま渡せる */
+export interface StakeholderQuadrantInput {
+  name?: string;
+  influence: InfluenceLevel;
+  interest: InfluenceLevel;
+  /** 利用者が自分で書いた関与方針。あればこちらを優先する */
+  approach?: string;
 }
 
-/** medium を含む(境界線上の)ステークホルダーか */
-function isBorderline(s: Stakeholder): boolean {
-  return s.influence === 'medium' || s.interest === 'medium';
+export interface StakeholderQuadrantResult {
+  quadrant: StakeholderQuadrant;
+  /** 影響力を高側と判定したか(medium 以上) */
+  influenceHighSide: boolean;
+  /** 関心度を高側と判定したか(medium 以上) */
+  interestHighSide: boolean;
+  /** medium を含み、判定が入れ替わり得る位置にいるか */
+  borderline: boolean;
+  /** 表示名。境界線上なら末尾に `*` が付く */
+  displayName: string;
+  label: Bilingual;
+  condition: Bilingual;
+  /** 関与方針。利用者が approach を書いていればその文言をそのまま返す */
+  approach: Bilingual;
+  approachSource: 'user' | 'default';
+}
+
+/** 境界線上であることを示す記号 */
+export const STAKEHOLDER_BORDERLINE_MARK = '*';
+
+export const STAKEHOLDER_QUADRANT_ORDER: StakeholderQuadrant[] = [
+  'manageClosely',
+  'keepSatisfied',
+  'keepInformed',
+  'monitor',
+];
+
+export const STAKEHOLDER_QUADRANT_LABEL: Record<StakeholderQuadrant, Bilingual> = QUADRANT_LABEL;
+export const STAKEHOLDER_QUADRANT_CONDITION: Record<StakeholderQuadrant, Bilingual> = QUADRANT_CONDITION;
+export const STAKEHOLDER_QUADRANT_APPROACH: Record<StakeholderQuadrant, Bilingual> = QUADRANT_APPROACH;
+
+/** 判定ルールの開示文。表でも図でも同じ文言を出すため、ここに 1 つだけ置く */
+export const STAKEHOLDER_QUADRANT_RULE: Bilingual = {
+  ja: `判定は「中(medium)以上を高側」として行っています(取りこぼしより過剰配慮のほうが安いため)。\`${STAKEHOLDER_BORDERLINE_MARK}\` 付きは中を含む境界線上の人で、実際の影響力を本人・周囲に確認する価値があります。`,
+  en: `Anything at medium or above counts as the high side, because over-engaging costs less than missing someone. Names marked \`${STAKEHOLDER_BORDERLINE_MARK}\` sit on the boundary; it is worth confirming their real influence.`,
+};
+
+/**
+ * 影響力 × 関心度から象限を決める。
+ * この 1 関数を表(stakeholder_matrix)と図(diagram_stakeholder_matrix)の両方で使い、
+ * 同じ人が表と図で別の象限に現れることを防ぐ。
+ */
+export function classifyStakeholderQuadrant(input: StakeholderQuadrantInput): StakeholderQuadrantResult {
+  const influenceHighSide = isHighSide(input.influence);
+  const interestHighSide = isHighSide(input.interest);
+  const quadrant: StakeholderQuadrant = influenceHighSide
+    ? interestHighSide
+      ? 'manageClosely'
+      : 'keepSatisfied'
+    : interestHighSide
+      ? 'keepInformed'
+      : 'monitor';
+  const borderline = input.influence === 'medium' || input.interest === 'medium';
+  const name = input.name ?? '';
+  const userApproach = input.approach && input.approach.trim().length > 0 ? input.approach.trim() : null;
+  return {
+    quadrant,
+    influenceHighSide,
+    interestHighSide,
+    borderline,
+    displayName: `${name}${borderline ? STAKEHOLDER_BORDERLINE_MARK : ''}`,
+    label: QUADRANT_LABEL[quadrant],
+    condition: QUADRANT_CONDITION[quadrant],
+    // 利用者が書いた方針は、こちらの既定方針より必ず優先する
+    approach: userApproach ? { ja: userApproach, en: userApproach } : QUADRANT_APPROACH[quadrant],
+    approachSource: userApproach ? 'user' : 'default',
+  };
+}
+
+function quadrantOf(s: Stakeholder): Quadrant {
+  return classifyStakeholderQuadrant(s).quadrant;
 }
 
 function stakeholderTag(s: Stakeholder): string {
-  return `${s.name}${isBorderline(s) ? '*' : ''}`;
+  return classifyStakeholderQuadrant(s).displayName;
+}
+
+// --- 関係者間の対立検出 / Detecting conflicts between stakeholders ---
+//
+// 手作業でいちばん面倒なのが「誰と誰の言い分が両立しないか」の突き合わせなので、
+// 登録された関心事(concerns)の文言だけを機械的に照合して候補を出す。
+// 出すのは候補であり、当てずっぽうで対立を作らないために次を守る:
+//   - 根拠(どの関心事のどの語で判定したか)を必ず併記する
+//   - 話題が重ならない組は「要確認」として弱く出す
+//   - 0 件のときは「検出できなかった」と言い、手で見る観点を示す
+
+/** 対立軸の一方の立場 */
+interface ConflictPole {
+  label: Bilingual;
+  /** 判定語。ASCII は単語境界一致、日本語は部分一致 */
+  keywords: string[];
+}
+
+/** 実務で繰り返し現れる対立軸(独自の整理) */
+interface ConflictAxis {
+  id: string;
+  name: Bilingual;
+  poles: [ConflictPole, ConflictPole];
+  /** 何を巡って食い違うのか */
+  issue: Bilingual;
+  /** 放置すると何が起きるか */
+  ifIgnored: Bilingual;
+  /** いつ誰が裁くか */
+  arbitration: Bilingual;
+}
+
+const CONFLICT_AXES: ConflictAxis[] = [
+  {
+    id: 'speed-vs-certainty',
+    name: { ja: '速さ vs 確実さ', en: 'Speed vs certainty' },
+    poles: [
+      {
+        label: { ja: '早く出したい(速さ優先)', en: 'Wants an answer fast' },
+        keywords: [
+          '早く', '早期', '迅速', 'スピード', '即答', '即日', 'その場で', '遅い', '遅く', '遅れ',
+          '待たされ', '待てない', 'リードタイム', '短縮', '失注', '機会損失', 'タイムリー',
+          'fast', 'faster', 'speed', 'quick', 'quickly', 'immediately', 'same-day', 'turnaround',
+          'delay', 'delays', 'slow', 'lead time', 'lose the deal', 'lost deals', 'responsive',
+        ],
+      },
+      {
+        label: { ja: '確定してから出したい(確実さ優先)', en: 'Wants it confirmed before it goes out' },
+        keywords: [
+          '正確', '精度', '確定してから', '確定した', '裏付け', '根拠を', '検証してから', '承認を経て',
+          '手戻り', 'ミス', '誤り', '間違い', '勝手に約束', '実現可能性', '守れない', '無理な約束', '確約',
+          'accuracy', 'accurate', 'precise', 'confirmed', 'verified', 'validated', 'double-check',
+          'rework', 'errors', 'mistake', 'feasibility', 'realistic', 'over-promise', 'overpromise',
+        ],
+      },
+    ],
+    issue: {
+      ja: '確定していない情報をどこまで顧客・社外に出してよいか(速さと確実さのどちらを優先するか)',
+      en: 'How much unconfirmed information may go out to the customer — whether speed or certainty wins',
+    },
+    ifIgnored: {
+      ja: '現場が個別に折衝して回避策(裏の運用)を作る。仕組みの外で約束が動くため、どちらの側の数字も信用できなくなり、後で納期遅延・値引き・手戻りとして表面化する。',
+      en: 'Both sides invent private workarounds. Commitments start moving outside the system, neither side\'s numbers can be trusted, and it resurfaces later as missed dates, discounts, and rework.',
+    },
+    arbitration: {
+      ja: '受注から出荷までを通しで見る業務オーナー(事業責任者)が裁く。「どの条件なら暫定回答でよいか」「暫定と確定をどう区別して伝えるか」を要求確定の前に決め、決定事項として記録する。',
+      en: 'The business owner accountable end-to-end from order to delivery decides. Settle before requirements are frozen: under what conditions a provisional answer is allowed, and how provisional is distinguished from confirmed. Record it as a decision.',
+    },
+  },
+  {
+    id: 'standard-vs-local',
+    name: { ja: '標準化・全社最適 vs 現場裁量・個別最適', en: 'Standardization vs local autonomy' },
+    poles: [
+      {
+        label: { ja: '標準に合わせる側', en: 'Wants to conform to the standard' },
+        keywords: [
+          '標準', '標準化', '統一', '共通化', 'パッケージ', 'ノンカスタマイズ', '集約', '一元', '全社',
+          '統合', '業務を変える', '業務プロセスを変える', 'あるべき姿に合わせ', 'fit to standard',
+          'standard', 'standardize', 'standardise', 'package', 'out-of-the-box', 'consolidate',
+          'consolidation', 'single instance', 'company-wide', 'harmonize', 'harmonise', 'centralize', 'centralise',
+        ],
+      },
+      {
+        label: { ja: '現場のやり方を守る側', en: 'Wants to protect how the work is done today' },
+        keywords: [
+          '現場', '個別対応', '独自', '例外', '特例', 'カスタマイズ', 'アドオン', '裁量', '部門ごと',
+          '拠点ごと', '現行踏襲', '今のやり方', '変更に反対', '反対', '負担が増える', '混乱',
+          'local', 'on-site', 'exception', 'exceptions', 'customization', 'customisation', 'add-on',
+          'discretion', 'per-site', 'as-is', 'resist', 'resistance', 'disruption', 'burden', 'retraining',
+        ],
+      },
+    ],
+    issue: {
+      ja: '標準からの逸脱をどこまで認めるか(全社で 1 つのやり方に寄せるか、現場ごとのやり方を残すか)',
+      en: 'How much deviation from the standard is allowed — one company-wide way of working, or local variation',
+    },
+    ifIgnored: {
+      ja: '要件定義の後半で例外要求が噴き出し、カスタマイズが積み上がる。標準化で見込んだ費用削減と保守性の効果が消え、次の更改でも同じ議論をやり直すことになる。',
+      en: 'Exception requests erupt late in requirements and customizations pile up. The savings and maintainability the standardization case was built on evaporate, and the same argument repeats at the next upgrade.',
+    },
+    arbitration: {
+      ja: 'アーキテクチャ委員会(または CIO)が、逸脱を認める基準・申請窓口・承認者を先に決めて裁く。あわせて業務側の代表と、変更に伴う教育・要員計画を合意しておく。移行計画の前に決めないと、個別交渉が固定化する。',
+      en: 'The architecture board (or the CIO) decides the criteria for granting an exception, the single intake route, and who approves. Agree the training and staffing plan with the business representatives at the same time. Settle it before migration planning, or case-by-case bargaining becomes permanent.',
+    },
+  },
+  {
+    id: 'cost-vs-quality',
+    name: { ja: 'コスト削減 vs 品質・可用性', en: 'Cost reduction vs quality and availability' },
+    poles: [
+      {
+        label: { ja: '費用を抑えたい側', en: 'Wants the spend down' },
+        keywords: [
+          'コスト', '費用', '予算', '削減', '安く', '低コスト', '投資対効果', '価格', '経費', '人員削減',
+          'roi', 'cost', 'costs', 'budget', 'cheaper', 'savings', 'reduce spend', 'headcount',
+        ],
+      },
+      {
+        label: { ja: '品質・可用性を守りたい側', en: 'Wants quality and availability protected' },
+        keywords: [
+          '品質', '可用性', '性能', 'レスポンス', '信頼性', '冗長', '止まらない', '止められない', '障害',
+          '安定稼働', '保守性', '網羅', 'sla', 'quality', 'availability', 'performance', 'reliability',
+          'redundancy', 'uptime', 'downtime', 'outage', 'robust',
+        ],
+      },
+    ],
+    issue: {
+      ja: '費用をどこまで削り、どの水準の品質・可用性を買うか(削った分の劣化を誰が引き受けるか)',
+      en: 'How far the spend comes down and what level of quality and availability is bought — and who absorbs the degradation',
+    },
+    ifIgnored: {
+      ja: '水準を決めないまま安い案が通り、障害が起きてから「そんな品質とは聞いていない」になる。追加投資は障害の後にしか出ないため、結局は高くつく。',
+      en: 'The cheap option passes with no agreed level, and after the first outage it becomes "nobody told us the quality would be this". The extra money only appears after the failure, so it ends up costing more.',
+    },
+    arbitration: {
+      ja: '投資判断者(スポンサー / 財務)が裁く。先に品質・可用性を数値(停止許容時間・応答時間・復旧目標)で決め、その水準に対する費用を出す形にする。数値が無い議論は必ず安い方が勝つ。',
+      en: 'The investment decision-maker (sponsor or finance) decides. Fix the quality and availability numbers first — tolerable downtime, response time, recovery targets — then price against them. Without numbers, the cheaper option always wins.',
+    },
+  },
+  {
+    id: 'short-vs-long',
+    name: { ja: '短期の成果 vs 長期の持続性', en: 'Short-term results vs long-term sustainability' },
+    poles: [
+      {
+        label: { ja: '今期の成果を出したい側', en: 'Wants results this period' },
+        keywords: [
+          '今期', '今年度', '早期に成果', '短期', 'すぐに', '当面', 'クイックウィン', '目先',
+          'this quarter', 'this fiscal', 'short term', 'short-term', 'quick win', 'quick wins', 'asap',
+        ],
+      },
+      {
+        label: { ja: '長く使える形にしたい側', en: 'Wants something that lasts' },
+        keywords: [
+          '長期', '中長期', '将来', '持続', '技術的負債', '拡張性', '作り直し', '土台', '次の10年',
+          'long term', 'long-term', 'sustainable', 'technical debt', 'scalability', 'maintainability', 'foundation',
+        ],
+      },
+    ],
+    issue: {
+      ja: '今期に見せる成果と、後で効いてくる土台づくりのどちらに予算と人を割くか',
+      en: 'Where the budget and the people go: visible results this period, or the foundation that pays off later',
+    },
+    ifIgnored: {
+      ja: '短期側が勝ち続け、土台は毎回「次回」に送られる。3〜4 回送ると作り直し以外の選択肢が無くなり、費用は当初の見積では収まらない。',
+      en: 'The short-term side keeps winning and the foundation is deferred every round. After three or four deferrals, a rebuild is the only option left and it will not fit the original estimate.',
+    },
+    arbitration: {
+      ja: 'スポンサーがロードマップの区切り(移行アーキテクチャ)で裁く。各区切りで「今回やらないこと」を明文化し、土台側の作業には期限付きの枠を確保する。枠を取らない限り、土台は永久に後回しになる。',
+      en: 'The sponsor decides at the roadmap milestones (transition architectures). Write down what is explicitly not done in each slice and ring-fence a dated allocation for foundation work. Without a ring-fence it is deferred forever.',
+    },
+  },
+  {
+    id: 'control-vs-convenience',
+    name: { ja: '統制・セキュリティ vs 利便性', en: 'Control and security vs convenience' },
+    poles: [
+      {
+        label: { ja: '統制を効かせたい側', en: 'Wants control enforced' },
+        keywords: [
+          'セキュリティ', '統制', '内部統制', '監査', '規制', 'コンプライアンス', '法令', '権限管理',
+          '承認フロー', 'ガバナンス', '個人情報', '情報漏えい', '情報漏洩', '証跡',
+          'security', 'audit', 'compliance', 'regulation', 'regulatory', 'governance', 'privacy', 'traceability',
+        ],
+      },
+      {
+        label: { ja: '現場の使いやすさを守りたい側', en: 'Wants day-to-day usability protected' },
+        keywords: [
+          '使いやすさ', '利便性', '手間', '煩雑', '面倒', '制約が多い', '自由に', '業務が止まる',
+          'ハードルが高い', '申請が多い', 'usability', 'convenience', 'friction', 'cumbersome',
+          'red tape', 'self-service', 'too many steps',
+        ],
+      },
+    ],
+    issue: {
+      ja: '統制の強さと日々の業務の回りやすさのどこで折り合うか(誰がリスクを受容するか)',
+      en: 'Where control strength and day-to-day workability meet — and who accepts the residual risk',
+    },
+    ifIgnored: {
+      ja: '統制が強すぎれば現場が抜け道(共有 ID・私物端末・表計算での二重管理)を作り、弱すぎれば監査で止まる。どちらも表面化するのは監査か事故の後。',
+      en: 'Too much control and the floor invents workarounds — shared accounts, personal devices, shadow spreadsheets. Too little and the audit stops you. Either way it only surfaces after the audit or the incident.',
+    },
+    arbitration: {
+      ja: 'リスクを受容する人(セキュリティ責任者と業務側役員の連名)が裁く。例外は期限付きで承認し、期限が来たら自動的に見直す。受容者の名前が入らない例外は認めない。',
+      en: 'Whoever accepts the risk decides — jointly, the security owner and the business executive. Approve exceptions with an expiry date and review them when it arrives. No exception without a named acceptor.',
+    },
+  },
+  {
+    id: 'bigbang-vs-continuity',
+    name: { ja: '一気に変える vs 現行業務を止めない', en: 'Change it all at once vs keep the business running' },
+    poles: [
+      {
+        label: { ja: '一気に変えたい側', en: 'Wants to change it in one go' },
+        keywords: [
+          '一気に', 'ビッグバン', '全面刷新', '抜本的', '一斉', 'スクラップ',
+          'big bang', 'all at once', 'radical', 'overhaul', 'rip and replace',
+        ],
+      },
+      {
+        label: { ja: '現行業務の継続を守りたい側', en: 'Wants continuity of the running business' },
+        keywords: [
+          '段階的', '小さく', '並行稼働', '現行を止められない', '業務を止められない', '繁忙期', 'リスクを抑え',
+          'incremental', 'phased', 'step by step', 'parallel run', 'cannot stop', 'peak season', 'low risk',
+        ],
+      },
+    ],
+    issue: {
+      ja: '切替を一度でやるか刻むか(止められない業務と、二重運用の負担のどちらを取るか)',
+      en: 'One cutover or many (which is worse: the business that cannot stop, or the burden of running two systems)',
+    },
+    ifIgnored: {
+      ja: '切替方式が決まらないまま設計が進み、後から並行稼働のためのつなぎを追加することになる。つなぎは捨てる前提で作られないため、そのまま残って恒久化する。',
+      en: 'Design proceeds without a cutover approach, then temporary bridges get bolted on for the parallel run. Bridges built without a disposal date stay forever.',
+    },
+    arbitration: {
+      ja: 'スポンサーと業務オーナーが、移行計画(フェーズ E/F)の前に裁く。並行稼働の期間・費用・旧側の停止日をセットで決める。停止日の無い段階移行は、二重運用として固定化する。',
+      en: 'The sponsor and the business owner decide before migration planning (phases E/F). Fix the parallel-run period, its cost, and the shutdown date of the old side together. A phased migration with no shutdown date freezes into permanent dual operation.',
+    },
+  },
+];
+
+/** 対立の確からしさを上げるための「同じ話題か」判定 */
+interface ConflictTopic {
+  id: string;
+  name: Bilingual;
+  keywords: string[];
+}
+
+const CONFLICT_TOPICS: ConflictTopic[] = [
+  {
+    id: 'order-quote',
+    name: { ja: '見積・受注・納期回答', en: 'Quotes, orders, and delivery dates' },
+    keywords: [
+      '見積', '受注', '納期', '引合', 'リードタイム', '出荷', '回答', '注文', '販売', '失注',
+      'quote', 'quotation', 'order', 'delivery date', 'lead time', 'rfq',
+    ],
+  },
+  {
+    id: 'production',
+    name: { ja: '生産・在庫', en: 'Production and inventory' },
+    keywords: [
+      '生産', '製造', '在庫', '工場', '工程', '設備', '調達', '購買',
+      'production', 'manufacturing', 'inventory', 'plant', 'shop floor', 'procurement',
+    ],
+  },
+  {
+    id: 'process-people',
+    name: { ja: '業務プロセス・要員', en: 'Business process and people' },
+    keywords: [
+      '業務プロセス', '業務', 'プロセス', '手順', '運用ルール', '現場', '要員', '人員', '雇用', '教育', '組織',
+      'process', 'processes', 'workflow', 'staff', 'staffing', 'headcount', 'training', 'organisation', 'organization', 'jobs',
+    ],
+  },
+  {
+    id: 'system-data',
+    name: { ja: 'システム・データ', en: 'Systems and data' },
+    keywords: [
+      'システム', 'パッケージ', '基幹', 'データ', 'マスタ', '連携', 'インタフェース', 'クラウド', 'erp',
+      'system', 'systems', 'package', 'data', 'master data', 'interface', 'integration', 'cloud', 'platform',
+    ],
+  },
+  {
+    id: 'money',
+    name: { ja: '費用・投資', en: 'Cost and investment' },
+    keywords: [
+      'コスト', '費用', '予算', '投資', '価格', '原価', '料金',
+      'cost', 'costs', 'budget', 'investment', 'price', 'spend',
+    ],
+  },
+  {
+    id: 'customer',
+    name: { ja: '顧客・取引先', en: 'Customers and partners' },
+    keywords: ['顧客', '客先', '取引先', 'チャネル', 'customer', 'customers', 'client', 'clients', 'channel'],
+  },
+  {
+    id: 'security',
+    name: { ja: 'セキュリティ・統制', en: 'Security and control' },
+    keywords: [
+      'セキュリティ', '監査', '規制', '法令', '個人情報', '統制',
+      'security', 'audit', 'regulation', 'compliance', 'privacy',
+    ],
+  },
+];
+
+/** 否定表現。「カスタマイズはしない」「大幅な変更に反対」を賛成と読まないため */
+const NEGATION_JA =
+  /^[はをもがのにでとへ、\s]{0,3}(?:しない|しません|せず|させない|できない|認めない|不要|不可|禁止|なし|無し|反対|避け|やめ|廃止|は困る|は避け)/;
+const NEGATION_EN = /^(?:no|not|never|without|avoid|avoiding|minimal|minimum|less)$/;
+
+function escapeRe(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** キーワードの出現位置を返す(ASCII は単語境界、日本語は部分一致) */
+function keywordPositions(haystack: string, keyword: string): number[] {
+  const k = keyword.trim().toLowerCase();
+  if (k.length === 0) return [];
+  const positions: number[] = [];
+  if (/^[\x20-\x7e]+$/.test(k)) {
+    const re = new RegExp(`(^|[^a-z0-9])(${escapeRe(k)})($|[^a-z0-9])`, 'g');
+    let m: RegExpExecArray | null = re.exec(haystack);
+    while (m !== null) {
+      const start = m.index + m[1].length;
+      positions.push(start);
+      re.lastIndex = start + k.length;
+      m = re.exec(haystack);
+    }
+    return positions;
+  }
+  let from = 0;
+  for (;;) {
+    const idx = haystack.indexOf(k, from);
+    if (idx < 0) return positions;
+    positions.push(idx);
+    from = idx + k.length;
+  }
+}
+
+/** 話題の一致(立場ではなく題材なので否定は見ない) */
+function topicHit(haystack: string, keyword: string): boolean {
+  return keywordPositions(haystack, keyword).length > 0;
+}
+
+/** 立場の一致。否定されている出現は数えない */
+function stanceHit(haystack: string, keyword: string): boolean {
+  const k = keyword.trim().toLowerCase();
+  const ascii = /^[\x20-\x7e]+$/.test(k);
+  for (const idx of keywordPositions(haystack, k)) {
+    if (ascii) {
+      const before = haystack.slice(Math.max(0, idx - 24), idx);
+      const prev = /([a-z']+)[^a-z']*$/.exec(before)?.[1] ?? '';
+      if (!NEGATION_EN.test(prev)) return true;
+    } else {
+      const after = haystack.slice(idx + k.length, idx + k.length + 12);
+      if (!NEGATION_JA.test(after)) return true;
+    }
+  }
+  return false;
+}
+
+/** ある関心事が、ある立場に当たったか(当たった語も返す) */
+interface PoleHit {
+  concern: string;
+  matched: string[];
+}
+
+function poleHits(concerns: string[], pole: ConflictPole): PoleHit[] {
+  const hits: PoleHit[] = [];
+  for (const concern of concerns) {
+    const hay = concern.toLowerCase();
+    const matched = pole.keywords.filter((k) => stanceHit(hay, k));
+    if (matched.length > 0) hits.push({ concern, matched });
+  }
+  return hits;
+}
+
+const topicCache = new Map<string, ConflictTopic[]>();
+
+function topicsOf(concern: string): ConflictTopic[] {
+  const cached = topicCache.get(concern);
+  if (cached) return cached;
+  const hay = concern.toLowerCase();
+  const topics = CONFLICT_TOPICS.filter((t) => t.keywords.some((k) => topicHit(hay, k)));
+  topicCache.set(concern, topics);
+  return topics;
+}
+
+/** 対立軸の片側に立っている 1 人と、その根拠 */
+interface ConflictParticipant {
+  person: Stakeholder;
+  /** 根拠にした関心事(その立場に最もよく当たったもの) */
+  concern: string;
+  matched: string[];
+  /** この人が軸の両側に関心事を持っているか */
+  twoSided: boolean;
+}
+
+/**
+ * 1 つの対立軸につき 1 件。
+ * 同じことを言う人が複数いても組み合わせの数だけ並べない(4 人 × 4 人で 16 行になると読めない)。
+ */
+interface DetectedConflict {
+  axis: ConflictAxis;
+  /** [軸の一方の立場に立つ人たち, 他方に立つ人たち] */
+  sides: [ConflictParticipant[], ConflictParticipant[]];
+  /** 代表として詳しく示す 1 組(話題が重なる組を優先) */
+  representative: [ConflictParticipant, ConflictParticipant];
+  sharedTopics: ConflictTopic[];
+  /** likely = 同じ話題で正面から食い違う / possible = 同じ軸だが話題が重ならない(要確認) */
+  confidence: 'likely' | 'possible';
+}
+
+/** 関心事だけを見て有効な文字列に整える(手書き JSON でも落ちないように) */
+function usableConcerns(s: Stakeholder): string[] {
+  if (!Array.isArray(s.concerns)) return [];
+  return s.concerns.filter((c): c is string => typeof c === 'string' && c.trim().length > 0);
+}
+
+/** 影響力・関心度の重み(同じ確度なら重い人の対立を先に出す) */
+function stakeholderWeight(s: Stakeholder): number {
+  return INFLUENCE_RANK[s.influence] * 2 + INFLUENCE_RANK[s.interest];
+}
+
+/**
+ * 登録された関心事から、対立しうる軸を検出する。
+ * 語の照合だけで判定しているので、ここで出るのは「候補」であり確定した対立ではない。
+ * 1 軸につき 1 件にまとめ、両側に立つ人を全員並べる。
+ */
+function detectStakeholderConflicts(people: Stakeholder[]): DetectedConflict[] {
+  const found: DetectedConflict[] = [];
+
+  for (const axis of CONFLICT_AXES) {
+    // 人ごとに、この軸のどちら側に当たったかを求める
+    const hitsOf = new Map<string, [PoleHit[], PoleHit[]]>();
+    for (const s of people) {
+      const concerns = usableConcerns(s);
+      if (concerns.length === 0) continue;
+      const hits: [PoleHit[], PoleHit[]] = [
+        poleHits(concerns, axis.poles[0]),
+        poleHits(concerns, axis.poles[1]),
+      ];
+      if (hits[0].length > 0 || hits[1].length > 0) hitsOf.set(s.id, hits);
+    }
+
+    const bestOf = (hits: PoleHit[]): PoleHit | null =>
+      hits.length === 0 ? null : [...hits].sort((x, y) => y.matched.length - x.matched.length)[0];
+
+    // 両側に当たった人は、当たりの強い側にだけ置く(同じ人が両側に並ぶと読めない)
+    const build = (pole: 0 | 1): ConflictParticipant[] =>
+      people
+        .flatMap((s) => {
+          const hits = hitsOf.get(s.id);
+          if (!hits) return [];
+          const mine = bestOf(hits[pole]);
+          if (!mine) return [];
+          const other = bestOf(hits[pole === 0 ? 1 : 0]);
+          if (other && other.matched.length > mine.matched.length) return [];
+          // 同点なら pole 0 側に寄せる(どちらかに決めないと両側に出てしまう)
+          if (other && other.matched.length === mine.matched.length && pole === 1) return [];
+          return [
+            {
+              person: s,
+              concern: mine.concern,
+              matched: mine.matched,
+              twoSided: other !== null,
+            },
+          ];
+        })
+        .sort((x, y) => stakeholderWeight(y.person) - stakeholderWeight(x.person));
+
+    const sideA = build(0);
+    const sideB = build(1);
+    // 同一人物が両側に居るだけの状態は対立ではない(本人の中の両立)
+    const hasCrossPair = sideA.some((a) => sideB.some((b) => b.person.id !== a.person.id));
+    if (!hasCrossPair) continue;
+
+    // 代表の組は「同じ話題を指していて、両側発言でない」ものを優先する
+    let representative: [ConflictParticipant, ConflictParticipant] | null = null;
+    let sharedTopics: ConflictTopic[] = [];
+    let bestScore = -1;
+    for (const a of sideA) {
+      const aTopics = topicsOf(a.concern);
+      for (const b of sideB) {
+        if (a.person.id === b.person.id) continue;
+        const bTopics = topicsOf(b.concern);
+        const shared = aTopics.filter((t) => bTopics.some((u) => u.id === t.id));
+        const score =
+          (shared.length > 0 ? 1000 : 0) +
+          (a.twoSided || b.twoSided ? 0 : 500) +
+          (stakeholderWeight(a.person) + stakeholderWeight(b.person)) * 10 +
+          a.matched.length +
+          b.matched.length;
+        if (score > bestScore) {
+          bestScore = score;
+          representative = [a, b];
+          sharedTopics = shared;
+        }
+      }
+    }
+    if (!representative) continue;
+
+    const twoSidedRep = representative[0].twoSided || representative[1].twoSided;
+    found.push({
+      axis,
+      sides: [sideA, sideB],
+      representative,
+      sharedTopics,
+      confidence: sharedTopics.length > 0 && !twoSidedRep ? 'likely' : 'possible',
+    });
+  }
+
+  return found.sort((x, y) => {
+    if (x.confidence !== y.confidence) return x.confidence === 'likely' ? -1 : 1;
+    const w = (c: DetectedConflict): number =>
+      stakeholderWeight(c.representative[0].person) + stakeholderWeight(c.representative[1].person);
+    return w(y) - w(x);
+  });
+}
+
+/** 片側に並べる人数の上限(超えた分は名前だけ添える) */
+const CONFLICT_SIDE_MAX = 5;
+
+const CONFIDENCE_LABEL: Record<DetectedConflict['confidence'], Bilingual> = {
+  likely: { ja: '!! 対立の可能性(高)', en: '!! Likely conflict' },
+  possible: { ja: '? 対立の可能性(要確認)', en: '? Possible conflict, to be checked' },
+};
+
+/** 検出できなかったときに手で見る観点(軸の定義からそのまま作る) */
+function conflictChecklist(lang: Lang): string {
+  return bullets(
+    CONFLICT_AXES.map((axis) => ({
+      ja: `${axis.name.ja} — ${axis.issue.ja}`,
+      en: `${axis.name.en} — ${axis.issue.en}`,
+    })),
+    lang,
+  );
+}
+
+function personLabel(s: Stakeholder, lang: Lang): string {
+  const role = s.role && s.role.trim().length > 0 ? `, ${cell(s.role)}` : '';
+  return `${cell(s.name)} (${label(L.influence, lang)} ${label(INFLUENCE_LABEL[s.influence], lang)}, ${label(L.interest, lang)} ${label(INFLUENCE_LABEL[s.interest], lang)}${role})`;
+}
+
+/** 対立の節を組み立てる */
+function renderStakeholderConflicts(
+  people: Stakeholder[],
+  conflicts: DetectedConflict[],
+  lang: Lang,
+): string[] {
+  const out: string[] = [];
+  out.push(`## ${inline('関係者間の対立(関心事から検出)', 'Conflicts between stakeholders (from recorded concerns)', lang)}`);
+  out.push('');
+
+  const withConcerns = people.filter((s) => usableConcerns(s).length > 0);
+
+  if (conflicts.length === 0) {
+    out.push(
+      msg(
+        '登録された関心事の突き合わせでは、対立は検出できませんでした。これは「対立が無い」ことの証明ではありません。判定は関心事に書かれた語だけを見ているので、言い回しが違えば見落とします。',
+        'No conflict was found by matching the recorded concerns. That is not proof there is none: the check only looks at the words in the concerns, so different phrasing slips through.',
+        lang,
+      ),
+    );
+    out.push('');
+    if (withConcerns.length < 2) {
+      out.push(
+        msg(
+          `関心事が記入されている関係者は ${withConcerns.length} 名です。突き合わせには最低 2 名分の関心事が要ります。`,
+          `Only ${withConcerns.length} stakeholder(s) have concerns recorded; the comparison needs at least two.`,
+          lang,
+        ),
+      );
+      out.push('');
+    }
+    out.push(`### ${inline('手で突き合わせる観点', 'What to check by hand', lang)}`);
+    out.push('');
+    out.push(conflictChecklist(lang));
+    out.push('');
+    out.push(
+      msg(
+        '各観点について「誰がどちら側か」を 1 行で書いてみてください。両側に人が居る観点は、決めていない限り必ず後で衝突します。両側に人が居ると分かったら、その人たちの言い分を本人の言葉のまま concerns に入れて再実行すると、この節に出るようになります。',
+        'For each lens, write one line naming who is on which side. Any lens with people on both sides will collide later unless it is decided. Once you know, record each person\'s position in their own words in concerns and re-run — it will then show up in this section.',
+        lang,
+      ),
+    );
+    out.push('');
+    return out;
+  }
+
+  out.push(
+    msg(
+      `関心事の文言を突き合わせて、対立しうる論点を ${conflicts.length} 件検出しました。これは語の一致による**推定**であり、当事者に確認するまでは対立と決まったわけではありません。根拠にした関心事を必ず併記しているので、外れているものはその場で捨ててください。`,
+      `Matching the wording of the recorded concerns surfaced ${plural(conflicts.length, 'potential point of conflict', 'potential points of conflict')}. These are **inferences** from word matches, not confirmed conflicts. The concerns used as evidence are shown with each one, so discard whatever does not hold.`,
+      lang,
+    ),
+  );
+  out.push('');
+  out.push(
+    `| ${inline('確度', 'Confidence', lang)} | ${inline('対立軸', 'Axis', lang)} | ${inline('当事者', 'Parties', lang)} | ${inline('争点', 'What it is about', lang)} |`,
+  );
+  out.push('| --- | --- | --- | --- |');
+  const names = (side: ConflictParticipant[]): string => {
+    const shown = side.slice(0, 3).map((p) => cell(p.person.name)).join(', ');
+    return side.length > 3 ? `${shown} +${side.length - 3}` : shown;
+  };
+  for (const c of conflicts) {
+    out.push(
+      `| ${text(CONFIDENCE_LABEL[c.confidence], lang)} | ${text(c.axis.name, lang)} | ${names(c.sides[0])} ↔ ${names(c.sides[1])} | ${cell(text(c.axis.issue, lang))} |`,
+    );
+  }
+  out.push('');
+
+  conflicts.forEach((c, index) => {
+    const topics =
+      c.sharedTopics.length > 0
+        ? `${inline('共通の話題', 'shared topic', lang)}: ${c.sharedTopics.map((t) => text(t.name, lang)).join(', ')}`
+        : inline(
+            '共通の話題は見つからず(別の件を指している可能性)',
+            'no shared topic found (they may be talking about different things)',
+            lang,
+          );
+    out.push(
+      `### ${index + 1}. ${text(c.axis.name, lang)} — ${text(CONFIDENCE_LABEL[c.confidence], lang)} (${topics})`,
+    );
+    out.push('');
+    for (const [poleIndex, side] of c.sides.entries()) {
+      const pole = c.axis.poles[poleIndex];
+      out.push(`- **${text(pole.label, lang)}** (${side.length})`);
+      for (const p of side.slice(0, CONFLICT_SIDE_MAX)) {
+        // 代表印は複数人が並ぶ側でだけ意味がある
+        const rep =
+          side.length > 1 && c.representative[poleIndex].person.id === p.person.id
+            ? ` ${inline('[代表]', '[example]', lang)}`
+            : '';
+        out.push(`  - ${personLabel(p.person, lang)}${rep}`);
+        out.push(
+          `    - ${inline('根拠にした関心事', 'Evidence', lang)}: 「${quote(p.concern, 120)}」(${inline('一致した語', 'matched', lang)}: ${p.matched.slice(0, 5).join(' / ')})`,
+        );
+      }
+      if (side.length > CONFLICT_SIDE_MAX) {
+        const rest = side.slice(CONFLICT_SIDE_MAX).map((p) => cell(p.person.name));
+        out.push(
+          `  - ${inline(`ほか ${rest.length} 名: ${rest.join(', ')}`, `and ${rest.length} more: ${rest.join(', ')}`, lang)}`,
+        );
+      }
+    }
+    out.push(`- **${inline('争点', 'The question', lang)}**: ${text(c.axis.issue, lang)}`);
+    out.push(`- **${inline('放置すると', 'If it is left alone', lang)}**: ${text(c.axis.ifIgnored, lang)}`);
+    out.push(`- **${inline('いつ誰が裁くか', 'Who decides, and when', lang)}**: ${text(c.axis.arbitration, lang)}`);
+    const twoSidedNames = [...c.sides[0], ...c.sides[1]]
+      .filter((p) => p.twoSided)
+      .map((p) => cell(p.person.name));
+    const uniqueTwoSided = [...new Set(twoSidedNames)];
+    if (uniqueTwoSided.length > 0) {
+      out.push(
+        `- ${inline('注記', 'Note', lang)}: ${inline(
+          `${uniqueTwoSided.join(', ')} は軸の両側に当たる関心事を書いています。本人の中では両立している可能性があるため、対立と決めつけず本人に確認してください。`,
+          `${uniqueTwoSided.join(', ')} has concerns matching both sides of this axis, so they may already hold both positions. Check before calling it a conflict.`,
+          lang,
+        )}`,
+      );
+    }
+    out.push('');
+  });
+  out.push(
+    msg(
+      '検出した対立は、そのままでは誰も裁きません。`update_engagement` の decisions に「未決」として、争点・当事者・裁定者・期限を入れて登録してください。対立を決定事項として立てておかないと、成果物のレビューの場で毎回蒸し返されます。',
+      'A detected conflict decides itself for nobody. Record each one via the decisions field of `update_engagement` as open, with the question, the parties, who decides, and by when. Conflicts that are not raised as decisions come back at every deliverable review.',
+      lang,
+    ),
+  );
+  out.push('');
+  return out;
+}
+
+/**
+ * 象限ごとの明細に何名まで載せるか。
+ *
+ * 象限は 4 つあるので、1 表ずつ `OUTPUT_LIMITS.rows` まで出すと合計 80 行になり、
+ * 「絞った」ことにならない。明細全体で `OUTPUT_LIMITS.rows` 行を人数比で配分し、
+ * どの象限も最低 3 名は見えるようにする(0 名にすると象限の性格が分からなくなる)。
+ * 2 × 2 の集計側は全員を載せたままなので、誰が居るかは失われない。
+ */
+function quadrantLimit(members: number, people: number): number {
+  if (people <= OUTPUT_LIMITS.rows) return OUTPUT_LIMITS.rows;
+  return Math.max(3, Math.floor((OUTPUT_LIMITS.rows * members) / people));
 }
 
 function runStakeholderMatrix(lang: Lang): ToolResult {
@@ -1057,19 +2146,13 @@ function runStakeholderMatrix(lang: Lang): ToolResult {
   );
   out.push('| :-: | --- | --- |');
   out.push(
-    `| **${inline('高', 'High', lang)}** | **${label(L.manageClosely, lang)}**<br>${groups.manageClosely.map((s) => cell(stakeholderTag(s))).join('<br>') || '·'} | **${label(L.keepSatisfied, lang)}**<br>${groups.keepSatisfied.map((s) => cell(stakeholderTag(s))).join('<br>') || '·'} |`,
+    `| **${inline('高', 'High', lang)}** | **${label(L.manageClosely, lang)}**<br>${groups.manageClosely.map((s) => cell(capCell(stakeholderTag(s)))).join('<br>') || '·'} | **${label(L.keepSatisfied, lang)}**<br>${groups.keepSatisfied.map((s) => cell(capCell(stakeholderTag(s)))).join('<br>') || '·'} |`,
   );
   out.push(
-    `| **${inline('低', 'Low', lang)}** | **${label(L.keepInformed, lang)}**<br>${groups.keepInformed.map((s) => cell(stakeholderTag(s))).join('<br>') || '·'} | **${label(L.monitor, lang)}**<br>${groups.monitor.map((s) => cell(stakeholderTag(s))).join('<br>') || '·'} |`,
+    `| **${inline('低', 'Low', lang)}** | **${label(L.keepInformed, lang)}**<br>${groups.keepInformed.map((s) => cell(capCell(stakeholderTag(s)))).join('<br>') || '·'} | **${label(L.monitor, lang)}**<br>${groups.monitor.map((s) => cell(capCell(stakeholderTag(s)))).join('<br>') || '·'} |`,
   );
   out.push('');
-  out.push(
-    msg(
-      '判定は「中(medium)以上を高側」として行っています(取りこぼしより過剰配慮のほうが安いため)。`*` 付きは中を含む境界線上の人で、実際の影響力を本人・周囲に確認する価値があります。',
-      'Anything at medium or above counts as the high side, because over-engaging costs less than missing someone. Names marked `*` sit on the boundary; it is worth confirming their real influence.',
-      lang,
-    ),
-  );
+  out.push(para(STAKEHOLDER_QUADRANT_RULE, lang));
   out.push('');
 
   // --- 象限ごとの方針 ---
@@ -1089,29 +2172,94 @@ function runStakeholderMatrix(lang: Lang): ToolResult {
       out.push('');
       continue;
     }
+    // 上の 2 × 2 は全員を載せた集計(切ると誰が抜けたか分からなくなる)。
+    // 切るのは象限ごとのこの明細表だけで、影響力の高い人から残す。
+    const ordered = [...members].sort(
+      (a, b) =>
+        INFLUENCE_RANK[b.influence] - INFLUENCE_RANK[a.influence] ||
+        INFLUENCE_RANK[b.interest] - INFLUENCE_RANK[a.interest] ||
+        a.name.localeCompare(b.name),
+    );
+    const shownMembers = capRows(ordered, quadrantLimit(members.length, people.length));
     out.push(
       `| ${label(L.name, lang)} | ${label(L.role, lang)} | ${label(L.influence, lang)} | ${label(L.interest, lang)} | ${label(L.concerns, lang)} | ${label(L.approach, lang)} |`,
     );
     out.push('| --- | --- | :-: | :-: | --- | --- |');
-    for (const s of members) {
+    for (const s of shownMembers.rows) {
       out.push(
         [
           '',
-          cell(stakeholderTag(s)),
-          cell(s.role) || '—',
+          cell(capCell(stakeholderTag(s))),
+          cell(capCell(s.role ?? '')) || '—',
           label(INFLUENCE_LABEL[s.influence], lang),
           label(INFLUENCE_LABEL[s.interest], lang),
-          cell(s.concerns.join(' / ')) || '—',
-          cell(s.approach) || '—',
+          cell(capCell(s.concerns.join(' / '))) || '—',
+          cell(capCell(s.approach ?? '')) || '—',
           '',
         ].join(' | ').trim(),
+      );
+    }
+    if (shownMembers.capped) {
+      out.push('');
+      out.push(
+        `_${capNotice(
+          shownMembers,
+          {
+            ja: '並びは影響力の高い順。上の 2 × 2 には全員載っている。明細を全件見るには `get_dashboard` に compact=false(件数を変えるなら limit=<件数>)、生データなら `get_engagement` の format="json"。',
+            en: 'Ordered by influence. Everyone still appears in the 2 x 2 above. For the full detail call `get_dashboard` with compact=false (or limit=<n>), or read the raw data with format="json" on `get_engagement`.',
+          },
+          lang,
+        )}_`,
       );
     }
     out.push('');
   }
 
+  // --- 関係者間の対立 ---
+  const conflicts = detectStakeholderConflicts(people);
+  out.push(...renderStakeholderConflicts(people, conflicts, lang));
+
   // --- 指摘 ---
   const findings: Finding[] = [];
+  const likely = conflicts.filter((c) => c.confidence === 'likely');
+  for (const c of likely.slice(0, 5)) {
+    const [repA, repB] = c.representative;
+    const extra = c.sides[0].length + c.sides[1].length - 2;
+    const bothHeavy = isHighSide(repA.person.influence) && isHighSide(repB.person.influence);
+    findings.push({
+      severity: bothHeavy ? 'high' : 'medium',
+      subject: `${repA.person.name} ↔ ${repB.person.name}${extra > 0 ? ` (+${extra})` : ''}`,
+      issue: {
+        ja: `関心事が正面から食い違う(${c.axis.name.ja})`,
+        en: `Concerns point in opposite directions (${c.axis.name.en})`,
+      },
+      recommendation: {
+        ja: `${c.axis.issue.ja} — これを決定事項として立て、裁定者と期限を入れる。${c.axis.arbitration.ja}`,
+        en: `${c.axis.issue.en} — raise it as a decision with a named arbiter and a date. ${c.axis.arbitration.en}`,
+      },
+    });
+  }
+  if (likely.length > 0) {
+    // 当事者以外に影響力「高」の人が居ない対立は、当事者同士で決めるしかなくなる
+    const unarbitrated = likely.filter((c) => {
+      const parties = new Set([...c.sides[0], ...c.sides[1]].map((p) => p.person.id));
+      return !people.some((s) => s.influence === 'high' && !parties.has(s.id));
+    });
+    if (unarbitrated.length > 0) {
+      findings.push({
+        severity: 'high',
+        subject: unarbitrated.map((c) => text(c.axis.name, lang)).join(' / '),
+        issue: {
+          ja: '対立を裁ける上位者(影響力 高)が、当事者以外に登録されていない',
+          en: 'No high-influence stakeholder outside the conflicting parties is recorded',
+        },
+        recommendation: {
+          ja: '当事者同士の話し合いでは決着しない。両者の上位にいる決裁者(スポンサー・担当役員)を特定して登録し、裁定の場と期限を決める。上位者が居ない対立は、そのまま実装工程まで持ち越される。',
+          en: 'The parties will not settle this between themselves. Identify and record the decision-maker above both of them (the sponsor or the responsible executive) and fix where and by when it is arbitrated. A conflict with nobody above it simply travels into implementation.',
+        },
+      });
+    }
+  }
   for (const s of people) {
     const q = quadrantOf(s);
     if (s.concerns.length === 0) {
@@ -1199,6 +2347,17 @@ function runStakeholderMatrix(lang: Lang): ToolResult {
       en: 'The "keep informed" group knows day-to-day reality best. Using them to find requirement gaps cuts rework later.',
     });
   }
+  if (conflicts.length > 0) {
+    reading.push({
+      ja: `関心事の突き合わせで、対立しうる論点が ${conflicts.length} 件出ています(うち確度が高いもの ${conflicts.filter((c) => c.confidence === 'likely').length} 件)。対立は要件の優先順位を決める段階までに裁いておかないと、成果物のレビューのたびに同じ議論が戻ってきます。`,
+      en: `${conflicts.length} potential point(s) of conflict came out of the concern comparison (${conflicts.filter((c) => c.confidence === 'likely').length} of them likely). Unless they are arbitrated before requirements are prioritized, the same argument returns at every deliverable review.`,
+    });
+  } else if (people.length >= 2) {
+    reading.push({
+      ja: '関心事からは対立が検出されませんでした。ただし対立が無いという証明にはなりません。関心事が当たり障りのない書き方(「全体最適の実現」など)になっていると、対立は文言に現れません。本人の言葉のまま、困っていることを書き取ってください。',
+      en: 'No conflict came out of the concerns, which is not evidence that none exists. Concerns written in safe, abstract language ("achieve enterprise-wide optimization") hide every disagreement. Write down what each person actually complains about, in their words.',
+    });
+  }
   reading.push({
     ja: 'この配置は固定ではありません。スコープの拡大、体制変更、予算削減のたびに人の位置は動きます。フェーズの切り替え時に見直してください。',
     en: 'These positions are not fixed. Scope growth, reorganizations, and budget cuts all move people. Re-check at each phase boundary.',
@@ -1217,6 +2376,10 @@ function runStakeholderMatrix(lang: Lang): ToolResult {
         {
           ja: '関心事を成果物の記述内容に対応付ける(誰の関心に、どの図・どの章で答えるか)。',
           en: 'Map each concern to where it is answered (which view, which section of which deliverable).',
+        },
+        {
+          ja: '検出された対立(または上の観点で自分が見つけた対立)を `update_engagement` の decisions に「未決」で登録し、裁定者と期限を入れる。',
+          en: 'Record each detected conflict — or each one you found using the lenses above — as an open decision via `update_engagement`, with an arbiter and a date.',
         },
         {
           ja: '報告頻度・形式・担当を一覧にしてコミュニケーション計画としてまとめる。',
@@ -1478,6 +2641,148 @@ function defaultFactorsFor(kind: AssessmentKind): DefaultFactor[] {
   return kind === 'maturity' ? MATURITY_FACTORS : READINESS_FACTORS;
 }
 
+// ---------------------------------------------------------------------------
+// 評点帯 / Score bands
+//
+// 因子ごとの推奨は「因子名」だけでは決めない。評点・ギャップ幅・利用者が書いた
+// note を見て変える。評点から組織の内情を断定しないよう、文面は条件付きにする。
+// ---------------------------------------------------------------------------
+
+type FactorBand = 'bottleneck' | 'act' | 'watch' | 'lowCeiling' | 'strength';
+
+const BAND_LABEL: Record<FactorBand, Bilingual> = {
+  bottleneck: { ja: '最も低い水準帯', en: 'Lowest band' },
+  act: { ja: '差が大きい(先に手当て)', en: 'Wide gap (handle first)' },
+  watch: { ja: '差は小さい(監視対象)', en: 'Small gap (watch item)' },
+  lowCeiling: { ja: '低い水準のまま現状維持', en: 'Held low by the target' },
+  strength: { ja: '強み(目標に到達)', en: 'Strength (at or above target)' },
+};
+
+const BAND_MARK: Record<FactorBand, string> = {
+  bottleneck: '!!',
+  act: '!',
+  watch: '·',
+  lowCeiling: '?',
+  strength: '+',
+};
+
+const BAND_RANK: Record<FactorBand, number> = {
+  bottleneck: 0,
+  act: 1,
+  watch: 2,
+  lowCeiling: 3,
+  strength: 4,
+};
+
+interface ScoredFactor {
+  factor: AssessmentFactor;
+  gap: number;
+  band: FactorBand;
+  /** 評点が尺度の高い側にあるか(高い側には「できていない前提」の助言を出さない) */
+  highSide: boolean;
+}
+
+/** 評点帯の判定に使う閾値(尺度に合わせて動かす) */
+function bandThresholds(scale: number): { low: number; bigGap: number; high: number } {
+  return {
+    low: Math.max(1, Math.floor(scale * 0.25)),
+    bigGap: Math.max(2, Math.round(scale * 0.4)),
+    high: scale * 0.7,
+  };
+}
+
+function scoreFactors(factors: AssessmentFactor[], scale: number): ScoredFactor[] {
+  const t = bandThresholds(scale);
+  return factors.map((factor) => {
+    const gap = factor.target - factor.current;
+    // 尺度が 2〜3 のときに中央値まで「低い」と判定しないよう、半分未満であることも条件にする
+    const isLow = factor.current <= t.low && factor.current < scale / 2;
+    const band: FactorBand = isLow
+      ? gap > 0
+        ? 'bottleneck'
+        : 'lowCeiling'
+      : gap <= 0
+        ? 'strength'
+        : gap >= t.bigGap
+          ? 'act'
+          : 'watch';
+    return { factor, gap, band, highSide: factor.current >= t.high };
+  });
+}
+
+/** 評点帯ごとの読み(評点とギャップの実数を必ず本文に入れる) */
+function bandReading(kind: AssessmentKind, sf: ScoredFactor, scale: number): Bilingual {
+  const c = round1(sf.factor.current);
+  const t = round1(sf.factor.target);
+  const g = round1(sf.gap);
+  switch (sf.band) {
+    case 'bottleneck':
+      return {
+        ja: `現在 ${c}/${scale} はこの評価の中で最も低い水準帯です。この帯の因子は、他を上げても全体の足を引っ張り続ける場合が多く、放置したまま進めると後工程で計画側の変更として跳ね返ります。今期はここに取り組みを 1 つだけ置き、担当・期限・「何ができたら 1 段上がったと言えるか」を各 1 行で決めてください。`,
+        en: `At ${c} of ${scale} this is the lowest band in this assessment. Factors here tend to keep holding everything else back however far the others rise, and leaving it alone usually returns later as a change to the plan. Put exactly one piece of work against it this period, with an owner, a date, and one line saying what counts as having moved up a level.`,
+      };
+    case 'act':
+      return kind === 'readiness'
+        ? {
+            ja: `差は +${g}(${c} → ${t})で、着手前に手当てを決めておきたい幅です。この幅の因子は、計画の巧拙に関係なく変革の途中で制約として表面化し、そのときは計画側を削って吸収することになります。着手前に「誰が・いつまでに・いくらで埋めるか」を決めるか、埋められないならこの因子に依存する範囲を今回のスコープから外すかを、先に選んでください。`,
+            en: `The gap is +${g} (${c} → ${t}), wide enough to need a remedy before kickoff. Gaps this size tend to surface mid-change as a constraint regardless of how good the plan is, and the plan is what gets cut to absorb it. Decide now who closes it, by when, and at what cost — or take the areas that depend on this factor out of scope.`,
+          }
+        : {
+            ja: `差は +${g}(${c} → ${t})で、今期の重点候補です。全因子を均等に上げようとすると、どれも 1 段上がらずに終わる場合が多いので、この因子に資源を寄せ、1 段だけ上げる取り組みを 1 つ決めてください。`,
+            en: `The gap is +${g} (${c} → ${t}), which makes it a candidate for this period's focus. Lifting every factor evenly usually ends with none of them moving a full level, so concentrate resource here and define one piece of work that raises this factor by one level.`,
+          };
+    case 'watch':
+      return {
+        ja: `差は +${g}(${c} → ${t})と小さく、着手前の必須課題ではありません。ただし差が小さい因子は「もう少しで届く」と判断されて後回しになりやすく、他の負荷が上がったときに最初に落ちます。監視対象として、四半期ごとに同じ人が付け直し、下がっていないかだけ見てください。`,
+        en: `The gap is small at +${g} (${c} → ${t}), so this is not a blocker before kickoff. Small gaps do get postponed on the grounds that they are nearly there, and they are the first thing to slip when load rises elsewhere. Keep it as a watch item: have the same person re-score it each quarter and check only that it has not fallen.`,
+      };
+    case 'lowCeiling':
+      return {
+        ja: `現在 ${c} に対して目標 ${t} — 低い水準のまま現状維持の設定になっています。今回は扱わないと決めているならこのままで構いません。そうでない場合は目標の置き忘れの可能性があるので、到達したい水準を置き直してください。扱わないと決めた場合は、その理由を 1 行残しておくと、後から「なぜ手を付けなかったのか」を説明できます。`,
+        en: `Current ${c} against a target of ${t} — the target holds this factor where it already is, at a low level. That is fine if you have decided not to touch it this time. If not, the target was probably never revisited; set it to the level you intend to reach. If it really is out of scope, leave one line saying why, so the decision can be explained later.`,
+      };
+    case 'strength':
+      return {
+        ja: `現在 ${c} が目標 ${t} に届いています。ここは相対的な強みとして扱え、他因子を引き上げる梃子に使えます(この因子で機能している進め方・体制・会議体を、差の大きい因子にそのまま横展開する)。強みは放置すると落ちるので、「誰が何を続けることで維持されているか」を 1 行だけ残しておくと、体制変更のときに守れます。`,
+        en: `Current ${c} meets the target of ${t}. Treat this as a relative strength and use it as leverage: take whatever works here — the cadence, the people, the forum — and apply it to the factors with wide gaps. Strengths decay when ignored, so write one line on who keeps it working, and it survives the next reorganisation.`,
+      };
+  }
+}
+
+/** 利用者が書いた note を推奨文の中で使う(書かれていなければ書くよう促す) */
+function evidenceReading(kind: AssessmentKind, sf: ScoredFactor): Bilingual {
+  const note = sf.factor.note && sf.factor.note.trim().length > 0 ? quote(sf.factor.note) : null;
+  if (!note) {
+    return {
+      ja: '根拠(note)が空欄です。この評点は、いまのままでは他人に説明できません。実際に起きた事実を 1 行入れてください(人数・件数・期間・直近の出来事など)。評点の妥当性は数字ではなく根拠で決まります。',
+      en: 'The note is empty, so this score cannot be explained to anyone else as it stands. Add one line of fact — headcount, counts, elapsed time, a recent event. A score is defended by its evidence, not by the number.',
+    };
+  }
+  switch (sf.band) {
+    case 'strength':
+      return {
+        ja: `根拠として「${note}」と書かれています。この状態が個人ではなく仕組みで支えられているか(担当者が代わっても残るか)を確認してください。人に紐づく強みは異動で消えます。`,
+        en: `You recorded the evidence as "${note}". Check whether this rests on a mechanism rather than on individuals — whether it survives the people changing. A strength attached to a person leaves with them.`,
+      };
+    case 'bottleneck':
+    case 'act':
+      return kind === 'readiness'
+        ? {
+            ja: `根拠として「${note}」と書かれています。この記述が示す不足が「意思」「資源」「能力」のどれなのかを切り分けてください。切り分けが違うと、打ち手も費用も変わります。`,
+            en: `You recorded the evidence as "${note}". Separate what it points to: intent, resources, or capability. The remedy and its cost differ for each.`,
+          }
+        : {
+            ja: `根拠として「${note}」と書かれています。この記述が「決め事が無い」「決めたが守られていない」「人手が足りない」のどれに当たるかを切り分けてください。原因が違えば打ち手も費用も変わります。`,
+            en: `You recorded the evidence as "${note}". Sort it into one of three: no rule exists, the rule is ignored, or there are not enough people. The remedy and its cost differ for each.`,
+          };
+    default:
+      return {
+        ja: `根拠として「${note}」と書かれています。変革の途中でこの前提(人員・契約・体制)が崩れないかを見てください。崩れたときに真っ先に落ちるのがこの帯の因子です。`,
+        en: `You recorded the evidence as "${note}". Watch whether those premises — staffing, contracts, structure — still hold mid-change. Factors in this band are the first to fall when they do not.`,
+      };
+  }
+}
+
 /** 入力された因子名から既定因子を引く(完全一致 → 部分一致) */
 function findDefaultFactor(name: string, set: DefaultFactor[]): DefaultFactor | undefined {
   const key = normalizeName(name);
@@ -1593,6 +2898,14 @@ function runAssessment(kind: AssessmentKind, input: AssessmentInput): ToolResult
   if (raw.length === 0) {
     return textResult(renderFactorTemplate(kind, scale, lang));
   }
+
+  // --- 長さの上限(save=true だと案件 JSON に入るので、保存前にここで止める)---
+  const tooLong = runChecks([
+    () => checkText('title', input.title, 'title', lang),
+    () => checkTextList('factors[].name', raw.map((f) => f.name), 'title', lang),
+    () => checkTextList('factors[].note', raw.map((f) => f.note), 'text', lang),
+  ]);
+  if (tooLong) return limitErrorResult(tooLong, lang);
 
   // --- 入力検証 ---
   const problems: string[] = [];
@@ -1765,14 +3078,103 @@ function runAssessment(kind: AssessmentKind, input: AssessmentInput): ToolResult
   out.push(text(verdict, lang));
   out.push('');
 
-  // --- 改善提案(差が大きい順)---
-  const ranked = factors
-    .map((f, i) => ({ factor: f, gap: gaps[i] }))
+  // --- 因子ごとの読みと次の一手 ---
+  // 推奨は「因子名 × 評点帯 × ギャップ幅」で選び、利用者が書いた note を本文で参照する。
+  const scored = scoreFactors(factors, scale);
+  const ordered = [...scored].sort(
+    (a, b) =>
+      BAND_RANK[a.band] - BAND_RANK[b.band] || b.gap - a.gap || a.factor.current - b.factor.current,
+  );
+  const ranked = scored
     .filter((x) => x.gap > 0)
     .sort((a, b) => b.gap - a.gap || a.factor.current - b.factor.current);
+  const withoutNote = factors.filter((f) => !(f.note && f.note.trim().length > 0));
 
-  out.push(`## ${inline('改善提案(差が大きい順)', 'Improvement priorities (largest gap first)', lang)}`);
+  out.push(`## ${inline('因子ごとの読みと次の一手', 'Factor-by-factor reading and next move', lang)}`);
   out.push('');
+
+  // 帯ごとの内訳を先に出す(どこから手を付けるかを 1 目で決められるように)
+  const bandOrder: FactorBand[] = ['bottleneck', 'act', 'watch', 'lowCeiling', 'strength'];
+  out.push(
+    `| ${inline('区分', 'Band', lang)} | ${inline('件数', 'Count', lang)} | ${label(L.factor, lang)} |`,
+  );
+  out.push('| --- | :-: | --- |');
+  for (const band of bandOrder) {
+    const members = ordered.filter((x) => x.band === band);
+    if (members.length === 0) continue;
+    out.push(
+      `| ${BAND_MARK[band]} ${label(BAND_LABEL[band], lang)} | ${members.length} | ${members.map((x) => cell(x.factor.name)).join(', ')} |`,
+    );
+  }
+  out.push('');
+  if (withoutNote.length > 0) {
+    out.push(
+      msg(
+        `${factors.length} 件中 ${withoutNote.length} 件の因子に根拠(note)がありません: ${withoutNote.map((f) => f.name).join('、')}。根拠の無い評点は、評価者が代わると再現しません。`,
+        `${withoutNote.length} of ${factors.length} factors carry no evidence in note: ${withoutNote.map((f) => f.name).join(', ')}. Scores without evidence do not reproduce when the assessor changes.`,
+        lang,
+      ),
+    );
+    out.push('');
+  }
+
+  ordered.forEach((entry, i) => {
+    const def = findDefaultFactor(entry.factor.name, defaults);
+    const gapText =
+      entry.gap > 0 ? `${label(L.gap, lang)} +${round1(entry.gap)}` : `${label(L.gap, lang)} ${round1(entry.gap)}`;
+    out.push(
+      `### ${i + 1}. ${entry.factor.name} — ${label(BAND_LABEL[entry.band], lang)} (${round1(entry.factor.current)} → ${round1(entry.factor.target)}, ${gapText})`,
+    );
+    out.push('');
+    if (def) {
+      out.push(`${inline('見るところ', 'What to look at', lang)}: ${text(def.description, lang)}`);
+      out.push('');
+    }
+    out.push(para(bandReading(kind, entry, scale), lang));
+    out.push('');
+    out.push(`${inline('根拠の扱い', 'On the evidence', lang)}: ${para(evidenceReading(kind, entry), lang)}`);
+
+    // 因子固有の「よくある詰まり方」は、当てはまり得る帯にだけ出す。
+    // 評点が高い側の因子に「できていない前提」の助言を返すと、事実と逆のことを言うことになる。
+    const bandAllowsHint = entry.band !== 'strength' && !(entry.band === 'watch' && entry.highSide);
+    // 既定因子に無い(利用者が独自に立てた)因子には固有の知見が無い。一般論の GENERIC_HINT は
+    // 「根拠の扱い」が既に同じ切り分けを求めている帯(bottleneck / act で note 記入済み)では
+    // 同じことを二度言うだけなので出さない。note が空欄のときだけ、切り分け方として残す。
+    const evidenceAlreadyAsksToTriage =
+      entry.factor.note !== undefined &&
+      entry.factor.note.trim().length > 0 &&
+      (entry.band === 'bottleneck' || entry.band === 'act');
+    const showHint = bandAllowsHint && (def !== undefined || !evidenceAlreadyAsksToTriage);
+    if (showHint) {
+      out.push('');
+      out.push(
+        def
+          ? `${inline('この因子でよくある詰まり方(当てはまる場合のみ)', 'Common failure mode for this factor — use it only if it matches', lang)}: ${text(def.hint, lang)}`
+          : `${inline('切り分け方(一般論。この因子固有の知見はこのサーバーにはありません)', 'How to triage it — general advice; this server has no knowledge specific to this factor', lang)}: ${text(GENERIC_HINT[kind], lang)}`,
+      );
+    } else if (entry.band === 'watch') {
+      out.push('');
+      out.push(
+        msg(
+          `現在の水準が高い側(${round1(entry.factor.current)}/${scale})のため、この因子で一般に語られる「できていない場合の助言」は出していません。上の読みが実態と合っているかだけ確認してください。`,
+          `Because the current score sits on the high side (${round1(entry.factor.current)} of ${scale}), the usual "if this is not working" advice for this factor is withheld. Just check the reading above against reality.`,
+          lang,
+        ),
+      );
+    }
+    if (kind === 'readiness' && entry.gap >= riskThreshold) {
+      out.push('');
+      out.push(
+        msg(
+          `> 変革リスク候補: この因子のギャップ(+${round1(entry.gap)})は、計画の巧拙に関係なく変革を止める要因になり得ます。`,
+          `> Candidate transformation risk: a gap of +${round1(entry.gap)} on this factor can stop the change regardless of plan quality.`,
+          lang,
+        ),
+      );
+    }
+    out.push('');
+  });
+
   if (ranked.length === 0) {
     out.push(
       msg(
@@ -1782,27 +3184,6 @@ function runAssessment(kind: AssessmentKind, input: AssessmentInput): ToolResult
       ),
     );
     out.push('');
-  } else {
-    ranked.forEach((entry, i) => {
-      const def = findDefaultFactor(entry.factor.name, defaults);
-      out.push(
-        `### ${i + 1}. ${entry.factor.name} (${round1(entry.factor.current)} → ${round1(entry.factor.target)}, ${label(L.gap, lang)} +${round1(entry.gap)})`,
-      );
-      out.push('');
-      if (def) out.push(`${inline('見るところ', 'What to look at', lang)}: ${text(def.description, lang)}`);
-      out.push(`${label(L.recommendation, lang)}: ${text(def ? def.hint : GENERIC_HINT[kind], lang)}`);
-      if (kind === 'readiness' && entry.gap >= riskThreshold) {
-        out.push('');
-        out.push(
-          msg(
-            `> 変革リスク候補: この因子のギャップ(+${round1(entry.gap)})は、計画の巧拙に関係なく変革を止める要因になり得ます。`,
-            `> Candidate transformation risk: a gap of +${round1(entry.gap)} on this factor can stop the change regardless of plan quality.`,
-            lang,
-          ),
-        );
-      }
-      out.push('');
-    });
   }
 
   // --- 変革リスクの登録案内(readiness のみ)---
@@ -1832,16 +3213,23 @@ function runAssessment(kind: AssessmentKind, input: AssessmentInput): ToolResult
       out.push(
         JSON.stringify(
           {
-            risks: risky.slice(0, 3).map((x) => ({
-              title:
-                lang === 'en'
-                  ? `Readiness shortfall: ${x.factor.name}`
-                  : `変革準備度の不足: ${x.factor.name}`,
-              level: x.gap >= riskThreshold * 1.5 ? 'high' : 'medium',
-              status: 'open',
-              owner: '',
-              mitigation: '',
-            })),
+            risks: risky.slice(0, 3).map((x) => {
+              const note = x.factor.note && x.factor.note.trim().length > 0 ? quote(x.factor.note, 120) : null;
+              return {
+                title:
+                  lang === 'en'
+                    ? `Readiness shortfall: ${x.factor.name}`
+                    : `変革準備度の不足: ${x.factor.name}`,
+                description:
+                  lang === 'en'
+                    ? `Scored ${round1(x.factor.current)} of ${scale} against a target of ${round1(x.factor.target)}. Evidence: ${note ?? 'not recorded'}`
+                    : `評点 ${round1(x.factor.current)}/${scale}(目標 ${round1(x.factor.target)})。根拠: ${note ?? '未記入'}`,
+                level: x.gap >= riskThreshold * 1.5 ? 'high' : 'medium',
+                status: 'open',
+                owner: '',
+                mitigation: '',
+              };
+            }),
           },
           null,
           2,
@@ -1864,8 +3252,8 @@ function runAssessment(kind: AssessmentKind, input: AssessmentInput): ToolResult
   if (!input.save) {
     out.push(
       msg(
-        'save=false のため保存していません。記録として残す場合は save=true で実行してください。',
-        'Not saved because save=false. Run again with save=true to keep the record.',
+        'この結果は保存していません(既定は save=false のプレビューです)。案件の記録として残し、次回と比較したい場合は save=true で実行してください。',
+        'This result was not saved (save defaults to false, i.e. preview only). Run again with save=true to keep it on the engagement and compare with the next round.',
         lang,
       ),
     );
@@ -1892,16 +3280,22 @@ function runAssessment(kind: AssessmentKind, input: AssessmentInput): ToolResult
         updatedAt: timestamp,
       };
       engagement.assessments.push(assessment);
-      saveEngagement(engagement);
+      const stored = trySave(engagement);
       const previous = engagement.assessments.filter((a) => a.kind === kind && a.id !== assessment.id);
       out.push(
-        msg(
-          `案件「${engagement.name}」に評価を保存しました(ID: \`${assessment.id}\`)。`,
-          `Saved to engagement "${engagement.name}" (id: \`${assessment.id}\`).`,
-          lang,
-        ),
+        stored.ok
+          ? msg(
+              `**保存しました** — 案件「${engagement.name}」に評価を記録しました(ID: \`${assessment.id}\`)。保存したくない場合は save=false で実行してください(既定は save=false です)。なお、保存済みの評価を消すツールは現時点でありません。試しの評点で呼ぶときは save を付けないでください。`,
+              `**Saved** — the assessment was recorded on engagement "${engagement.name}" (id: \`${assessment.id}\`). Run with save=false to keep it out of the record (false is the default). Note that no tool currently deletes a stored assessment, so leave save off when you are trying numbers out.`,
+              lang,
+            )
+          : msg(
+              `保存に失敗しました(${stored.reason})。評価結果そのものは上に出ています。データ保存先(既定 \`~/.togaf-eap\`、環境変数 \`TOGAF_EAP_DATA_DIR\` で変更)の書き込み権限を確認してください。`,
+              `Saving failed (${stored.reason}). The assessment itself is above. Check write access to the data directory (default \`~/.togaf-eap\`, override with \`TOGAF_EAP_DATA_DIR\`).`,
+              lang,
+            ),
       );
-      if (previous.length > 0) {
+      if (stored.ok && previous.length > 0) {
         // 手書き JSON でも落ちないように、評価日・因子の欠損を許容する
         const at = (a: Assessment): string => (typeof a.assessedAt === 'string' ? a.assessedAt : '');
         const last = [...previous].sort((a, b) => (at(a) < at(b) ? -1 : at(a) > at(b) ? 1 : 0))[
@@ -2012,7 +3406,7 @@ export function registerAnalysisTools(server: McpServer): void {
     {
       title: 'Run a gap analysis',
       description:
-        '現行(baseline)と目標(target)の構成要素を突き合わせ、マトリクスで対応関係を可視化し、新規に必要なもの・廃止されるもの・改修/置換されるものをギャップとして洗い出して、それぞれの推奨アクションと解釈を返す。廃止側も必ず出すため、コスト削減の根拠が消えない。 / Compare baseline and target elements, render the mapping as a matrix, and derive the gaps: what must be newly created, what gets eliminated, and what is modified or replaced, each with a recommended action. Eliminations are always reported so the cost-reduction case stays visible.',
+        '現行(baseline)と目標(target)の構成要素を突き合わせ、マトリクスで対応関係を可視化し、新規に必要なもの・廃止されるもの・改修/置換されるものをギャップとして洗い出して、それぞれの推奨アクションと解釈を返す。廃止側も必ず出すため、コスト削減の根拠が消えない。検出したギャップは `add_work_package` にそのまま渡せる JSON として出力し、save=true で分析の要約を案件のメモに残せる。 / Compare baseline and target elements, render the mapping as a matrix, and derive the gaps: what must be newly created, what gets eliminated, and what is modified or replaced, each with a recommended action. Eliminations are always reported so the cost-reduction case stays visible. The gaps are also emitted as ready-to-paste `add_work_package` JSON, and save=true appends a summary of the analysis to the engagement notes.',
       inputSchema: {
         baseline: z
           .array(z.string())
@@ -2036,11 +3430,17 @@ export function registerAnalysisTools(server: McpServer): void {
           .string()
           .optional()
           .describe('対象ドメイン(business / data / application / technology など) / Architecture domain'),
+        save: z
+          .boolean()
+          .default(false)
+          .describe(
+            '分析の要約を案件のメモに 1 行記録する(既定 false)。作業パッケージは登録しない / Append a one-line summary of this analysis to the engagement notes (default false). Work packages are not created',
+          ),
         lang: langSchema,
       },
     },
-    async ({ baseline, target, mappings, domain, lang }) =>
-      runGapAnalysis({ baseline, target, mappings, domain, lang }),
+    async ({ baseline, target, mappings, domain, save, lang }) =>
+      runGapAnalysis({ baseline, target, mappings, domain, save, lang }),
   );
 
   server.registerTool(
@@ -2059,7 +3459,7 @@ export function registerAnalysisTools(server: McpServer): void {
     {
       title: 'Visualize the stakeholder matrix',
       description:
-        'ステークホルダーを影響力 × 関心度の 4 象限(密に関与 / 満足を維持 / 情報提供 / 監視)に配置し、象限ごとの推奨関与方針と、関心事・関与方針が未記入の人を指摘する。 / Place stakeholders in the influence x interest quadrants (manage closely, keep satisfied, keep informed, monitor), give the recommended approach per quadrant, and flag anyone missing concerns or an engagement approach.',
+        'ステークホルダーを影響力 × 関心度の 4 象限(密に関与 / 満足を維持 / 情報提供 / 監視)に配置し、象限ごとの推奨関与方針と、関心事・関与方針が未記入の人を指摘する。さらに登録された関心事を突き合わせて、利害が衝突しうる組み合わせ(速さ vs 確実さ、標準化 vs 現場裁量、コスト vs 品質、短期 vs 長期、統制 vs 利便性、一気に変える vs 現行業務の継続)を、根拠にした関心事・放置した場合に起きること・裁定者と時期つきで返す。検出できない場合は手で見るべき観点を示す。 / Place stakeholders in the influence x interest quadrants (manage closely, keep satisfied, keep informed, monitor), give the recommended approach per quadrant, and flag anyone missing concerns or an engagement approach. It also compares the recorded concerns to surface pairs whose interests collide — speed vs certainty, standardization vs local autonomy, cost vs quality, short vs long term, control vs convenience, big-bang vs continuity — each with the concerns used as evidence, what happens if it is left alone, and who should arbitrate when. When nothing is detected it says so and gives the lenses to check by hand.',
       inputSchema: { lang: langSchema },
     },
     async ({ lang }) => runStakeholderMatrix(lang as Lang),
@@ -2070,7 +3470,7 @@ export function registerAnalysisTools(server: McpServer): void {
     {
       title: 'Assess EA practice maturity',
       description:
-        'EA 実践の成熟度を因子ごとに評価し、現在/目標/差をバー付きの表、総合スコア、差の大きい順の改善提案として返す。因子を省略すると既定の因子セットを提示する。save=true でエンゲージメントに評価を保存する。 / Assess EA practice maturity factor by factor and return a bar table of current, target, and gap, an overall score, and improvement priorities ordered by gap. Omit factors to get the default factor set. With save=true the assessment is stored on the engagement.',
+        'EA 実践の成熟度を因子ごとに評価し、現在/目標/差をバー付きの表、総合スコア、因子ごとの読みと次の一手として返す。推奨は因子名だけでなく評点帯・ギャップ幅・記入した根拠(note)に応じて変わる。因子を省略すると既定の因子セットを提示する。既定では保存しない(save=true を渡したときだけエンゲージメントに記録する)。 / Assess EA practice maturity factor by factor and return a bar table of current, target, and gap, an overall score, and a per-factor reading with the next move. Recommendations vary by score band, gap width, and the evidence you wrote in note — not by factor name alone. Omit factors to get the default factor set. Nothing is stored unless save=true.',
       inputSchema: {
         factors: z
           .array(factorInputSchema)
@@ -2079,8 +3479,10 @@ export function registerAnalysisTools(server: McpServer): void {
         scale: scaleSchema,
         save: z
           .boolean()
-          .default(true)
-          .describe('エンゲージメントに評価を保存する / Store the assessment on the engagement'),
+          .default(false)
+          .describe(
+            'エンゲージメントに評価を保存する(既定 false = プレビューのみ。指定しない限り案件データは変わらない) / Store the assessment on the engagement (default false: preview only; nothing is written unless you pass true)',
+          ),
         title: z.string().optional().describe('評価の名前(任意) / Optional title for this assessment'),
         lang: langSchema,
       },
@@ -2094,7 +3496,7 @@ export function registerAnalysisTools(server: McpServer): void {
     {
       title: 'Assess business transformation readiness',
       description:
-        '変革準備度(経営の意思・予算・体制・スキル・変革実績・業務部門の受容度など)を因子ごとに評価し、バー付きの表・総合判定・改善提案を返す。ギャップの大きい因子は変革リスクとして扱い、`update_engagement` での登録方法を案内する。 / Assess transformation readiness (executive intent, funding, organization, skills, track record, business acceptance, and more) and return a bar table, an overall verdict, and improvement priorities. Wide-gap factors are called out as transformation risks with guidance on recording them via `update_engagement`.',
+        '変革準備度(経営の意思・予算・体制・スキル・変革実績・業務部門の受容度など)を因子ごとに評価し、バー付きの表・総合判定・因子ごとの読みと次の一手を返す。推奨は因子名だけでなく評点帯・ギャップ幅・記入した根拠(note)に応じて変わる。ギャップの大きい因子は変革リスクとして扱い、`update_engagement` での登録用 JSON を添える。既定では保存しない(save=true を渡したときだけエンゲージメントに記録する)。 / Assess transformation readiness (executive intent, funding, organization, skills, track record, business acceptance, and more) and return a bar table, an overall verdict, and a per-factor reading with the next move. Recommendations vary by score band, gap width, and the evidence you wrote in note — not by factor name alone. Wide-gap factors are called out as transformation risks with ready-to-paste `update_engagement` JSON. Nothing is stored unless save=true.',
       inputSchema: {
         factors: z
           .array(factorInputSchema)
@@ -2103,8 +3505,10 @@ export function registerAnalysisTools(server: McpServer): void {
         scale: scaleSchema,
         save: z
           .boolean()
-          .default(true)
-          .describe('エンゲージメントに評価を保存する / Store the assessment on the engagement'),
+          .default(false)
+          .describe(
+            'エンゲージメントに評価を保存する(既定 false = プレビューのみ。指定しない限り案件データは変わらない) / Store the assessment on the engagement (default false: preview only; nothing is written unless you pass true)',
+          ),
         title: z.string().optional().describe('評価の名前(任意) / Optional title for this assessment'),
         lang: langSchema,
       },

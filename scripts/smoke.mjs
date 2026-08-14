@@ -197,6 +197,43 @@ async function main() {
     const consultUnknown = await client.call('consult', { situation: '今日は天気が良い', lang: 'ja' });
     check('consult falls back gracefully', !consultUnknown.isError && consultUnknown.text.length > 0);
 
+    // 状況の読み取り: 打ち消し / 二重否定 / 条件 —— 助言の中身が状況で変わることの確認
+    const consultRetracted = await client.call('consult', {
+      situation: 'レガシー刷新はやらないことに決まった。困っているのは顧客マスタがバラバラなことだ',
+      lang: 'ja',
+    });
+    check('consult names the topic it excluded',
+      consultRetracted.text.includes('対象外として外した話題')
+      && consultRetracted.text.includes('レガシーシステムの刷新'));
+    check('consult still diagnoses the topic actually raised',
+      consultRetracted.text.includes('データのサイロ化'));
+    check('consult keeps the retracted topic out of the advice',
+      !consultRetracted.text.includes('二重運用') && !consultRetracted.text.includes('ビッグバン'));
+
+    const consultHedged = await client.call('consult', {
+      situation: '予算が無いわけではないが、とにかく時間がない。基幹システムの刷新を任された',
+      lang: 'ja',
+    });
+    const hedgedRead = consultHedged.text.split('## 見立て')[0] ?? '';
+    check('consult suspends judgement on a double negative',
+      consultHedged.text.includes('二重否定') && !/\|\s*予算\s*\|/.test(hedgedRead));
+
+    const consultPoor = await client.call('consult', {
+      situation: '予算はゼロで、私しかいない。レガシー基幹システムの刷新を任された',
+      lang: 'ja',
+    });
+    check('consult reads stated constraints',
+      consultPoor.text.includes('予算が無い') && consultPoor.text.includes('実質ひとり体制'));
+
+    const consultRich = await client.call('consult', {
+      situation: '予算は潤沢に確保されており、専任チームがいる。レガシー基幹システムの刷新を任された',
+      lang: 'ja',
+    });
+    check('consult gives opposite situations different advice',
+      consultRich.text !== consultPoor.text
+      && consultRich.text.includes('予算は確保されている')
+      && !consultPoor.text.includes('予算は確保されている'));
+
     // --- エンゲージメント ---
     console.log('\nengagement');
     const empty = await client.call('get_engagement', {});
@@ -448,6 +485,51 @@ async function main() {
       'ingest_document added risks to the engagement',
       afterIngest.risks.length >= beforeIngest.risks.length,
     );
+
+    // --- MCP プロンプト ---
+    console.log('\nprompts');
+    const promptList = await client.request('prompts/list', {});
+    const prompts = promptList.result?.prompts ?? [];
+    check('prompts/list advertises the eight prompts', prompts.length === 8,
+      prompts.map((p) => p.name).join(', '));
+    check('every prompt takes a lang argument',
+      prompts.every((p) => (p.arguments ?? []).some((a) => a.name === 'lang')));
+
+    const promptEn = await client.request('prompts/get', {
+      name: 'exec_summary',
+      arguments: { lang: 'en' },
+    });
+    const promptEnText = (promptEn.result?.messages ?? [])
+      .map((m) => m.content?.text ?? '')
+      .join('\n');
+    check('prompts/get returns a body', promptEnText.length > 500);
+    check('prompts/get lang=en contains no Japanese',
+      !/[぀-ゟ゠-ヿ㐀-䶿一-鿿ｦ-ﾟ]/u.test(promptEnText),
+      (promptEnText.match(/[぀-ゟ゠-ヿ㐀-䶿一-鿿ｦ-ﾟ]/gu) ?? []).slice(0, 20).join(''));
+    check('prompts/get lang=en carries the English ground rules',
+      promptEnText.includes('## Ground rules'));
+
+    const promptJa = await client.request('prompts/get', {
+      name: 'exec_summary',
+      arguments: { lang: 'ja' },
+    });
+    const promptJaText = (promptJa.result?.messages ?? [])
+      .map((m) => m.content?.text ?? '')
+      .join('\n');
+    check('prompts/get lang=ja stays Japanese',
+      promptJaText.includes('## 共通ルール') && !promptJaText.includes('## Ground rules'));
+
+    // 長すぎる引数は「切り詰めた」と分かる印を付けて 1 行に畳む
+    const promptLong = await client.request('prompts/get', {
+      name: 'architecture_review',
+      arguments: { target: `${'あ'.repeat(200)}\n${'い'.repeat(300)}`, lang: 'ja' },
+    });
+    const promptLongText = (promptLong.result?.messages ?? [])
+      .map((m) => m.content?.text ?? '')
+      .join('\n');
+    check('prompts/get marks a truncated argument',
+      promptLongText.includes('…(以下省略。渡された長さは 503 文字)')
+      && !promptLongText.includes(`${'い'.repeat(200)}`));
 
     // --- Claude API(任意) ---
     console.log('\noptional Claude API');
