@@ -106,4 +106,12 @@ Personal use only; AI/ML training on this repository is prohibited. See [LICENSE
 
 TOGAF® は The Open Group の登録商標です。本プロジェクトは非公式であり、The Open Group とは無関係です。収録している知識ベースは独自の要約・解説であり、TOGAF 標準の原文の複製を含みません。
 
+### なぜ原文を収録しないのか / Why no source text is included
+
+TOGAF 標準は**オンラインでの閲覧は無料**で、**自組織のアーキテクチャ策定に自由に使える**一方、**複製・再配布は許諾なく認められていません**(TOGAF Standard 10th Edition, §1.3.1 Conditions of Use)。さらに原本の著作権表記は、書面の許諾なく本文を **LLM / 生成 AI の学習・開発、およびそれらのツールと関連してデータやコンテンツを生成する目的で利用・組み込むこと**を明示的に禁じています。
+
+本プロジェクトは MCP サーバーとして AI から利用されるものであるため、この条項に抵触しないよう、著作権の及ばない**事実情報**(フェーズ名・成果物名などの構造)のみを用い、解説は**すべて独自に執筆**しています。
+
+The TOGAF Standard is free to view online and free to use for developing your own organization's architecture, but it may not be reproduced or redistributed without permission, and its copyright notice explicitly prohibits incorporating the text into LLM/generative-AI systems or using it in connection with such tools to generate content. Since this project is consumed by an AI assistant, it therefore carries only non-copyrightable factual structure plus wholly original commentary.
+
 TOGAF® is a registered trademark of The Open Group. This project is unofficial and not affiliated with The Open Group. The knowledge base consists of original summaries and does not reproduce the official TOGAF text.
