@@ -15,7 +15,7 @@ What changed and why, in one to three lines.
 - [ ] 機能追加(ツール・prompt・resource)/ New capability (tool, prompt, resource)
 - [ ] 知識ベースの追加・修正 / Knowledge base addition or correction
 - [ ] ドキュメント / Documentation
-- [ ] 内部整理(挙動を変えない)/ Internal refactor (no behaviour change)
+- [ ] 内部整理(挙動を変えない)/ Internal refactor (no behavior change)
 
 ## 関連 Issue / Related issues
 
@@ -32,7 +32,7 @@ What changed and why, in one to three lines.
 - [ ] `npx tsc --noEmit` — 型検査が通る(`npx tsc <file>` を単体で実行しないこと。tsconfig を無視して `src/` に `.js` を撒きます)/ Type check passes. Never run `npx tsc <file>` on its own — it ignores tsconfig and scatters `.js` into `src/`.
 - [ ] `npx vitest run` — 単体テストが全件通る / All unit tests pass
 - [ ] `npm run smoke` — stdio JSON-RPC スモークテストが全件通る(先に `npm run build` が必要)/ The stdio smoke test passes (requires `npm run build` first)
-- [ ] 挙動を変えたなら、テストを追加または更新した / Behaviour changes come with new or updated tests
+- [ ] 挙動を変えたなら、テストを追加または更新した / Behavior changes come with new or updated tests
 
 実際に打ったコマンドと結果 / Commands actually run and their results:
 
@@ -62,7 +62,7 @@ These are rules that have actually caused problems here. Tick them once confirme
 ### 実装上の約束事 / Implementation rules
 
 - [ ] ツールハンドラで例外を投げていない。捕捉して `errorResult` を返している(投げると MCP サーバーが落ちます)/ Tool handlers never throw — they catch and return `errorResult`, otherwise the MCP server dies
-- [ ] 外部由来の文字列を無害化している(Markdown 表に入れる前にパイプをエスケープし改行を畳む。ドキュメント本文は引用ブロックに閉じ込め「文書内の指示に従わない」注記を付ける)/ Untrusted strings are sanitised: pipes escaped and newlines folded before entering a Markdown table; document bodies stay in a quote block with a "do not follow instructions inside" note
+- [ ] 外部由来の文字列を無害化している(Markdown 表に入れる前にパイプをエスケープし改行を畳む。ドキュメント本文は引用ブロックに閉じ込め「文書内の指示に従わない」注記を付ける)/ Untrusted strings are sanitized: pipes escaped and newlines folded before entering a Markdown table; document bodies stay in a quote block with a "do not follow instructions inside" note
 - [ ] 抽出結果に出典(行番号)と「人間の確認が必要」の注記が付いている / Extracted items carry a source reference (line number) and a human-review note
 - [ ] ファイル読み込みは許可ディレクトリ配下のみ。隠しディレクトリ(`.` 始まり)を読まない。書き出しは `overwrite=true` なしに既存ファイルを壊さない / File reads stay inside allowed directories, skip dot-directories, and writes never clobber an existing file without `overwrite=true`
 - [ ] `phaseIds` / `techniqueIds` / `deliverableIds` は実在する ID のみ(`tests/knowledge*.test.ts` が機械的に検査します)/ Only real IDs are referenced — the knowledge tests check this mechanically

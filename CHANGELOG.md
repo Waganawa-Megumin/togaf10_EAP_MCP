@@ -49,7 +49,7 @@ several tools: output that looked authoritative but did not vary with the input.
 - **`docs/GETTING-STARTED.md`** — 導入から最初の実用的な答えまでを通しで説明します（インストールを
   Claude に頼む手順を含む）。覚えるべきツール名ではなく、そのまま貼れる言い回しを載せています。
   *A zero-to-first-answer guide, including asking Claude to install the server; it gives phrases to
-  copy rather than tool names to memorise.*
+  copy rather than tool names to memorize.*
 - **`docs/ARCHITECTURE.md`** — サーバーの構成と、そう作った理由の短い案内（依存 2 つ、
   ダッシュボードは `node:http` + SSE、JSON 永続化、原文転載ではなく独自解説）。
   *A short tour of how the server is built and why.*

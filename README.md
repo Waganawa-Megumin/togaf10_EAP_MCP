@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./pic/web/cover.jpg" alt="TOGAF 10 EAP MCP — unofficial. 積まれた資料が、MCP を経由してロードマップ・4 象限・レイヤ図・関連図に変わる図" width="100%">
+  <img src="./pic/web/cover.jpg" alt="TOGAF 10 EAP MCP — unofficial. 積まれた資料が、MCP を経由してロードマップ・4 象限・レイヤ図・関連図に変わる図 / A stack of existing documents passing through MCP and coming out as a roadmap, a four-quadrant matrix, a layer diagram and a relationship map" width="100%">
 </p>
 
 <h1 align="center">
@@ -41,7 +41,7 @@ Claude Code / Claude Desktop などの MCP クライアントから、ADM フェ
 
 **とりあえず動かしたい人は [はじめかた](./docs/GETTING-STARTED.md) だけ読めば十分です。** ツール名を覚える必要はありません。
 
-> New here? Read **[Getting Started](./docs/GETTING-STARTED.md)** — it covers installation (including "just ask Claude to install it") and gives you phrases to copy-paste. You never need to memorise tool names.
+> New here? Read **[Getting Started](./docs/GETTING-STARTED.md)** — it covers installation (including "just ask Claude to install it") and gives you phrases to copy-paste. You never need to memorize tool names.
 
 ---
 
@@ -57,7 +57,7 @@ TOGAF の実務上の問題は「分厚い・抽象的・文書中心で、結�
 > The problem with TOGAF in practice is that it is long, abstract, and document-centric — you finish reading and still don't know what to do today. This server answers that with visual-first output, an always-explicit next action, connections to the tools practitioners actually use (ArchiMate/Archi, C4, BIZBOK, SABSA), and document intake so your existing reports become input instead of retyping.
 
 <p align="center">
-  <img src="./pic/web/infograph.jpg" alt="TOGAF 10 EAP MCP の 6 つの柱: ガイダンス(start_here / next_best_action)、知識(ADM 10 フェーズ・成果物 21・SABSA・C4)、図表(Mermaid・ArchiMate 書き出し)、セキュリティ(SABSA を ADM に対応付け)、取り込み(既存の報告書から出典付きで抽出)、ダッシュボード(ブラウザでライブ更新)" width="100%">
+  <img src="./pic/web/infograph.jpg" alt="TOGAF 10 EAP MCP の 6 つの柱: ガイダンス(start_here / next_best_action)、知識(ADM 10 フェーズ・成果物 21・SABSA・C4)、図表(Mermaid・ArchiMate 書き出し)、セキュリティ(SABSA を ADM に対応付け)、取り込み(既存の報告書から出典付きで抽出)、ダッシュボード(ブラウザでライブ更新) / The six pillars of TOGAF 10 EAP MCP: guidance (start_here, next_best_action), knowledge (10 ADM phases, 21 deliverables, SABSA, C4), visuals (Mermaid diagrams, ArchiMate export), security (SABSA mapped onto the ADM), intake (extraction from your existing reports, with sources), and a live browser dashboard" width="100%">
 </p>
 
 ### 主な機能 / Features
@@ -98,12 +98,12 @@ node scripts/mcp-cli.mjs call consult '{"situation":"基幹システムの刷新
 | --- | --- | --- |
 | 見立ての枕 | 金はあるが時間が無い | 金も人も無い |
 | 推奨技法の 1 位 | 移行計画技法 | ビジネス変革準備度評価 |
-| **今日やること** | 並行できる作業(現状調査、データの棚卸し、移行方式の比較検証)に先に人を投入する。ただし決定そのものは外に出さない。 | 対象を 1 業務・1 データに固定し、そこだけを「現状 / あるべき / 差分」の 3 段で 1 枚にまとめる。全社を描こうとした時点で予算も時間も足りなくなる。 |
+| **「状況の条件に対して」の 1 位** | 並行できる作業(現状調査、データの棚卸し、移行方式の比較検証)に先に人を投入する。ただし決定そのものは外に出さない。… | 対象を 1 業務・1 データに固定し、そこだけを「現状 / あるべき / 差分」の 3 段で 1 枚にまとめる。全社を描こうとした時点で予算も時間も足りなくなる。 |
 | **最初の確認質問** | この予算はいつまで有効で、使い切れなかった分は翌期に繰り越せますか? | 次に予算を検討する場はいつで、そこに載せるには何がいつまでに要りますか? |
 
-**推奨技法の順位が入れ替わり、今日やることと最初に聞く質問が別物になります。** キーワードに反応して同じ一般論を返すのではなく、制約を読んで結論を変えます(「やらない」と書けばその話題を外します)。
+**推奨技法の順位が入れ替わり、推奨アクションの筆頭と最初に聞く質問が別物になります。** キーワードに反応して同じ一般論を返すのではなく、制約を読んで結論を変えます(「やらない」と書けばその話題を外します)。
 
-> Same topic, different constraints — the first recommended technique swaps, and the first action and first question become different things.
+> Same topic, different constraints: the top-ranked technique changes, and so do the first action and the first question to ask.
 
 ### 図はそのまま貼れば絵になる / Diagrams paste straight into GitHub
 
@@ -226,6 +226,14 @@ claude mcp add togaf-eap -- node /path/to/togaf10_EAP_MCP/dist/index.js
 - `経営会議で 1 枚で説明したい。`
 - `ダッシュボードをブラウザで開いて。`
 
+> These work the same way in English — say `Answer in English only from now on.` once and it sticks. English openers to copy:
+> `I don't know where to start — walk me through it.` /
+> `I've been handed a core-system replacement. There is no budget, the executives are indifferent, and I am the only person on it. Where do I start?` /
+> `Pull the risks out of this report and record them on the engagement.` /
+> `Sort out the stakeholders — sales and production are pulling against each other.` /
+> `Open the dashboard in my browser.`
+> The more constraints you state — an amount, a date, a headcount — the more the answer changes.
+
 **→ 例文はもっとあります: [はじめかた / 最初の一言](./docs/GETTING-STARTED.md#3-最初の一言)**
 
 **→ 実際に返ってきた出力をそのまま貼ったページがあります: [実際の出力例 / Real Output Examples](./docs/EXAMPLES.md)**
@@ -237,6 +245,8 @@ claude mcp add togaf-eap -- node /path/to/togaf10_EAP_MCP/dist/index.js
 ### ツール一覧 / Tools
 
 **ツール 84 件 + MCP prompts 8 + resources 8。** 下の表で全 84 件を網羅しています(`node scripts/mcp-cli.mjs tools` で実物を確認できます)。
+
+> **84 tools, 8 MCP prompts, 8 resources.** The catalog below is complete, but its descriptions are in Japanese only. Every tool description shipped by the server itself is bilingual, so `node scripts/mcp-cli.mjs tools --quiet` prints the same 84 tools with an English description for each — that listing is the English reader's reference, and it is also what your MCP client shows you.
 
 > **引数の綴りは厳密です。** 全ツールの入力スキーマは `.strict()`(JSON Schema の `additionalProperties: false`)で、**未知のキーは黙って無視されずエラーになります**。`{"phaseId": "B"}` のように綴りが違えば `Unrecognized key(s) in object: 'phaseId'` が返るので、間違ったまま「効いていない」状態に気付かないことはありません。引数名に迷ったら `node scripts/mcp-cli.mjs schema <tool>` で確認してください。
 >
@@ -347,13 +357,13 @@ claude mcp add togaf-eap -- node /path/to/togaf10_EAP_MCP/dist/index.js
 
 ### 設定 / Configuration
 
-| 環境変数 | 既定値 | 説明 |
+| 環境変数 / Variable | 既定値 / Default | 説明 / What it does |
 | --- | --- | --- |
-| `TOGAF_EAP_DATA_DIR` | `~/.togaf-eap` | エンゲージメント状態の保存先ディレクトリ |
-| `TOGAF_EAP_DASHBOARD_PORT` | `0`(空きポート自動割当) | `open_dashboard` が listen するポート |
-| `TOGAF_EAP_NO_BROWSER` | (未設定) | 値を入れる(`0` / `false` / 空文字は無効)と `open_dashboard` がブラウザを自動起動せず、URL だけ返す。CI・ヘッドレス環境向け |
-| `ANTHROPIC_API_KEY` | (未設定) | **任意**。設定時のみ `analyze_text_with_claude` が Claude API を使う。未設定でもエラーにはならず、ホスト側 LLM 用のプロンプトを返す |
-| `TOGAF_EAP_CLAUDE_MODEL` | `claude-opus-5` | **任意**。Claude API を使う場合のモデル |
+| `TOGAF_EAP_DATA_DIR` | `~/.togaf-eap` | エンゲージメント状態の保存先ディレクトリ<br>*Directory the engagement state is written to* |
+| `TOGAF_EAP_DASHBOARD_PORT` | `0`(空きポート自動割当) | `open_dashboard` が listen するポート<br>*Port `open_dashboard` listens on; `0` picks a free one* |
+| `TOGAF_EAP_NO_BROWSER` | (未設定) | 値を入れる(`0` / `false` / 空文字は無効)と `open_dashboard` がブラウザを自動起動せず、URL だけ返す。CI・ヘッドレス環境向け<br>*Set to any value other than `0`, `false` or an empty string and `open_dashboard` returns the URL without launching a browser — for CI and headless machines* |
+| `ANTHROPIC_API_KEY` | (未設定) | **任意**。設定時のみ `analyze_text_with_claude` が Claude API を使う。未設定でもエラーにはならず、ホスト側 LLM 用のプロンプトを返す<br>*Optional. Only when it is set does `analyze_text_with_claude` call the Claude API; unset is not an error — you get a prompt to run on the host LLM instead* |
+| `TOGAF_EAP_CLAUDE_MODEL` | `claude-opus-5` | **任意**。Claude API を使う場合のモデル<br>*Optional. The model used when the Claude API path is active* |
 
 保存レイアウトは次のとおりです。複数案件を並行して持てます。
 
@@ -379,19 +389,20 @@ PDF / Word / Excel など、テキストでない形式は**クライアント�
 #### ダッシュボードのエンドポイント / Dashboard endpoints
 
 `open_dashboard` は `127.0.0.1` のみに bind します(外部公開しません)。
+*`open_dashboard` binds to `127.0.0.1` only and is never exposed off the machine.*
 
-| パス | 内容 |
+| パス / Path | 内容 / Serves |
 | --- | --- |
-| `/` | ダッシュボード HTML(自己完結・外部 CDN 参照なし・印刷用 CSS 付き) |
-| `/api/state` | 現在のエンゲージメント JSON |
-| `/events` | SSE。状態ファイルの変更を push |
-| `/health` | 死活確認 |
+| `/` | ダッシュボード HTML(自己完結・外部 CDN 参照なし・印刷用 CSS 付き)<br>*The dashboard HTML — self-contained, no external CDN, print CSS included* |
+| `/api/state` | 現在のエンゲージメント JSON<br>*The current engagement as JSON* |
+| `/events` | SSE。状態ファイルの変更を push<br>*Server-sent events; pushes every change to the state file* |
+| `/health` | 死活確認<br>*Liveness check* |
 
 ### 開発 / Development
 
 ```bash
 npm run build   # TypeScript ビルド
-npm test        # vitest ユニットテスト(168 件)
+npm test        # vitest ユニットテスト(件数は実行結果に出ます)
 npm run smoke   # stdio JSON-RPC スモークテスト(103 チェック)
 ```
 
@@ -444,7 +455,7 @@ TOGAF 標準は**オンラインでの閲覧は無料**で、**自組織のア�
 
 本プロジェクトは MCP サーバーとして AI から利用されるものであるため、この条項に抵触しないよう、著作権の及ばない**事実情報**(フェーズ名・成果物名などの構造)のみを用い、解説は**すべて独自に執筆**しています。正確な原文が必要な場面では `about_knowledge` / `check_official_source` が一次情報の当たり先を返します。
 
-The TOGAF Standard is free to view online and free to use for developing your own organization's architecture, but it may not be reproduced or redistributed without permission, and its copyright notice explicitly prohibits incorporating the text into LLM/generative-AI systems or using it in connection with such tools to generate content. Since this project is consumed by an AI assistant, it therefore carries only non-copyrightable factual structure plus wholly original commentary.
+The TOGAF Standard is free to view online and free to use for developing your own organization's architecture, but it may not be reproduced or redistributed without permission, and its copyright notice explicitly prohibits incorporating the text into LLM/generative-AI systems or using it in connection with such tools to generate content. Since this project is consumed by an AI assistant, it carries only non-copyrightable factual structure plus wholly original commentary.
 
 TOGAF® and ArchiMate® are registered trademarks of The Open Group; SABSA® of The SABSA Institute; BIZBOK® of the Business Architecture Guild. This project is unofficial and not affiliated with any of them. The knowledge base carries only factual structure (names, layers, matrix axes) plus wholly original commentary — it reproduces no source text, verbatim or closely paraphrased.
 

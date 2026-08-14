@@ -105,7 +105,7 @@ implementation (`src/tools/documents.ts`) refuses in this order:
 
 拒否したときは**理由と回避策**（通常のフォルダにコピーして渡す）を返します。黙って空を返しません。
 
-実際の挙動 / Actual behaviour:
+実際の挙動 / Actual behavior:
 
 ```text
 $ read_document {"path":"/etc/passwd"}
@@ -114,6 +114,20 @@ $ read_document {"path":"/etc/passwd"}
 
 $ read_document {"path":"/Users/you/.ssh/config"}
 隠しディレクトリ / 隠しファイル(`.ssh`)は読み込みません
+```
+
+同じ拒否を `lang: "en"` で呼んだ場合 / The same refusals with `lang: "en"`:
+
+```text
+$ read_document {"path":"/etc/passwd","lang":"en"}
+Reading this location is not allowed: /etc/passwd
+Allowed roots: <cwd> , <dataDir> , <home>
+Copy the file under one of these directories and pass the new path.
+
+$ read_document {"path":"/Users/you/.ssh/config","lang":"en"}
+Hidden files and directories (`.ssh`) are not read: /Users/you/.ssh/config
+This guard exists so credential and configuration files (JSON under `.aws`, `.config`, `.ssh`, …) are never dumped into the conversation.
+If this really is a business document, copy it into a normal folder and pass the new path.
 ```
 
 （`path` は絶対パスで渡します。`~` の展開はしません。/ `path` takes an absolute path; `~` is not expanded.）
@@ -154,6 +168,8 @@ A document you feed in may contain text written to steer this server or the host
 
 **利用者側の心得 / What you should do:** 取り込んだ内容をそのまま意思決定に使わないでください。
 候補として提示されたリスクや関係者は、必ず出典行に当たって確認してください。
+*Never act on ingested content as it stands. Every risk and stakeholder it proposes is a candidate —
+open the cited line and confirm it before it becomes a decision.*
 
 ---
 
@@ -226,9 +242,11 @@ file itself. Pass the key from your shell or your MCP client configuration.
 - **出力の正しさ**は保証しません。知識ベースは独自の要約であり、TOGAF / ArchiMate / SABSA の原文では
   ありません。重要な判断の前に一次情報を確認してください（`about_knowledge` /
   `check_official_source` が当たり先を返します）。
-  *Correctness is not guaranteed: the knowledge base is original summary material, not the standards.*
+  *Correctness is not guaranteed: the knowledge base is original summary material, not the standards
+  themselves. Check the primary source before any decision that matters — `about_knowledge` and
+  `check_official_source` tell you where to look.*
 - **保存された JSON の暗号化・アクセス制御**は行いません。OS のファイル権限に依存します。
   *No encryption or access control over the stored JSON.*
 - **ホスト側の LLM の挙動**は制御できません。取り込んだ文書がホスト LLM をどう動かすかは、
   最終的に利用者の判断に委ねられます。
-  *The behaviour of the host LLM is outside this server's control.*
+  *The behavior of the host LLM is outside this server's control.*

@@ -72,7 +72,7 @@ src/
 ├── knowledge/        知識ベース(静的・バイリンガル・副作用なし)
 ├── engagement/       エンゲージメントの型と JSON 永続化
 ├── dashboard/        Markdown / HTML の描画と、SSE 付き HTTP サーバー
-├── tools/            MCP ツールの実装(ツール登録 20 + prompts/resources 2 + 共通ヘルパ 2)
+├── tools/            MCP ツールの実装(ツール登録 20 + prompts/resources 2 + 共通ヘルパ 3)
 └── llm/              任意の Claude API クライアント
 ```
 
@@ -88,7 +88,7 @@ src/
 
 `tools/` が厚く(実装の大半)、`knowledge/` がその材料、`engagement/` と `dashboard/` が状態と見せ方 — という重心です。
 
-> `tools/` holds most of the code: it validates input with zod, joins knowledge with stored state, and formats the result as tables, diagrams, and next actions. `knowledge/` is pure static data, `engagement/` is types plus persistence, `dashboard/` renders the same state two ways.
+> `tools/` holds most of the code: it validates input with zod, joins knowledge with stored state, and formats the result as tables, diagrams, and next actions. `knowledge/` is pure static data, `engagement/` is types plus persistence, `dashboard/` renders the same state two ways. The right-hand column of the table above is what each layer may *not* do: `knowledge/` never touches the filesystem, the network, or state; `engagement/` never builds Markdown or HTML; `dashboard/` never mutates state; and a tool handler never throws.
 
 ---
 
@@ -119,9 +119,13 @@ src/
 - **Claude API は `fetch` 直叩き** — 公式 SDK を入れない。使うのは 1 往復のテキスト生成とトークン数えだけで、Node 標準の `fetch` で足ります。呼び出し側には `callClaude` / `countClaudeTokens` しか見せていないので、将来 SDK に差し替えるとしてもこの層だけの変更で済みます
 - **ドキュメント解析も標準モジュールのみ** — テキスト系(txt / md / csv / tsv / json / html / xml / log)を自前で正規化する。バイナリ形式は 3.1 のとおりホストに任せる
 
-`npm install` が引くパッケージが少ないほど、社内で入れてもらえる確率が上がります。EA の道具は「配れないと意味がない」ので、ここは機能より優先しています。
+`npm install` が引くパッケージが少ないほど、審査を通る確率が上がります。EA の道具は「配れないと意味がない」ので、ここは機能より優先しています。
 
-> Two runtime dependencies, deliberately. `node:http` instead of express, `fetch` instead of the Anthropic SDK, hand-rolled text normalisation instead of parser libraries. An EA tool that cannot get past procurement is worthless, so a small dependency tree outranks convenience.
+> Two runtime dependencies, deliberately. `node:http` instead of express, `fetch` instead of the Anthropic SDK, hand-rolled text normalization instead of parser libraries. An EA tool that cannot get past review is worthless, so a small dependency tree outranks convenience.
+
+なお、これは設計方針の話です。**利用できる範囲はライセンスが決めます** — 本成果物は個人利用のみで、企業・組織としての利用には著作権者の事前の書面による許可が必要です([LICENSE.md](../LICENSE.md))。
+
+*That is a design rationale, not a grant of use: the [license](../LICENSE.md) permits personal, non-commercial use only. Organizational use requires prior written permission.*
 
 ### 3.3 原文を持たない
 
@@ -196,6 +200,8 @@ sequenceDiagram
 
 - **`apply=true` が無ければ保存しない**。抽出は必ずプレビューを挟みます。機械の推定値(レベル・影響度・期限)は仮置きだと明示され、各行に出典行番号が付きます
 - **保存は atomic**。一時ファイルに書いてから `rename` するので、ダッシュボードが書きかけの JSON を読むことはありません
+
+> Reading the sequence above: a document arrives (the host reads it if it is a PDF), the server normalizes it and pulls candidates out with a `file:line` source and a confidence on every row, and the user decides what to keep. Nothing is written without `apply=true` — machine-guessed levels, impacts and dates are labelled as provisional. The save itself is atomic (temp file, then `rename`), and the change reaches the browser over SSE, whether it came from this process or another one.
 
 ---
 

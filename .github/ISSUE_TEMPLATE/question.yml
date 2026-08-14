@@ -66,6 +66,8 @@ body:
       placeholder: |
         例) 手元の情報セキュリティ報告書から案件の素材を起こしたいのですが、
         PDF しか手元にありません。どうするのが早いですか?
+        e.g. I want to turn our information-security report into engagement material,
+        but all I have is a PDF. What is the quickest way?
     validations:
       required: true
 

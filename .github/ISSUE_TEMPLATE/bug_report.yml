@@ -13,6 +13,7 @@ body:
 
         **公開の Issue に貼る前に、必ず伏せ字にしてください。**
         例) `A 社基幹刷新` → `<顧客A> <案件名>` / `/Users/taro/work/...` → `/path/to/...`
+        e.g. `Acme core renewal` → `<client A> <engagement>`, `/Users/jane/work/...` → `/path/to/...`
 
         再現に必要なのは**構造**(どのツールを、どんな形の入力で呼んだか)だけです。
         中身が業務情報なら、ダミーの値に置き換えたうえで再現するかを確かめてください。
@@ -40,6 +41,7 @@ body:
       description: 一言で。詳細は下の欄に / One or two sentences; details go below.
       placeholder: |
         例) 案件を作ったあとに <ツール名> を呼ぶと、毎回エラーで返る。
+        e.g. After creating an engagement, calling <tool> returns an error every time.
     validations:
       required: true
 

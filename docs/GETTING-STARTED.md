@@ -25,6 +25,16 @@ TOGAF を知らなくて大丈夫です。このページは「入れて、話�
 
 ## 2. 入れる
 
+**先に要るもの / What you need first**
+
+| もの | 確認のしかた | 無いとき |
+| --- | --- | --- |
+| MCP クライアント(**Claude Code** または **Claude Desktop**) | `claude --version` | このサーバーは単体では動きません。Claude 側から呼ばれて初めて働きます |
+| **Node.js 18 以上** | `node --version` | [nodejs.org](https://nodejs.org/) から入れてください(`npm` も一緒に入ります) |
+| git | `git --version` | リポジトリを ZIP で落としてもかまいません |
+
+> You need an MCP client (Claude Code or Claude Desktop) and Node.js 18+. This server does nothing on its own — it only works when Claude calls it.
+
 ### いちばん楽な方法 — Claude に頼む
 
 このリポジトリを手元に置いたら、Claude Code を開いて**こう言ってみてください**。
@@ -241,6 +251,11 @@ Claude: (経営層向けの構成と言い換え表を返す)
 **4. 状態はあなたの手元に残ります。**
 案件は `~/.togaf-eap/` に JSON で保存されます。どこかに送信されることはありません。
 
+**5. 使えるのは個人利用の範囲までです。**
+このページの例文は仕事の場面ばかりですが、ライセンスは**個人的・非商用の利用のみ**を許可しています。会社や組織の業務での利用、営利目的の利用、商用サービスへの組み込みには、**著作権者の事前の書面による許可が必要**です(AI / 機械学習モデルの学習への利用も禁止)。勤務先で使う前に [LICENSE.md](../LICENSE.md) を読んでください。
+
+> Note the license before you use this at work: it permits **personal, non-commercial use only**. Business use by a company or organization, for-profit use, and incorporation into commercial services all require prior written permission, and using the Work to train AI/ML models is prohibited. See [LICENSE.md](../LICENSE.md).
+
 > Nothing is saved without you saying so; everything it produces is a draft for a human to check; it holds no source text from the standards, only names, structure, and original commentary; and your engagement data stays on your machine.
 
 ---
@@ -278,6 +293,8 @@ cd /path/to/togaf10_EAP_MCP && node dist/index.js < /dev/null
 | ダッシュボードが開かない | ブラウザが自動起動しない環境では URL が返るので、手で開いてください |
 | Archi への書き出しで一部だけ落ちた | **落ちた分は理由付きで一覧されます**(例: 関係の相手先の名前が要素と一致しない)。名前を直してもう一度書き出せば通ります |
 | 何かのエラーが出た | そのエラー文をそのまま貼って `これ、どうすればいい?` と聞くのが最短です |
+
+> The same list in English. *"There is no engagement yet, so I cannot advise from state"* is not a fault — say `Create an engagement called "…"` and it appears. A complaint about an input field means a misspelled argument: this server rejects unknown keys loudly rather than returning an empty result, so just say `try that again`. A file that cannot be read is almost always outside the allowed roots — the working directory, your home directory, and the data directory — or inside a dot-folder, which is never read; have Claude read it and pass the text instead, which is also how PDF and Excel go in. If the dashboard does not open, the URL is returned for you to open by hand. A partial ArchiMate export lists every dropped relationship with its reason (usually a source or target name that matches no element) — fix the names and export again. For anything else, paste the error text and ask what to do.
 
 ---
 
