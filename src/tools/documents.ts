@@ -3483,8 +3483,8 @@ const sourceSchema = z
   .max(2_000)
   .optional()
   .describe(
-    'text を渡すときの出典名(出典表示に使う。例: "csr2026j.pdf p.12-18") / ' +
-    'Label for the text you passed; it appears in the source column (e.g. "csr2026j.pdf p.12-18")',
+    'text を渡すときの出典名(出典表示に使う。例: "security-report.pdf p.12-18") / ' +
+    'Label for the text you passed; it appears in the source column (e.g. "security-report.pdf p.12-18")',
   );
 
 const kindSchema = z

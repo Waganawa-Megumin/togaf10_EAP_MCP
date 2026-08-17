@@ -120,8 +120,8 @@ describe('confidence の定義', () => {
 
 describe('正規化', () => {
   it('空白を畳み、空文字は欄ごと落とす', () => {
-    expect(normalizeProvenance({ source: '  csr2026.pdf\n p.5  ', confidence: 'STATED' })).toEqual({
-      source: 'csr2026.pdf p.5',
+    expect(normalizeProvenance({ source: '  security-report.pdf\n p.5  ', confidence: 'STATED' })).toEqual({
+      source: 'security-report.pdf p.5',
       confidence: 'stated',
     });
     expect(normalizeProvenance({ source: '   ', confidence: '  ' })).toEqual({});
@@ -137,14 +137,14 @@ describe('正規化', () => {
   });
 
   it('部分更新は「未指定なら保つ / 空文字なら消す」', () => {
-    const current = { source: 'csr2026.pdf p.5', confidence: 'stated' as const };
+    const current = { source: 'security-report.pdf p.5', confidence: 'stated' as const };
     expect(mergeProvenance(current, {})).toEqual(current);
     expect(mergeProvenance(current, { source: '2026-08-14 ヒアリング' })).toEqual({
       source: '2026-08-14 ヒアリング',
       confidence: 'stated',
     });
     expect(mergeProvenance(current, { source: '' })).toEqual({ confidence: 'stated' });
-    expect(mergeProvenance(current, { confidence: '' })).toEqual({ source: 'csr2026.pdf p.5' });
+    expect(mergeProvenance(current, { confidence: '' })).toEqual({ source: 'security-report.pdf p.5' });
   });
 });
 
@@ -181,7 +181,7 @@ describe('検査', () => {
 
 describe('表示用ヘルパ', () => {
   it('hasProvenance は空白だけの出典を「無い」と見る', () => {
-    expect(hasProvenance({ source: 'csr2026.pdf p.5' })).toBe(true);
+    expect(hasProvenance({ source: 'security-report.pdf p.5' })).toBe(true);
     expect(hasProvenance({ source: '   ' })).toBe(false);
     expect(hasProvenance({ confidence: 'stated' })).toBe(false);
     expect(hasProvenance(undefined)).toBe(false);
@@ -196,9 +196,9 @@ describe('表示用ヘルパ', () => {
   it('provenanceCell は表に置ける形で返し、パイプを逃がす', () => {
     expect(provenanceCell(undefined)).toBe('—');
     expect(provenanceCell({ source: 'a|b' })).toBe('a\\|b');
-    const cell = provenanceCell({ source: 'csr2026.pdf p.5', confidence: 'stated' }, 'ja');
+    const cell = provenanceCell({ source: 'security-report.pdf p.5', confidence: 'stated' }, 'ja');
     expect(cell).toContain('記載あり');
-    expect(cell).toContain('csr2026.pdf p.5');
+    expect(cell).toContain('security-report.pdf p.5');
     expect(cell).not.toContain('\n');
   });
 });
@@ -224,14 +224,14 @@ describe('永続化', () => {
       title: '要員不足',
       level: 'high',
       status: 'open',
-      source: 'csr2026.pdf p.5',
+      source: 'security-report.pdf p.5',
       confidence: 'stated',
       createdAt: '2026-08-14T00:00:00.000Z',
       updatedAt: '2026-08-14T00:00:00.000Z',
     };
     saveEngagement({ ...engagement, risks: [risk] });
     const loaded = loadEngagement();
-    expect(loaded?.risks[0]?.source).toBe('csr2026.pdf p.5');
+    expect(loaded?.risks[0]?.source).toBe('security-report.pdf p.5');
     expect(loaded?.risks[0]?.confidence).toBe('stated');
   });
 

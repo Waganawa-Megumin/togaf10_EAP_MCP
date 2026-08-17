@@ -271,7 +271,7 @@ function resolvePhaseId(value: string | undefined): string | undefined {
  * 日本語側の 1 組をそのまま読める(再掲は 5 か所ぶん重複するだけだった)。
  */
 export const SOURCE_DESC =
-  '出典。例 "csr2026.pdf p.17 図3" / "2026-08-14 ヒアリング(情シス部長)"' +
+  '出典。例 "security-report.pdf p.17 図3" / "2026-08-14 ヒアリング(情シス部長)"' +
   ' / Where it came from';
 
 /**
@@ -437,13 +437,13 @@ export function renderProvenanceSection(engagement: Engagement, touched: Touched
     msg(
       `次の一手: 出典が無い ${summary.withoutSource} 件に出典を足してください。` +
         (exampleId
-          ? `例: \`update_engagement\` に \`${argName}: [{ id: "${exampleId}", source: "csr2026.pdf p.5", confidence: "stated" }]\` を渡す。`
+          ? `例: \`update_engagement\` に \`${argName}: [{ id: "${exampleId}", source: "security-report.pdf p.5", confidence: "stated" }]\` を渡す。`
           : '') +
         '文書に書かれていないものは confidence="inferred" にして source に「何から導いたか」を書き、' +
         '出所を辿れないものは confidence="unknown" にしたうえで、確認するか消すかをその場で決めてください。',
       `Next: attach a source to the ${summary.withoutSource} ${summary.withoutSource === 1 ? 'entry that lacks' : 'entries that lack'} one. ` +
         (exampleId
-          ? `For example, call \`update_engagement\` with \`${argName}: [{ id: "${exampleId}", source: "csr2026.pdf p.5", confidence: "stated" }]\`. `
+          ? `For example, call \`update_engagement\` with \`${argName}: [{ id: "${exampleId}", source: "security-report.pdf p.5", confidence: "stated" }]\`. `
           : '') +
         'Use confidence="inferred" with what it was derived from in source when the document does not say it, ' +
         'and confidence="unknown" when the origin cannot be traced — then decide, there and then, to confirm it or delete it.',
@@ -631,13 +631,13 @@ export function registerEngagementTools(server: McpServer): void {
         out.push(
           msg(
             `次の一手: \`update_engagement\` で項目を登録します。**登録するときに必ず source と confidence を付けてください。** ` +
-              `source は「どの資料のどこか / 誰にいつ聞いたか」(例: "csr2026.pdf p.5"、"2026-08-14 ヒアリング(情シス部長)")。` +
+              `source は「どの資料のどこか / 誰にいつ聞いたか」(例: "security-report.pdf p.5"、"2026-08-14 ヒアリング(情シス部長)")。` +
               `confidence は ${CONFIDENCE_DEFINITIONS.stated.marker} stated(原文を指させる) / ` +
               `${CONFIDENCE_DEFINITIONS.inferred.marker} inferred(書かれていないが導いた) / ` +
               `${CONFIDENCE_DEFINITIONS.unknown.marker} unknown(出所が辿れない)の 3 値です。` +
               `省略すると未設定のまま保存し、応答が ${NO_SOURCE_MARK} ${NO_SOURCE_LABEL.ja} として数え続けます。`,
             `Next: register entries with \`update_engagement\`, and **attach source and confidence as you go.** ` +
-              `source says which document and where, or who said it and when (for example "csr2026.pdf p.5", "2026-08-14 interview (Head of IT)"). ` +
+              `source says which document and where, or who said it and when (for example "security-report.pdf p.5", "2026-08-14 interview (Head of IT)"). ` +
               `confidence is one of ${CONFIDENCE_DEFINITIONS.stated.marker} stated (the passage can be pointed at), ` +
               `${CONFIDENCE_DEFINITIONS.inferred.marker} inferred (derived, not written), ` +
               `${CONFIDENCE_DEFINITIONS.unknown.marker} unknown (origin cannot be traced). ` +
@@ -698,7 +698,7 @@ export function registerEngagementTools(server: McpServer): void {
     {
       title: 'Update the engagement',
       description:
-        'エンゲージメントを部分更新する。フェーズ状態の変更、リスク・決定事項・アクション・ステークホルダー・成果物の追加/更新、メモの追記ができる。各項目は id を指定すれば更新、省略すれば新規追加。各項目には出典 source(例 "csr2026.pdf p.5")と確度 confidence(stated / inferred / unknown)を付けられる — 応答が出典の付いていない件数を毎回返す。 / Partially update the engagement: change phase statuses and add or update risks, decisions, actions, stakeholders, deliverables, and notes. Supply an id to update an entry, omit it to add one. Every entry can carry source (for example "csr2026.pdf p.5") and confidence (stated / inferred / unknown); the response reports how many entries still have no source. With confidence="inferred", record in source what the entry was derived from (e.g. "from the headcount on p.5 and the org chart on p.9").',
+        'エンゲージメントを部分更新する。フェーズ状態の変更、リスク・決定事項・アクション・ステークホルダー・成果物の追加/更新、メモの追記ができる。各項目は id を指定すれば更新、省略すれば新規追加。各項目には出典 source(例 "security-report.pdf p.5")と確度 confidence(stated / inferred / unknown)を付けられる — 応答が出典の付いていない件数を毎回返す。 / Partially update the engagement: change phase statuses and add or update risks, decisions, actions, stakeholders, deliverables, and notes. Supply an id to update an entry, omit it to add one. Every entry can carry source (for example "security-report.pdf p.5") and confidence (stated / inferred / unknown); the response reports how many entries still have no source. With confidence="inferred", record in source what the entry was derived from (e.g. "from the headcount on p.5 and the org chart on p.9").',
       inputSchema: {
         name: z.string().optional(),
         client: z.string().optional(),

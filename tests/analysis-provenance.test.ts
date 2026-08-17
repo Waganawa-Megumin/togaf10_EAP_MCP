@@ -97,7 +97,7 @@ describe('マトリクスの出典列 / source column on the matrices', () => {
     // 出典欄はまだ書き込み系ツールの引数になっていないので、保存済み JSON に直接入れる。
     // 読み込み経路(normalizeEngagement)を通っても残ることの確認も兼ねる。
     const data = readEngagement();
-    data.risks[0].source = 'csr2026.pdf p.17';
+    data.risks[0].source = 'security-report.pdf p.17';
     data.risks[0].confidence = 'stated';
     data.stakeholders[0].source = '2026-08-14 ヒアリング';
     data.stakeholders[0].confidence = 'inferred';
@@ -106,7 +106,7 @@ describe('マトリクスの出典列 / source column on the matrices', () => {
 
   it('risk_matrix は明細表に出典列を出し、無い行を「出所未記入」と書く', async () => {
     const out = await callTool('risk_matrix', { lang: 'ja' });
-    expect(row(out, '出典のあるリスク')).toContain('csr2026.pdf p.17');
+    expect(row(out, '出典のあるリスク')).toContain('security-report.pdf p.17');
     expect(row(out, '出典のあるリスク')).toContain('●');
     // 空欄にしない。空欄は見落とされる
     expect(row(out, '出典の無いリスク')).toContain('出所未記入');
@@ -150,10 +150,10 @@ describe('gap_analysis の出典 / provenance on gap_analysis', () => {
       lang: 'ja',
       baseline: ['旧資産管理'],
       target: ['ゼロトラスト基盤'],
-      sources: [{ element: 'ゼロトラスト基盤', source: 'csr2026.pdf p.12', confidence: 'stated' }],
+      sources: [{ element: 'ゼロトラスト基盤', source: 'security-report.pdf p.12', confidence: 'stated' }],
     });
     const gaps = section(out, '## 検出したギャップと推奨アクション');
-    expect(row(gaps, 'ゼロトラスト基盤')).toContain('csr2026.pdf p.12');
+    expect(row(gaps, 'ゼロトラスト基盤')).toContain('security-report.pdf p.12');
     expect(row(gaps, '旧資産管理')).toContain('出所未記入');
     expect(out).toContain('出典が付いている要素は **1/2 件**');
   });

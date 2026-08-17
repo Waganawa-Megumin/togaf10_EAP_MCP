@@ -726,7 +726,7 @@ function registerCapabilityMap(server: McpServer): void {
                 .string()
                 .optional()
                 .describe(
-                  '出典の短い呼び名(例: csr2026.pdf p.17、2026-08-14 ヒアリング) / Short name of the source, e.g. a file and page or an interview date',
+                  '出典の短い呼び名(例: security-report.pdf p.17、2026-08-14 ヒアリング) / Short name of the source, e.g. a file and page or an interview date',
                 ),
             }),
           )

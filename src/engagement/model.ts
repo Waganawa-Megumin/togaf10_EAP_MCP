@@ -102,7 +102,7 @@ export const CONFIDENCE_DEFINITIONS: Record<ProvenanceConfidence, ConfidenceDefi
  * この欄が無い保存済み JSON も今までどおり読める。
  */
 export interface Provenance {
-  /** 出典の短い呼び名。例: `csr2026.pdf p.5` / `2026-08-14 ヒアリング(情シス部長)` */
+  /** 出典の短い呼び名。例: `security-report.pdf p.5` / `2026-08-14 ヒアリング(情シス部長)` */
   source?: string;
   /** 記載あり / 推測 / 出所不明 */
   confidence?: ProvenanceConfidence;
@@ -264,8 +264,8 @@ export function assertProvenance(field: string, input: ProvenanceInput | null | 
   if (source !== undefined && source !== null) {
     if (typeof source !== 'string') {
       throw new EngagementValueError(provenanceField(field, 'source'), [], {
-        ja: `${provenanceField(field, 'source')} は文字列で渡してください(例: "csr2026.pdf p.5")。`,
-        en: `${provenanceField(field, 'source')} must be a string (for example "csr2026.pdf p.5").`,
+        ja: `${provenanceField(field, 'source')} は文字列で渡してください(例: "security-report.pdf p.5")。`,
+        en: `${provenanceField(field, 'source')} must be a string (for example "security-report.pdf p.5").`,
       });
     }
     assertTextLimit(provenanceField(field, 'source'), source, 'source');
@@ -393,14 +393,14 @@ function statedNeedsSourceDetail(field: string): Bilingual {
   return {
     ja:
       `${f}: confidence="stated" は「原文にそう書いてある」という意味なので、出典なしでは保存できません。` +
-      `直し方は 3 つのどれか: (1) source にどこに書いてあるかを書く(例 "csr2026.pdf p.5")。` +
+      `直し方は 3 つのどれか: (1) source にどこに書いてあるかを書く(例 "security-report.pdf p.5")。` +
       `この項目に既に出典が付いているなら、source も一緒に渡してください。` +
       `(2) 書かれてはいないが導いたものなら confidence="inferred" にして、source に何から導いたかを書く。` +
       `(3) 出所を辿れないなら confidence="unknown" にする。` +
       `出典の無い「記載あり」は、後から誰も裏を取れず、根拠が無いので消す判断もできません。`,
     en:
       `${f}: confidence="stated" claims the source says so, so it cannot be saved without a source. ` +
-      `Do one of three things: (1) put where it is written into source (for example "csr2026.pdf p.5") — ` +
+      `Do one of three things: (1) put where it is written into source (for example "security-report.pdf p.5") — ` +
       `if the entry already carries a source, pass it again alongside the confidence; ` +
       `(2) use confidence="inferred" and record in source what it was derived from; ` +
       `(3) use confidence="unknown" when the origin cannot be traced. ` +
@@ -415,7 +415,7 @@ function statedNeedsSourceDetail(field: string): Bilingual {
 function statedNeedsSourceMessage(field: string): string {
   const f = provenanceField(field, 'confidence');
   return (
-    `${f}: confidence="stated" needs a source. Pass source with it (e.g. "csr2026.pdf p.5"), ` +
+    `${f}: confidence="stated" needs a source. Pass source with it (e.g. "security-report.pdf p.5"), ` +
     `or use confidence="inferred" / "unknown". Nothing was saved.`
   );
 }

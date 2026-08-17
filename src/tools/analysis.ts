@@ -3461,8 +3461,8 @@ function renderFactorTemplate(kind: AssessmentKind, scale: number, lang: Lang): 
           en: 'When the material at hand does not let you judge a factor, pass **null** for current — not 0. Zero is a finding ("there is none"); null is the absence of one. Factors set to null are excluded from the overall verdict and listed separately as undetermined.',
         },
         {
-          ja: '評点の根拠が資料にあるなら source に出典(例: "csr2026.pdf p.17")を、その出典が本文の記載か自分の推測かを confidence に入れる。出典のある評点だけが、次に測る人に引き継げる。',
-          en: 'When the score comes from a document, put the reference in source (e.g. "csr2026.pdf p.17") and say in confidence whether it is stated there or inferred. Only sourced scores survive a change of assessor.',
+          ja: '評点の根拠が資料にあるなら source に出典(例: "security-report.pdf p.17")を、その出典が本文の記載か自分の推測かを confidence に入れる。出典のある評点だけが、次に測る人に引き継げる。',
+          en: 'When the score comes from a document, put the reference in source (e.g. "security-report.pdf p.17") and say in confidence whether it is stated there or inferred. Only sourced scores survive a change of assessor.',
         },
       ],
       lang,
@@ -4344,7 +4344,7 @@ const factorInputSchema = z.object({
     4000,
   ).optional(),
   source: freeTextSchema(
-    '評点の出典。例: "csr2026.pdf p.17" / "2026-08-14 情シス部長ヒアリング" / Where the score comes from, e.g. "csr2026.pdf p.17"',
+    '評点の出典。例: "security-report.pdf p.17" / "2026-08-14 情シス部長ヒアリング" / Where the score comes from, e.g. "security-report.pdf p.17"',
     300,
   ).optional(),
   confidence: z
@@ -4400,7 +4400,7 @@ export function registerAnalysisTools(server: McpServer): void {
                 IDENTIFIER_LIMIT,
               ),
               source: freeTextSchema(
-                '出典の短い呼び名。例: "csr2026.pdf p.17" / "2026-08-14 情シス部長ヒアリング" / A short handle for the source, e.g. "csr2026.pdf p.17"',
+                '出典の短い呼び名。例: "security-report.pdf p.17" / "2026-08-14 情シス部長ヒアリング" / A short handle for the source, e.g. "security-report.pdf p.17"',
                 300,
               ).optional(),
               confidence: z

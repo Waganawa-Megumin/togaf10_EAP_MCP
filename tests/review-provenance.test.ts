@@ -100,7 +100,7 @@ describe('check_engagement_health の出典点検', () => {
     const id = /`(risk-[a-z0-9-]+)`/.exec(added)?.[1];
     expect(id).toBeTruthy();
     await callTool('update_engagement', {
-      risks: [{ id, source: 'csr2026.pdf p.31', confidence: 'stated' }],
+      risks: [{ id, source: 'security-report.pdf p.31', confidence: 'stated' }],
     });
     const out = await callTool('check_engagement_health', HEALTH);
 
@@ -143,7 +143,7 @@ describe('check_engagement_health の出典点検', () => {
     });
     const id = /`(risk-[a-z0-9-]+)`/.exec(added)?.[1];
     await callTool('update_engagement', {
-      risks: [{ id, source: 'csr2026.pdf p.31', confidence: 'stated' }],
+      risks: [{ id, source: 'security-report.pdf p.31', confidence: 'stated' }],
     });
     const out = await callTool('check_engagement_health', HEALTH);
 
