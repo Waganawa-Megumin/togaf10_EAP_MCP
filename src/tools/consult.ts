@@ -85,6 +85,25 @@ function bulletPair(ja: string, en: string, lang: Lang): string {
   return `- ${ja}\n  - ${en}`;
 }
 
+/**
+ * 見出しの下に出す文脈行(現在フェーズ・業界・readings・案件)をまとめて 1 ブロックにする。
+ *
+ * ここは以前 `msg()` の結果に `cell()` を掛けていた。`cell()` は表を壊さないために
+ * 改行を空白へ畳むので、`both` では `msg()` が入れた日英の区切りの改行まで消え、
+ * 「…推定していません) Readings supplied by the caller: …」と地続きに繋がっていた
+ * (実測)。日英は言語ごとに 1 行へ分けて組み立て、畳むのは各言語の中だけにする。
+ */
+function contextBlock(items: Bilingual[], lang: Lang): string {
+  const line = (target: 'ja' | 'en'): string =>
+    items
+      .map((c) => cell(c[target]))
+      .filter((c) => c.length > 0)
+      .join(' / ');
+  if (lang === 'ja') return `*${line('ja')}*`;
+  if (lang === 'en') return `*${line('en')}*`;
+  return `*${line('ja')}*\n*${line('en')}*`;
+}
+
 /** Markdown 表に入れる前に、区切りを壊す文字を無害化する */
 function cell(value: string): string {
   return value.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ').trim();
@@ -367,6 +386,21 @@ const READING_CHOICES = {
 
 type ReadingAxis = keyof typeof READING_CHOICES;
 
+/**
+ * 根拠欄のスキーマ。
+ *
+ * **毎回新しい zod インスタンスを返すこと。** 1 個の定数を 8 軸で使い回すと、
+ * zod-to-json-schema が 2 個目以降を `$ref` に畳み、説明文がその軸から消える(実測)。
+ *
+ * 説明文はここでは 1 行に留める。同じ 290 バイトを 8 軸に複製すると
+ * それだけで 2 千バイトを超え、ツール一覧を読む側の負担になるだけで情報は増えない。
+ * 「何を書けばよいか(発言・該当箇所・ページ番号)」と「なぜ必要か(利用者が誤読を
+ * 正せるようにするため)」は、`readings` のツール説明に 1 回だけ書いてある。
+ */
+function evidenceSchema() {
+  return freeTextSchema('そう読んだ根拠 / Evidence for this reading', EVIDENCE_LIMIT).min(1);
+}
+
 /** 1 軸ぶんのスキーマ。選べる値はその軸の条件 ID に限る */
 function axisReadingSchema(axis: ReadingAxis, ja: string, en: string) {
   const choices = READING_CHOICES[axis] as unknown as readonly [
@@ -376,10 +410,7 @@ function axisReadingSchema(axis: ReadingAxis, ja: string, en: string) {
   return z
     .object({
       condition: z.enum(choices).describe(`${ja} / ${en}`),
-      evidence: freeTextSchema(
-        'そう読み取った根拠。会話中の発言・文書の該当箇所・ページ番号など、利用者が誤読を正せる形で / Why you read it that way — the remark, the passage, the page number. Written so the user can correct you.',
-        EVIDENCE_LIMIT,
-      ).min(1),
+      evidence: evidenceSchema(),
     })
     .optional();
 }
@@ -664,7 +695,7 @@ export function registerConsultTool(server: McpServer): void {
           IDENTIFIER_LIMIT,
         ).optional(),
         readings: readingsSchema.describe(
-          'あなた(呼び出し側)が既に読み取れている状況(任意)。このサーバーの読み取りは situation の文字列に対する正規表現でしかなく、会話の前のほうで言われたこと・添付文書に書いてあることは見えません。**会話から読み取れているなら、ここに渡すほうが正確です。** 渡した軸はそのまま採用し、渡さなかった軸だけをサーバーが本文から推定します(控え)。各軸に condition と evidence(そう読んだ根拠)を付けてください。出力にはどちらが読んだのかを明記し、あなたの読み取りが situation の文面と食い違う場合は両方を並べて示します(片方を黙って捨てません)。 /What you have already read from the conversation (optional). This server only regex-matches the `situation` string, so anything said earlier in the conversation or written in an attached document is invisible to it. **If you can read it from the conversation, passing it here is more accurate.** Axes you pass are used as-is; axes you omit fall back to the server\'s own guess from the text. Give each axis a condition and the evidence you read it from. The output states which side read what, and where your reading contradicts the `situation` text it shows both — neither side is dropped silently.',
+          'あなた(呼び出し側)が既に読み取れている状況(任意)。このサーバーの読み取りは situation の文字列に対する正規表現でしかなく、会話の前のほうで言われたこと・添付文書に書いてあることは見えません。**会話から読み取れているなら、ここに渡すほうが正確です。** 渡した軸はそのまま採用し、渡さなかった軸だけをサーバーが本文から推定します(控え)。各軸には condition と evidence の 2 つを付けてください。evidence は「そう読み取った根拠」で、会話中の発言・文書の該当箇所・ページ番号など、利用者が誤読を正せる形で書きます(空欄・空白だけの evidence は受け付けません)。出力にはどちらが読んだのかを明記し、あなたの読み取りが situation の文面と食い違う場合は両方を並べて示します(片方を黙って捨てません)。 /What you have already read from the conversation (optional). This server only regex-matches the `situation` string, so anything said earlier in the conversation or written in an attached document is invisible to it. **If you can read it from the conversation, passing it here is more accurate.** Axes you pass are used as-is; axes you omit fall back to the server\'s own guess from the text. Give each axis both a `condition` and an `evidence`: the evidence is why you read it that way — the remark, the passage, the page number — written so the user can correct a misread (blank or whitespace-only evidence is rejected). The output states which side read what, and where your reading contradicts the `situation` text it shows both — neither side is dropped silently.',
         ),
         lang: langSchema,
       },
@@ -744,58 +775,53 @@ export function registerConsultTool(server: McpServer): void {
         // 全文エコーはしない。長い状況説明をそのまま返すと応答が入力より大きくなる。
         for (const line of echoInput(situation, l).split('\n')) out.push(`> ${cell(line)}`);
 
-        const context: string[] = [];
+        // 文脈行は日英を分けて持つ。1 本の文字列にしてしまうと、表用の cell() が
+        // 日英の区切りごと畳んでしまう(contextBlock のコメント参照)。
+        const context: Bilingual[] = [];
         if (resolvedPhase) {
-          context.push(
-            msg(
-              `現在フェーズ: ${resolvedPhase.code}. ${text(resolvedPhase.name, 'ja')}`,
-              `Current phase: ${resolvedPhase.code}. ${resolvedPhase.name.en}`,
-              l,
-            ),
-          );
+          context.push({
+            ja: `現在フェーズ: ${resolvedPhase.code}. ${resolvedPhase.name.ja}`,
+            en: `Current phase: ${resolvedPhase.code}. ${resolvedPhase.name.en}`,
+          });
         }
         if (industryInfo.set) {
-          const name = text(industryInfo.set.name, l === 'both' ? 'ja' : l);
+          const name = industryInfo.set.name;
           context.push(
             industryInfo.source === 'detected'
-              ? msg(`業界(本文から推定): ${name}`, `Industry (inferred from the text): ${name}`, l)
-              : msg(`業界: ${name}`, `Industry: ${name}`, l),
+              ? {
+                  ja: `業界(本文から推定): ${name.ja}`,
+                  en: `Industry (inferred from the text): ${name.en}`,
+                }
+              : { ja: `業界: ${name.ja}`, en: `Industry: ${name.en}` },
           );
         } else if (industryInfo.source === 'unsupported' && industryInfo.requested) {
-          context.push(
-            msg(
-              `業界: ${cell(industryInfo.requested)}(未対応)`,
-              `Industry: ${cell(industryInfo.requested)} (not supported)`,
-              l,
-            ),
-          );
+          context.push({
+            ja: `業界: ${cell(industryInfo.requested)}(未対応)`,
+            en: `Industry: ${cell(industryInfo.requested)} (not supported)`,
+          });
         }
         if (givenReadings.length > 0) {
           // both のときに日英どちらも日本語の軸名になっていた。軸名は言語ごとに引く。
           const axisNames = (target: 'ja' | 'en'): string =>
             givenReadings.map((g) => SITUATION_AXIS_LABELS[g.axis][target]).join(' / ');
-          context.push(
-            msg(
-              `readings で受け取った読み取り: ${axisNames('ja')}(この軸は推定していません)`,
-              `Readings supplied by the caller: ${axisNames('en')} (not guessed here)`,
-              l,
-            ),
-          );
+          context.push({
+            ja: `readings で受け取った読み取り: ${axisNames('ja')}(この軸は推定していません)`,
+            en: `Readings supplied by the caller: ${axisNames('en')} (not guessed here)`,
+          });
         }
         if (engagement) {
           context.push(
             engagementInput
-              ? msg(
-                  `案件: ${engagement.name}(説明・スコープ・登録済みの期限も一緒に読みました)`,
-                  `Engagement: ${engagement.name} (its description, scope, and recorded due dates were read too)`,
-                  l,
-                )
-              : msg(`案件: ${engagement.name}`, `Engagement: ${engagement.name}`, l),
+              ? {
+                  ja: `案件: ${engagement.name}(説明・スコープ・登録済みの期限も一緒に読みました)`,
+                  en: `Engagement: ${engagement.name} (its description, scope, and recorded due dates were read too)`,
+                }
+              : { ja: `案件: ${engagement.name}`, en: `Engagement: ${engagement.name}` },
           );
         }
         if (context.length > 0) {
           out.push('');
-          out.push(context.map((c) => `*${cell(c)}*`).join(' / '));
+          out.push(contextBlock(context, l));
         }
         out.push('');
 

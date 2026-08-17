@@ -14,6 +14,7 @@ import {
   RISK_STATUSES,
   capCell,
   capRows,
+  hasProvenance,
   sourceCell,
   summarizeProgress,
   summarizeProvenance,
@@ -21,6 +22,8 @@ import {
   type Assessment,
   type Engagement,
   type Priority,
+  type Provenance,
+  type ProvenanceSummary,
   type RiskLevel,
   type RiskStatus,
   type Stakeholder,
@@ -61,6 +64,10 @@ const M = {
   scale: { ja: '尺度', en: 'Scale' },
   assessedAt: { ja: '評価日', en: 'Assessed' },
   summary: { ja: '所見', en: 'Summary' },
+  factorSource: {
+    ja: '評価そのものの出典。因子ごとの出典は下の表',
+    en: 'source of the assessment itself; per-factor sources are in the table below',
+  },
   standaloneWarning: {
     ja: 'ここで打ち切ると事業が回りません。次の移行状態まで到達する資金と体制を先に確保してください。',
     en: 'Stopping here would leave the business unable to run. Secure the funding and staffing to reach the next transition before you commit.',
@@ -1185,11 +1192,68 @@ function sourceLegend(lang: Lang): string {
 }
 
 /**
+ * 出典の描画状態。**1 回の描画につき 1 個だけ作る。**
+ *
+ * - `on` … 出典列を出すか。台帳のどこにも出典も確度も無い案件では出さない
+ *   (全行が「? 出所未記入」の列が並ぶだけで、読む側の目が滑る)
+ * - `legendDone` … 凡例を出したか。表ごとに凡例を繰り返すと、長い配布物では
+ *   同じ注記が 6 回出る。最初に出典列が出た場所で 1 回だけ出す
+ */
+interface ProvenanceView {
+  summary: ProvenanceSummary;
+  on: boolean;
+  legendDone: boolean;
+}
+
+/**
+ * 出典列を出すかどうかを決める。
+ *
+ * 判定は「1 件でも出典か確度が記録されているか」。記録がゼロの案件で列だけ増やすと、
+ * 中身の無い欄が全行に並んで表が読みにくくなるだけで、何の情報も足していない。
+ * 逆に 1 件でもあるなら、**書かれていない行がどれか**が配布物に出ている必要がある。
+ */
+function viewProvenance(e: Engagement): ProvenanceView {
+  const summary = summarizeProvenance(e);
+  const withConfidence = summary.total - summary.byConfidence.unset;
+  return { summary, on: summary.withSource > 0 || withConfidence > 0, legendDone: false };
+}
+
+/** 出典列のヘッダ 1 個ぶん(出さないときは空文字。行末の `|` の後ろに足せる形) */
+function sourceHead(lang: Lang, view: ProvenanceView): string {
+  return view.on ? ` ${label(M.source, lang)} |` : '';
+}
+
+/** 出典列の区切り行 1 個ぶん */
+function sourceAlign(view: ProvenanceView): string {
+  return view.on ? ' --- |' : '';
+}
+
+/** 出典列のセル 1 個ぶん。空欄は返さない(`sourceCell` が「? 出所未記入」を返す) */
+function sourceOf(entity: Provenance | null | undefined, lang: Lang, view: ProvenanceView): string {
+  return view.on ? ` ${sourceCell(entity, lang)} |` : '';
+}
+
+/** 出典列を出している表の列数(`moreRow` の桁合わせ用) */
+function withSourceColumn(columns: number, view: ProvenanceView): number {
+  return view.on ? columns + 1 : columns;
+}
+
+/**
+ * 凡例を 1 回だけ出す。2 回目以降は空配列。
+ * 記号だけを出して意味を書かないと、読む側が印を無視する。
+ */
+function legendOnce(lang: Lang, view: ProvenanceView): string[] {
+  if (!view.on || view.legendDone) return [];
+  view.legendDone = true;
+  return [sourceLegend(lang), ''];
+}
+
+/**
  * 見出し直下に出す 1 行の出典サマリ。
  * 台帳が空のときは何も出さない(0/0 を「100%」や「良好」と読ませないため)。
  */
-function provenanceHeadline(e: Engagement, lang: Lang): string[] {
-  const summary = summarizeProvenance(e);
+function provenanceHeadline(view: ProvenanceView, lang: Lang): string[] {
+  const summary = view.summary;
   if (summary.total === 0) return [];
   const pct = Math.round((summary.withSource / summary.total) * 100);
   const breakdown = CONFIDENCE_LEVELS.map(
@@ -1199,6 +1263,15 @@ function provenanceHeadline(e: Engagement, lang: Lang): string[] {
   const en = `**Sources** — ${summary.withSource}/${summary.total} entries carry a source (${pct}%) · ${breakdown} · confidence unset ${summary.byConfidence.unset}`;
   const line = lang === 'ja' ? ja : lang === 'en' ? en : `${ja}\n${en}`;
   const out = [line];
+  // 推測は「書いてある事実」に見えるのが一番危ない。件数を数字で名指しする。
+  const inferred = summary.byConfidence.inferred;
+  if (inferred > 0) {
+    const mark = CONFIDENCE_DEFINITIONS.inferred.marker;
+    const ija = `_この資料には**推測が ${inferred} 件**含まれます(出典欄が \`${mark}\` の行)。相手に確認するまで、確定した事実として引用しないでください。_`;
+    const ien = `_This page contains **${inferred} inferred entries** (rows marked \`${mark}\` in the Source column). Do not quote them as established fact until the client confirms them._`;
+    out.push('');
+    out.push(lang === 'ja' ? ija : lang === 'en' ? ien : `${ija}\n${ien}`);
+  }
   if (summary.withoutSource > 0) {
     const nja = `_出典の無い ${summary.withoutSource} 件は、後から真偽を確かめられません。この 1 枚を配る前に、数字と固有名詞の行だけでも出典を埋めてください。_`;
     const nen = `_The ${summary.withoutSource} entries without a source cannot be checked later. Before handing this page over, fill in at least the rows carrying figures and proper nouns._`;
@@ -1237,6 +1310,8 @@ interface RenderOptions {
   limit: number;
   /** 実際に切ったかどうかを呼び出し元に返すための記録 */
   trim: TrimTracker;
+  /** 出典の描画状態(1 回の描画で共有する。凡例の 1 回きり判定もここ) */
+  prov: ProvenanceView;
 }
 
 /**
@@ -1278,10 +1353,14 @@ function roadmapSection(e: Engagement, lang: Lang, opts: RenderOptions): string[
   const out: string[] = [];
   out.push(`## ${label(L.roadmap, lang)}`);
   out.push('');
+  // ロードマップは投資判断の根拠になる表。どの行が推測で置かれているかが
+  // ここに出ていないと、確認していない時期・金額がそのまま計画として通る。
+  const prov = opts.prov;
+  const columns = withSourceColumn(7, prov);
   out.push(
-    `| ${label(L.quarter, lang)} | ${label(L.title, lang)} | ${label(L.status, lang)} | ${label(L.owner, lang)} | ${label(L.businessValue, lang)} | ${label(L.effort, lang)} | ${label(L.note, lang)} |`,
+    `| ${label(L.quarter, lang)} | ${label(L.title, lang)} | ${label(L.status, lang)} | ${label(L.owner, lang)} | ${label(L.businessValue, lang)} | ${label(L.effort, lang)} | ${label(L.note, lang)} |${sourceHead(lang, prov)}`,
   );
-  out.push('| --- | --- | :-: | --- | :-: | :-: | --- |');
+  out.push(`| --- | --- | :-: | --- | :-: | :-: | --- |${sourceAlign(prov)}`);
 
   const wpRow = (w: WorkPackage, nested: boolean): string => {
     const cells = [
@@ -1293,7 +1372,7 @@ function roadmapSection(e: Engagement, lang: Lang, opts: RenderOptions): string[
       labelOf(PRIORITY_LABEL, w.effort, lang),
       workPackageNote(w, lang, nameOf),
     ];
-    return `| ${cells.join(' | ')} |`;
+    return `| ${cells.join(' | ')} |${sourceOf(w, lang, prov)}`;
   };
 
   const warnings: string[] = [];
@@ -1309,23 +1388,24 @@ function roadmapSection(e: Engagement, lang: Lang, opts: RenderOptions): string[
       '',
       transitionNote(t, lang),
     ];
-    out.push(`| ${cells.join(' | ')} |`);
+    out.push(`| ${cells.join(' | ')} |${sourceOf(t, lang, prov)}`);
     const members = take((grouped.get(t.id) ?? []).sort(byStart), opts.compact, opts.limit, opts.trim);
     for (const w of members.rows) out.push(wpRow(w, true));
-    if (members.hidden > 0) out.push(moreRow(members, 7, lang));
+    if (members.hidden > 0) out.push(moreRow(members, columns, lang));
     warnings.push(...transitionWarnings(t, lang));
   }
 
   if (unassigned.length > 0) {
     if (transitions.length > 0) {
-      out.push(`|  | **${label(M.unassigned, lang)}** |  |  |  |  |  |`);
+      out.push(`|  | **${label(M.unassigned, lang)}** |  |  |  |  |  |${prov.on ? '  |' : ''}`);
     }
     const orphans = take([...unassigned].sort(byStart), opts.compact, opts.limit, opts.trim);
     for (const w of orphans.rows) out.push(wpRow(w, transitions.length > 0));
-    if (orphans.hidden > 0) out.push(moreRow(orphans, 7, lang));
+    if (orphans.hidden > 0) out.push(moreRow(orphans, columns, lang));
   }
 
   out.push('');
+  out.push(...legendOnce(lang, prov));
   if (transitions.length > 0 && !opts.compact) {
     // 表の読み方(移行状態の行の「状態」欄は進捗ではなく単独稼働の可否)を添える
     out.push(`_${label(M.transitionLegend, lang)}_`);
@@ -1388,17 +1468,30 @@ function assessmentBlock(a: Assessment, lang: Lang, opts: RenderOptions): string
   out.push('');
   const meta = [`${label(M.scale, lang)}: 1–${scale}`];
   if (a.assessedAt) meta.push(`${label(M.assessedAt, lang)}: ${a.assessedAt.slice(0, 10)}`);
+  // 因子ごとの出典。評価は「評価そのもの」と「因子 1 件ずつ」の 2 段で出典を持てる。
+  // 因子側だけに出典があるとき、評価の出典だけを見せると「? 出所未記入」になり、
+  // 実際には原文を指せる点数が「出所不明の点数」に見えてしまう。
+  const factorProv = allFactors.some((f) => hasProvenance(f) || Boolean(f.confidence));
+  const showFactorSource = opts.prov.on && factorProv;
+  // 成熟度の点数は「誰がどこで付けたのか」が消えると、次の四半期に比較できなくなる
+  if (opts.prov.on) {
+    const own = `${label(M.source, lang)}: ${sourceCell(a, lang)}`;
+    meta.push(showFactorSource ? `${own}(${label(M.factorSource, lang)})` : own);
+  }
   out.push(`_${meta.join(' | ')}_`);
   out.push('');
+  out.push(...legendOnce(lang, opts.prov));
 
   if (allFactors.length > 0) {
     const withNote = allFactors.some((f) => Boolean(f.note));
     const noteHead = withNote ? ` ${label(L.note, lang)} |` : '';
     const noteAlign = withNote ? ' --- |' : '';
+    const srcHead = showFactorSource ? ` ${label(M.source, lang)} |` : '';
+    const srcAlign = showFactorSource ? ' --- |' : '';
     out.push(
-      `| ${label(L.factor, lang)} | ${label(L.current, lang)} | ${label(L.target, lang)} | ${label(L.gap, lang)} |${noteHead}`,
+      `| ${label(L.factor, lang)} | ${label(L.current, lang)} | ${label(L.target, lang)} | ${label(L.gap, lang)} |${noteHead}${srcHead}`,
     );
-    out.push(`| --- | --- | --- | :-: |${noteAlign}`);
+    out.push(`| --- | --- | --- | :-: |${noteAlign}${srcAlign}`);
     const bar = (value: number): string => {
       const clamped = Math.max(0, Math.min(scale, value));
       return `\`${progressBar((clamped / scale) * 100, 10)}\` ${value}`;
@@ -1412,9 +1505,10 @@ function assessmentBlock(a: Assessment, lang: Lang, opts: RenderOptions): string
       const gap = f.target - f.current;
       const gapCell = gap > 0 ? `+${gap}` : String(gap);
       const note = withNote ? ` ${cell(f.note)} |` : '';
-      out.push(`| ${cell(f.name)} | ${bar(f.current)} | ${bar(f.target)} | ${gapCell} |${note}`);
+      const src = showFactorSource ? ` ${sourceCell(f, lang)} |` : '';
+      out.push(`| ${cell(f.name)} | ${bar(f.current)} | ${bar(f.target)} | ${gapCell} |${note}${src}`);
     }
-    if (shown.hidden > 0) out.push(moreRow(shown, withNote ? 5 : 4, lang));
+    if (shown.hidden > 0) out.push(moreRow(shown, (withNote ? 5 : 4) + (showFactorSource ? 1 : 0), lang));
     if (allFactors.length > 1) {
       // 平均は表示件数ではなく全因子で計算する(絞り込みで数字が変わってはいけない)
       const avg = (pick: (n: { current: number; target: number }) => number): number =>
@@ -1423,8 +1517,9 @@ function assessmentBlock(a: Assessment, lang: Lang, opts: RenderOptions): string
       const target = avg((f) => f.target);
       const gap = Math.round((target - current) * 10) / 10;
       const note = withNote ? ' |' : '';
+      const src = showFactorSource ? ' |' : '';
       out.push(
-        `| **${label(M.average, lang)}** | ${bar(current)} | ${bar(target)} | ${gap > 0 ? `+${gap}` : gap} |${note}`,
+        `| **${label(M.average, lang)}** | ${bar(current)} | ${bar(target)} | ${gap > 0 ? `+${gap}` : gap} |${note}${src}`,
       );
     }
     out.push('');
@@ -1627,7 +1722,10 @@ export function renderDashboardMarkdown(
   // 明示の compact は「印刷 1 枚」用途なので今まで通り 5 件、自動のときは共通の上限に合わせる。
   const limit = explicitLimit ?? (options.compact === true ? 5 : OUTPUT_LIMITS.rows);
   const trim: TrimTracker = { any: false };
-  const opts: RenderOptions = { compact, limit, trim };
+  // 出典の集計は 1 回だけ。見出しのサマリも各表の列も同じ `summarizeProvenance` を見るので、
+  // 「ヘッダの数字と表の中身が合わない」が構造的に起きない。
+  const prov = viewProvenance(e);
+  const opts: RenderOptions = { compact, limit, trim, prov };
   /**
    * 自由記述の欄。絞り込み中は 1 セルの長さも上限で抑える
    * (行数を絞っても 1 行が数百字あると結局 1 枚に収まらない)。切ったことはセル内に残る。
@@ -1707,7 +1805,9 @@ export function renderDashboardMarkdown(
     out.push('');
     // 件数だけを見せると「これだけ積み上がった」で話が終わる。
     // 何件が辿れるのかを同じ高さに並べておく。
-    out.push(...provenanceHeadline(e, lang));
+    out.push(...provenanceHeadline(prov, lang));
+    // 印の読み方は数字のすぐ横に置く。表まで読み進めてから凡例を探させない。
+    out.push(...legendOnce(lang, prov));
   }
 
   // --- ADM フェーズ進捗 ---
@@ -1746,9 +1846,9 @@ export function renderDashboardMarkdown(
       out.push(label(L.none, lang));
     } else {
       out.push(
-        `| ${label(L.name, lang)} | ${label(L.role, lang)} | ${label(L.influence, lang)} | ${label(L.interest, lang)} | ${label(L.concerns, lang)} | ${label(L.approach, lang)} | ${label(M.source, lang)} |`,
+        `| ${label(L.name, lang)} | ${label(L.role, lang)} | ${label(L.influence, lang)} | ${label(L.interest, lang)} | ${label(L.concerns, lang)} | ${label(L.approach, lang)} |${sourceHead(lang, prov)}`,
       );
-      out.push('| --- | --- | :-: | :-: | --- | --- | --- |');
+      out.push(`| --- | --- | :-: | :-: | --- | --- |${sourceAlign(prov)}`);
       // compact では影響力 × 関心度の高い人から見せる(絞るときに落とすのは末端の人)
       const weight = (s: Stakeholder): number => {
         const score: Record<string, number> = { high: 3, medium: 2, low: 1 };
@@ -1758,12 +1858,12 @@ export function renderDashboardMarkdown(
       const shown = take(ordered, compact, limit, trim);
       for (const s of shown.rows) {
         out.push(
-          `| ${longCell(s.name)} | ${longCell([s.role, s.organization].filter(Boolean).join(' / '))} | ${labelOf(INFLUENCE_LABEL, s.influence, lang)} | ${labelOf(INFLUENCE_LABEL, s.interest, lang)} | ${longCell(list(s.concerns).join('; '))} | ${longCell(s.approach)} | ${sourceCell(s, lang)} |`,
+          `| ${longCell(s.name)} | ${longCell([s.role, s.organization].filter(Boolean).join(' / '))} | ${labelOf(INFLUENCE_LABEL, s.influence, lang)} | ${labelOf(INFLUENCE_LABEL, s.interest, lang)} | ${longCell(list(s.concerns).join('; '))} | ${longCell(s.approach)} |${sourceOf(s, lang, prov)}`,
         );
       }
-      if (shown.hidden > 0) out.push(moreRow(shown, 7, lang));
+      if (shown.hidden > 0) out.push(moreRow(shown, withSourceColumn(6, prov), lang));
       out.push('');
-      out.push(sourceLegend(lang));
+      out.push(...legendOnce(lang, prov));
     }
     out.push('');
   }
@@ -1776,21 +1876,21 @@ export function renderDashboardMarkdown(
       out.push(label(L.none, lang));
     } else {
       out.push(
-        `| ${label(L.title, lang)} | ${label(L.level, lang)} | ${label(L.residual, lang)} | ${label(L.status, lang)} | ${label(L.owner, lang)} | ${label(L.mitigation, lang)} | ${label(M.source, lang)} |`,
+        `| ${label(L.title, lang)} | ${label(L.level, lang)} | ${label(L.residual, lang)} | ${label(L.status, lang)} | ${label(L.owner, lang)} | ${label(L.mitigation, lang)} |${sourceHead(lang, prov)}`,
       );
-      out.push('| --- | :-: | :-: | :-: | --- | --- | --- |');
+      out.push(`| --- | :-: | :-: | :-: | --- | --- |${sourceAlign(prov)}`);
       const order: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 };
       const rank = (level: RiskLevel): number => order[level] ?? 9;
       const sorted = [...e.risks].sort((a, b) => rank(a.level) - rank(b.level));
       const shown = take(sorted, compact, limit, trim);
       for (const r of shown.rows) {
         out.push(
-          `| ${longCell(r.title)} | ${labelOf(RISK_LEVEL_LABEL, r.level, lang)} | ${labelOf(RISK_LEVEL_LABEL, r.residualLevel, lang)} | ${labelOf(RISK_STATUS_LABEL, r.status, lang)} | ${longCell(r.owner)} | ${longCell(r.mitigation)} | ${sourceCell(r, lang)} |`,
+          `| ${longCell(r.title)} | ${labelOf(RISK_LEVEL_LABEL, r.level, lang)} | ${labelOf(RISK_LEVEL_LABEL, r.residualLevel, lang)} | ${labelOf(RISK_STATUS_LABEL, r.status, lang)} | ${longCell(r.owner)} | ${longCell(r.mitigation)} |${sourceOf(r, lang, prov)}`,
         );
       }
-      if (shown.hidden > 0) out.push(moreRow(shown, 7, lang));
+      if (shown.hidden > 0) out.push(moreRow(shown, withSourceColumn(6, prov), lang));
       out.push('');
-      out.push(sourceLegend(lang));
+      out.push(...legendOnce(lang, prov));
     }
     out.push('');
   }
@@ -1813,8 +1913,12 @@ export function renderDashboardMarkdown(
         out.push(`- **${label(L.decision, lang)}**: ${longText(d.decision)}`);
         if (d.rationale && !compact) out.push(`- **${label(L.rationale, lang)}**: ${d.rationale}`);
         if (d.decidedBy) out.push(`- **${label(L.decidedBy, lang)}**: ${longText(d.decidedBy)}`);
+        // 決定事項は表ではなく箇条書きなので、列ではなく 1 行として出典を足す。
+        // 「誰がどこで決めたのか」を辿れない決定は、次に覆されたときに理由が残らない。
+        if (prov.on) out.push(`- **${label(M.source, lang)}**: ${sourceCell(d, lang)}`);
         out.push('');
       }
+      out.push(...legendOnce(lang, prov));
       if (shown.hidden > 0) {
         out.push(`_${moreText(shown, lang)}_`);
         out.push('');
@@ -1831,9 +1935,9 @@ export function renderDashboardMarkdown(
       out.push(label(L.none, lang));
     } else {
       out.push(
-        `| ${label(L.title, lang)} | ${label(L.owner, lang)} | ${label(L.due, lang)} | ${label(L.priority, lang)} | ${label(L.status, lang)} |`,
+        `| ${label(L.title, lang)} | ${label(L.owner, lang)} | ${label(L.due, lang)} | ${label(L.priority, lang)} | ${label(L.status, lang)} |${sourceHead(lang, prov)}`,
       );
-      out.push('| --- | --- | --- | :-: | :-: |');
+      out.push(`| --- | --- | --- | :-: | :-: |${sourceAlign(prov)}`);
       const prio: Record<string, number> = { high: 0, medium: 1, low: 2 };
       const rank = (p: Priority): number => prio[p] ?? 9;
       const sorted = [...e.actions].sort(
@@ -1844,10 +1948,12 @@ export function renderDashboardMarkdown(
         // 期限を過ぎた未完了アクションは期限欄に印を付ける
         const due = isOverdue(a, reference) ? `⚠ ${cell(a.due)}` : cell(a.due);
         out.push(
-          `| ${longCell(a.title)} | ${longCell(a.owner)} | ${due} | ${labelOf(PRIORITY_LABEL, a.priority, lang)} | ${labelOf(ACTION_STATUS_LABEL, a.status, lang)} |`,
+          `| ${longCell(a.title)} | ${longCell(a.owner)} | ${due} | ${labelOf(PRIORITY_LABEL, a.priority, lang)} | ${labelOf(ACTION_STATUS_LABEL, a.status, lang)} |${sourceOf(a, lang, prov)}`,
         );
       }
-      if (shown.hidden > 0) out.push(moreRow(shown, 5, lang));
+      if (shown.hidden > 0) out.push(moreRow(shown, withSourceColumn(5, prov), lang));
+      out.push('');
+      out.push(...legendOnce(lang, prov));
     }
     out.push('');
   }
@@ -1860,17 +1966,19 @@ export function renderDashboardMarkdown(
       out.push(label(L.none, lang));
     } else {
       out.push(
-        `| ${label(L.title, lang)} | ${label(L.phase, lang)} | ${label(L.status, lang)} | ${label(L.owner, lang)} | ${label(L.link, lang)} |`,
+        `| ${label(L.title, lang)} | ${label(L.phase, lang)} | ${label(L.status, lang)} | ${label(L.owner, lang)} | ${label(L.link, lang)} |${sourceHead(lang, prov)}`,
       );
-      out.push('| --- | :-: | :-: | --- | --- |');
+      out.push(`| --- | :-: | :-: | --- | --- |${sourceAlign(prov)}`);
       const shown = take(e.deliverables, compact, limit, trim);
       for (const d of shown.rows) {
         const ph = d.phaseId ? findPhase(d.phaseId) : undefined;
         out.push(
-          `| ${longCell(d.name)} | ${ph ? ph.code : ''} | ${labelOf(DELIVERABLE_STATUS_LABEL, d.status, lang)} | ${longCell(d.owner)} | ${longCell(d.link)} |`,
+          `| ${longCell(d.name)} | ${ph ? ph.code : ''} | ${labelOf(DELIVERABLE_STATUS_LABEL, d.status, lang)} | ${longCell(d.owner)} | ${longCell(d.link)} |${sourceOf(d, lang, prov)}`,
         );
       }
-      if (shown.hidden > 0) out.push(moreRow(shown, 5, lang));
+      if (shown.hidden > 0) out.push(moreRow(shown, withSourceColumn(5, prov), lang));
+      out.push('');
+      out.push(...legendOnce(lang, prov));
     }
     out.push('');
   }

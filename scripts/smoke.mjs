@@ -136,11 +136,11 @@ async function main() {
     const tools = list.result?.tools ?? [];
     const names = tools.map((t) => t.name).sort();
     console.log(`  tools: ${names.join(', ')}`);
+    // 参照系は `reference` 1 本に統合済み(of で分野を選ぶ)。個別の list_* / get_* はもう無い。
     const expected = [
-      'check_intake', 'consult', 'generate_deliverable_template', 'get_adm_phase', 'get_dashboard',
-      'get_deliverable', 'get_engagement', 'get_glossary_term', 'get_technique',
-      'list_adm_phases', 'list_deliverables', 'list_techniques', 'mark_intake_done',
-      'open_dashboard', 'open_start',
+      'check_intake', 'consult', 'generate_deliverable_template', 'get_dashboard',
+      'get_engagement', 'mark_intake_done',
+      'open_dashboard', 'open_start', 'reference',
       'search_togaf', 'start_engagement', 'update_engagement',
     ];
     for (const name of expected) {
@@ -150,24 +150,48 @@ async function main() {
 
     // --- 参照系 ---
     console.log('\nreference tools');
-    const phases = await client.call('list_adm_phases', { lang: 'both' });
-    check('list_adm_phases lists ten phases',
+    // `of` の全分野が引けること(enum の値がそのまま知識ベースの目次になっている)
+    const SUBJECTS = [
+      'adm-phase', 'technique', 'deliverable', 'glossary', 'framework',
+      'archimate-layer', 'archimate-element', 'archimate-relationship', 'security-layer',
+    ];
+    for (const of of SUBJECTS) {
+      const listed = await client.call('reference', { of, lang: 'ja' });
+      check(`reference of=${of} lists without an id`, !listed.isError && listed.text.length > 200);
+    }
+
+    const phases = await client.call('reference', { of: 'adm-phase', lang: 'both' });
+    check('reference of=adm-phase lists ten phases',
       ['Preliminary', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'RM']
         .every((code) => phases.text.includes(`| ${code} |`)));
 
-    const phaseA = await client.call('get_adm_phase', { phase: 'A', lang: 'both' });
-    check('get_adm_phase returns Phase A', phaseA.text.includes('Architecture Vision'));
-    check('get_adm_phase is bilingual',
+    const phaseA = await client.call('reference', { of: 'adm-phase', id: 'A', lang: 'both' });
+    check('reference of=adm-phase id=A returns Phase A', phaseA.text.includes('Architecture Vision'));
+    check('reference of=adm-phase is bilingual',
       phaseA.text.includes('アーキテクチャビジョン') && phaseA.text.includes('Architecture Vision'));
 
-    const badPhase = await client.call('get_adm_phase', { phase: 'ZZZ' });
-    check('get_adm_phase reports unknown ids', badPhase.isError);
+    const badPhase = await client.call('reference', { of: 'adm-phase', id: 'ZZZ' });
+    check('reference reports unknown ids', badPhase.isError);
 
-    const technique = await client.call('get_technique', { technique: 'gap-analysis', lang: 'ja' });
-    check('get_technique returns gap analysis', technique.text.includes('ギャップ分析'));
+    const badSubject = await client.call('reference', { of: 'not-a-subject' });
+    check('reference rejects an unknown of', badSubject.isError);
 
-    const deliverable = await client.call('get_deliverable', { deliverable: 'architecture-vision', lang: 'en' });
-    check('get_deliverable returns the vision', deliverable.text.includes('Architecture Vision'));
+    const technique = await client.call('reference', { of: 'technique', id: 'gap-analysis', lang: 'ja' });
+    check('reference of=technique returns gap analysis', technique.text.includes('ギャップ分析'));
+
+    const allTechniques = await client.call('reference', { of: 'technique', lang: 'ja' });
+    const techniquesInB = await client.call('reference', { of: 'technique', within: 'b', lang: 'ja' });
+    const countHeadings = (t) => (t.match(/^## /gm) ?? []).length;
+    check('reference of=technique within=b narrows the list',
+      !techniquesInB.isError
+      && countHeadings(techniquesInB.text) > 0
+      && countHeadings(techniquesInB.text) < countHeadings(allTechniques.text));
+
+    const deliverable = await client.call('reference', { of: 'deliverable', id: 'architecture-vision', lang: 'en' });
+    check('reference of=deliverable returns the vision', deliverable.text.includes('Architecture Vision'));
+
+    const framework = await client.call('reference', { of: 'framework', id: 'BIZBOK', lang: 'ja' });
+    check('reference of=framework returns BIZBOK', !framework.isError && framework.text.includes('BIZBOK'));
 
     const search = await client.call('search_togaf', { query: 'ギャップ', limit: 5 });
     check('search_togaf finds Japanese terms', search.text.includes('gap-analysis'));
@@ -175,8 +199,8 @@ async function main() {
     const searchEn = await client.call('search_togaf', { query: 'roadmap', limit: 5 });
     check('search_togaf finds English terms', searchEn.text.includes('architecture-roadmap'));
 
-    const term = await client.call('get_glossary_term', { term: 'abb', lang: 'both' });
-    check('get_glossary_term returns ABB', term.text.includes('ABB'));
+    const term = await client.call('reference', { of: 'glossary', id: 'abb', lang: 'both' });
+    check('reference of=glossary returns ABB', term.text.includes('ABB'));
 
     const template = await client.call('generate_deliverable_template', {
       deliverable: 'architecture-vision',
@@ -383,21 +407,21 @@ async function main() {
 
     // --- ArchiMate ---
     console.log('\narchimate');
-    const layers = await client.call('list_archimate_layers', { lang: 'both' });
-    check('list_archimate_layers lists layers', layers.text.length > 0);
+    const layers = await client.call('reference', { of: 'archimate-layer', lang: 'both' });
+    check('reference of=archimate-layer lists layers', !layers.isError && layers.text.length > 0);
 
     const mapped = await client.call('map_togaf_to_archimate', { phase: 'b', lang: 'ja' });
     check('map_togaf_to_archimate maps phase B', !mapped.isError && mapped.text.length > 0);
 
-    const elements = await client.call('list_archimate_elements', { layer: 'business', lang: 'ja' });
-    check('list_archimate_elements lists a layer', !elements.isError && elements.text.length > 0);
+    const elements = await client.call('reference', { of: 'archimate-element', within: 'business', lang: 'ja' });
+    check('reference of=archimate-element within=business lists a layer', !elements.isError && elements.text.length > 0);
 
-    const oneElement = await client.call('get_archimate_element', { element: 'business-process', lang: 'both' });
-    check('get_archimate_element explains an element', oneElement.text.includes('Business Process'));
-    check('get_archimate_element warns about confusion', oneElement.text.length > 200);
+    const oneElement = await client.call('reference', { of: 'archimate-element', id: 'business-process', lang: 'both' });
+    check('reference of=archimate-element explains an element', oneElement.text.includes('Business Process'));
+    check('reference of=archimate-element warns about confusion', oneElement.text.length > 200);
 
-    const relations = await client.call('list_archimate_relationships', { lang: 'ja' });
-    check('list_archimate_relationships teaches realization as concrete to abstract',
+    const relations = await client.call('reference', { of: 'archimate-relationship', lang: 'ja' });
+    check('reference of=archimate-relationship teaches realization as concrete to abstract',
       relations.text.includes('具体') && relations.text.includes('抽象'));
 
     const relation = await client.call('validate_archimate_relationship', {

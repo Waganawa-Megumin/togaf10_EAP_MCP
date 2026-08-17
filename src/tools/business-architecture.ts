@@ -1967,8 +1967,8 @@ export function registerBusinessArchitectureTools(server: McpServer): void {
         out.push('');
         out.push(
           msg(
-            'ADM 上の位置づけを確認するなら `get_adm_phase`(id: `b`)、成果物の雛形が要るなら `generate_deliverable_template`(id: `business-capability-map`)。',
-            'For the ADM context call `get_adm_phase` (id `b`); for a document skeleton call `generate_deliverable_template` (id `business-capability-map`).',
+            'ADM 上の位置づけを確認するなら `reference`(`of: "adm-phase", id: "b"`)、成果物の雛形が要るなら `generate_deliverable_template`(id: `business-capability-map`)。',
+            'For the ADM context call `reference` (`of: "adm-phase", id: "b"`); for a document skeleton call `generate_deliverable_template` (id `business-capability-map`).',
             l,
           ),
         );

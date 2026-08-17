@@ -19,7 +19,7 @@ import {
   type Framework,
   type FrameworkCategory,
 } from '../knowledge/frameworks.js';
-import { errorResult, langSchema, msg, textResult } from './common.js';
+import { errorResult, langSchema, msg, textResult, type ToolResult } from './common.js';
 
 // ---------------------------------------------------------------- 小さな道具
 
@@ -180,176 +180,167 @@ function scoreFrameworks(need: string, phaseId: string | undefined, limit: numbe
   return [...keywordHits, ...hintHits.slice(0, 2)].slice(0, limit);
 }
 
-// ------------------------------------------------------------------ ツール群
+// ------------------------------------------------- 参照系レンダラ(reference から呼ばれる)
 
-export function registerFrameworkTools(server: McpServer): void {
-  server.registerTool(
-    'list_frameworks',
-    {
-      title: 'List adjacent frameworks',
-      description:
-        'TOGAF と併用する周辺フレームワーク(ArchiMate / BIZBOK / C4 / Wardley / BPMN / ITIL / NIST CSF など)を分類別に一覧。 / List the frameworks worth pairing with TOGAF, grouped by category.',
-      inputSchema: {
-        category: z
-          .enum(['modeling', 'method', 'business-architecture', 'delivery', 'operations', 'governance', 'domain'])
-          .optional()
-          .describe('分類で絞り込む / Filter by category'),
-        phase: z.string().optional().describe('ADM フェーズ ID で絞り込む / Filter by ADM phase id'),
-        lang: langSchema,
-      },
-    },
-    async ({ category, phase, lang }) => {
-      try {
-        const l = lang as Lang;
-        let items = FRAMEWORKS;
+/**
+ * フレームワーク・カタログの一覧。
+ *
+ * かつての list_frameworks の本体。統合ツール `reference`(`of: "framework"`)から
+ * 呼ばれる。出力の中身は当時のまま(削っていない)。
+ */
+export function renderFrameworkList(opts: {
+  category?: FrameworkCategory;
+  phase?: string;
+  lang: Lang;
+}): ToolResult {
+  const { category, phase } = opts;
+  try {
+    const l = opts.lang;
+    let items = FRAMEWORKS;
 
-        if (category) items = items.filter((f) => f.category === category);
-        if (phase) {
-          const p = findPhase(phase);
-          if (!p) {
-            return errorResult(
-              msg(`フェーズ「${phase}」が見つかりません。`, `Phase "${phase}" not found.`, l),
-            );
-          }
-          const inPhase = new Set(frameworksForPhase(p.id).map((f) => f.id));
-          items = items.filter((f) => inPhase.has(f.id));
-        }
-
-        const lines: string[] = [];
-        lines.push(msg('# 周辺フレームワーク・カタログ', '# Adjacent framework catalogue', l));
-        lines.push('');
-        lines.push(
-          msg(
-            'TOGAF は「進め方」を決める道具。記法・見積り・運用の具体は外から持ってくる。',
-            'TOGAF decides how you proceed. Notation, sizing, and operations come from outside it.',
-            l,
-          ),
+    if (category) items = items.filter((f) => f.category === category);
+    if (phase) {
+      const p = findPhase(phase);
+      if (!p) {
+        return errorResult(
+          msg(`フェーズ「${phase}」が見つかりません。`, `Phase "${phase}" not found.`, l),
         );
-        lines.push('');
-
-        if (items.length === 0) {
-          const covered = Array.from(new Set(FRAMEWORKS.flatMap((f) => f.phaseIds))).sort(
-            (a, b) => (findPhase(a)?.order ?? 99) - (findPhase(b)?.order ?? 99),
-          );
-          lines.push(msg('**該当なし。**', '**No matching frameworks.**', l));
-          lines.push('');
-          lines.push(
-            msg(
-              `この条件では併用すべき道具は無い。ADM の技法だけで進めてよい。カタログが道具を挙げているフェーズは ${phaseCodes(covered)}。分類を外す・別のフェーズを指定して再実行するか、やりたいことを文章で \`recommend_frameworks\` に渡す方が早い。`,
-              `Nothing to pair under these filters — the ADM's own techniques are enough. The phases this catalogue does cover are ${phaseCodes(covered)}. Re-run without the category filter or with another phase, or describe the goal to \`recommend_frameworks\` instead.`,
-              l,
-            ),
-          );
-          return textResult(lines.join('\n'));
-        }
-
-        for (const cat of FRAMEWORK_CATEGORIES) {
-          const group = items.filter((f) => f.category === cat);
-          if (group.length === 0) continue;
-          lines.push(`## ${categoryLabel(cat, l)}`);
-          lines.push('');
-          lines.push(
-            `| ID | ${label('名称', 'Name', l)} | ${label('策定主体', 'Owner', l)} | ${label('併用フェーズ', 'ADM phases', l)} | ${label('何をする道具か', 'What it is for', l)} |`,
-          );
-          lines.push('| --- | --- | --- | :-: | --- |');
-          for (const f of group) {
-            lines.push(
-              `| \`${f.id}\` | ${cell(nameOf(f, l))} | ${cell(text(f.owner, l))} | ${phaseCodes(f.phaseIds)} | ${cell(oneLiner(f.summary, l))} |`,
-            );
-          }
-          lines.push('');
-        }
-
-        lines.push('---');
-        lines.push('');
-        lines.push(
-          msg(
-            `収録 ${items.length} 件。詳細は \`get_framework\`、目的から選ぶなら \`recommend_frameworks\`、TOGAF との棲み分けは \`compare_with_togaf\` を使う。`,
-            `${items.length} entries. Use \`get_framework\` for details, \`recommend_frameworks\` to pick by goal, and \`compare_with_togaf\` for the split of responsibilities.`,
-            l,
-          ),
-        );
-        return textResult(lines.join('\n'));
-      } catch (e) {
-        return toError(e, lang as Lang);
       }
-    },
-  );
+      const inPhase = new Set(frameworksForPhase(p.id).map((f) => f.id));
+      items = items.filter((f) => inPhase.has(f.id));
+    }
 
-  server.registerTool(
-    'get_framework',
-    {
-      title: 'Get an adjacent framework',
-      description:
-        'フレームワーク 1 件の概要・TOGAF より得意なこと・限界・ADM との組み合わせ方・入手性を返す。 / Return summary, strengths over TOGAF, honest limits, how to combine it with the ADM, and availability.',
-      inputSchema: {
-        framework: z.string().min(1).describe('フレームワーク ID または名称。例 "BIZBOK" / Framework id or name'),
-        lang: langSchema,
-      },
-    },
-    async ({ framework, lang }) => {
-      try {
-        const l = lang as Lang;
-        const f = findFramework(framework);
-        if (!f) return notFound(framework, l);
+    const lines: string[] = [];
+    lines.push(msg('# 周辺フレームワーク・カタログ', '# Adjacent framework catalogue', l));
+    lines.push('');
+    lines.push(
+      msg(
+        'TOGAF は「進め方」を決める道具。記法・見積り・運用の具体は外から持ってくる。',
+        'TOGAF decides how you proceed. Notation, sizing, and operations come from outside it.',
+        l,
+      ),
+    );
+    lines.push('');
 
-        const lines: string[] = [];
+    if (items.length === 0) {
+      const covered = Array.from(new Set(FRAMEWORKS.flatMap((f) => f.phaseIds))).sort(
+        (a, b) => (findPhase(a)?.order ?? 99) - (findPhase(b)?.order ?? 99),
+      );
+      lines.push(msg('**該当なし。**', '**No matching frameworks.**', l));
+      lines.push('');
+      lines.push(
+        msg(
+          `この条件では併用すべき道具は無い。ADM の技法だけで進めてよい。カタログが道具を挙げているフェーズは ${phaseCodes(covered)}。分類を外す・別のフェーズを指定して再実行するか、やりたいことを文章で \`recommend_frameworks\` に渡す方が早い。`,
+          `Nothing to pair under these filters — the ADM's own techniques are enough. The phases this catalogue does cover are ${phaseCodes(covered)}. Re-run without the category filter or with another phase, or describe the goal to \`recommend_frameworks\` instead.`,
+          l,
+        ),
+      );
+      return textResult(lines.join('\n'));
+    }
+
+    for (const cat of FRAMEWORK_CATEGORIES) {
+      const group = items.filter((f) => f.category === cat);
+      if (group.length === 0) continue;
+      lines.push(`## ${categoryLabel(cat, l)}`);
+      lines.push('');
+      lines.push(
+        `| ID | ${label('名称', 'Name', l)} | ${label('策定主体', 'Owner', l)} | ${label('併用フェーズ', 'ADM phases', l)} | ${label('何をする道具か', 'What it is for', l)} |`,
+      );
+      lines.push('| --- | --- | --- | :-: | --- |');
+      for (const f of group) {
+        lines.push(
+          `| \`${f.id}\` | ${cell(nameOf(f, l))} | ${cell(text(f.owner, l))} | ${phaseCodes(f.phaseIds)} | ${cell(oneLiner(f.summary, l))} |`,
+        );
+      }
+      lines.push('');
+    }
+
+    lines.push('---');
+    lines.push('');
+    lines.push(
+      msg(
+        `収録 ${items.length} 件。詳細は \`reference\`(\`of: "framework", id: "<ID>"\`)、目的から選ぶなら \`recommend_frameworks\`、TOGAF との棲み分けは \`compare_with_togaf\` を使う。`,
+        `${items.length} entries. Use \`reference\` (\`of: "framework", id: "<id>"\`) for details, \`recommend_frameworks\` to pick by goal, and \`compare_with_togaf\` for the split of responsibilities.`,
+        l,
+      ),
+    );
+    return textResult(lines.join('\n'));
+  } catch (e) {
+    return toError(e, opts.lang);
+  }
+}
+
+/**
+ * フレームワーク 1 件の詳細。
+ *
+ * かつての get_framework の本体。統合ツール `reference`(`of: "framework"`)から
+ * 呼ばれる。出力の中身は当時のまま。
+ */
+export function renderFrameworkDetail(framework: string, lang: Lang): ToolResult {
+  try {
+    const l = lang;
+    const f = findFramework(framework);
+    if (!f) return notFound(framework, l);
+
+    const lines: string[] = [];
         lines.push(`# ${nameOf(f, l)} — \`${f.id}\``);
         lines.push('');
         lines.push(`| ${label('項目', 'Item', l)} | ${label('内容', 'Value', l)} |`);
         lines.push('| --- | --- |');
         lines.push(`| ${label('分類', 'Category', l)} | ${cell(categoryLabel(f.category, l))} |`);
-        lines.push(`| ${label('策定・管理主体', 'Owner', l)} | ${cell(text(f.owner, l))} |`);
-        lines.push(`| ${label('併用が効く ADM フェーズ', 'ADM phases', l)} | ${phaseCodes(f.phaseIds)} |`);
-        lines.push(`| ${label('入手性・ライセンス', 'Availability', l)} | ${cell(text(f.availability, l))} |`);
-        lines.push('');
+    lines.push(`| ${label('策定・管理主体', 'Owner', l)} | ${cell(text(f.owner, l))} |`);
+    lines.push(`| ${label('併用が効く ADM フェーズ', 'ADM phases', l)} | ${phaseCodes(f.phaseIds)} |`);
+    lines.push(`| ${label('入手性・ライセンス', 'Availability', l)} | ${cell(text(f.availability, l))} |`);
+    lines.push('');
 
-        lines.push(`## ${msg('何をする道具か', 'What it is for', l)}`);
-        lines.push('');
-        lines.push(text(f.summary, l === 'both' ? 'ja' : l));
-        if (l === 'both') {
-          lines.push('');
-          lines.push(f.summary.en);
-        }
-        lines.push('');
+    lines.push(`## ${msg('何をする道具か', 'What it is for', l)}`);
+    lines.push('');
+    lines.push(text(f.summary, l === 'both' ? 'ja' : l));
+    if (l === 'both') {
+      lines.push('');
+      lines.push(f.summary.en);
+    }
+    lines.push('');
 
-        lines.push(`## ${msg('TOGAF より得意なこと', 'Where it beats TOGAF', l)}`);
-        lines.push('');
-        for (const s of f.strengths) lines.push(`- ${text(s, l)}`);
-        lines.push('');
+    lines.push(`## ${msg('TOGAF より得意なこと', 'Where it beats TOGAF', l)}`);
+    lines.push('');
+    for (const s of f.strengths) lines.push(`- ${text(s, l)}`);
+    lines.push('');
 
-        lines.push(`## ${msg('限界・使わない方がよい場面', 'Limits and when not to use it', l)}`);
-        lines.push('');
-        for (const s of f.limits) lines.push(`- ${text(s, l)}`);
-        lines.push('');
+    lines.push(`## ${msg('限界・使わない方がよい場面', 'Limits and when not to use it', l)}`);
+    lines.push('');
+    for (const s of f.limits) lines.push(`- ${text(s, l)}`);
+    lines.push('');
 
-        lines.push(`## ${msg('ADM との組み合わせ方', 'How to combine it with the ADM', l)}`);
-        lines.push('');
-        lines.push(text(f.combineWithAdm, l === 'both' ? 'ja' : l));
-        if (l === 'both') {
-          lines.push('');
-          lines.push(f.combineWithAdm.en);
-        }
-        lines.push('');
-        lines.push(...phaseLines(f.phaseIds, l));
-        lines.push('');
+    lines.push(`## ${msg('ADM との組み合わせ方', 'How to combine it with the ADM', l)}`);
+    lines.push('');
+    lines.push(text(f.combineWithAdm, l === 'both' ? 'ja' : l));
+    if (l === 'both') {
+      lines.push('');
+      lines.push(f.combineWithAdm.en);
+    }
+    lines.push('');
+    lines.push(...phaseLines(f.phaseIds, l));
+    lines.push('');
 
-        lines.push('---');
-        lines.push('');
-        lines.push(
-          msg(
-            `次の一手: \`compare_with_togaf\` に \`${f.id}\` を渡すと棲み分け表が出る。フェーズ側の詳細は \`get_adm_phase\`。`,
-            `Next: pass \`${f.id}\` to \`compare_with_togaf\` for the side-by-side split, and use \`get_adm_phase\` for the phase itself.`,
-            l,
-          ),
-        );
-        return textResult(lines.join('\n'));
-      } catch (e) {
-        return toError(e, lang as Lang);
-      }
-    },
-  );
+    lines.push('---');
+    lines.push('');
+    lines.push(
+      msg(
+        `次の一手: \`compare_with_togaf\` に \`${f.id}\` を渡すと棲み分け表が出る。フェーズ側の詳細は \`reference\`(\`of: "adm-phase"\`)。`,
+        `Next: pass \`${f.id}\` to \`compare_with_togaf\` for the side-by-side split, and use \`reference\` (\`of: "adm-phase"\`) for the phase itself.`,
+        l,
+      ),
+    );
+    return textResult(lines.join('\n'));
+  } catch (e) {
+    return toError(e, lang);
+  }
+}
 
+// ------------------------------------------------------------------ ツール群
+
+export function registerFrameworkTools(server: McpServer): void {
   server.registerTool(
     'recommend_frameworks',
     {
@@ -409,7 +400,7 @@ export function registerFrameworkTools(server: McpServer): void {
           lines.push(`- **${anchor.code}** \`${anchor.id}\` — ${text(anchor.name, l)}`);
           lines.push(`  - ${text(anchor.tagline, l)}`);
           lines.push(
-            `  - ${msg(`手順は \`get_adm_phase\` に \`${anchor.id}\` を渡す。`, `Run \`get_adm_phase\` with \`${anchor.id}\` for the steps.`, l)}`,
+            `  - ${msg(`手順は \`reference\` に \`of: "adm-phase", id: "${anchor.id}"\` を渡す。`, `Run \`reference\` with \`of: "adm-phase", id: "${anchor.id}"\` for the steps.`, l)}`,
           );
         } else {
           lines.push(
@@ -436,8 +427,8 @@ export function registerFrameworkTools(server: McpServer): void {
           lines.push('');
           lines.push(
             msg(
-              '- `search_togaf` でフェーズ・技法・成果物を横断検索する\n- `list_techniques` に該当フェーズを渡して技法を絞る\n- 道具を増やす前に、まず成果物の雛形(`generate_deliverable_template`)で書き始める方が早い',
-              '- Use `search_togaf` across phases, techniques, and deliverables\n- Pass the phase to `list_techniques` to narrow the technique\n- Before adding a tool, start writing: `generate_deliverable_template` is usually faster',
+              '- `search_togaf` でフェーズ・技法・成果物を横断検索する\n- `reference` に `of: "technique", within: "<フェーズ ID>"` を渡して技法を絞る\n- 道具を増やす前に、まず成果物の雛形(`generate_deliverable_template`)で書き始める方が早い',
+              '- Use `search_togaf` across phases, techniques, and deliverables\n- Call `reference` with `of: "technique", within: "<phase id>"` to narrow the technique\n- Before adding a tool, start writing: `generate_deliverable_template` is usually faster',
               l,
             ),
           );
@@ -474,8 +465,8 @@ export function registerFrameworkTools(server: McpServer): void {
         lines.push('');
         lines.push(
           msg(
-            '道具は増やすほど維持コストが上がる。上の 1 位だけ導入し、足りないと分かってから 2 位を足すこと。詳細は `get_framework`、TOGAF との棲み分けは `compare_with_togaf`。',
-            'Every added tool costs maintenance. Adopt the top entry only, and add the second once you can name what is missing. Use `get_framework` for detail and `compare_with_togaf` for the split.',
+            '道具は増やすほど維持コストが上がる。上の 1 位だけ導入し、足りないと分かってから 2 位を足すこと。詳細は `reference`(`of: "framework", id: "<ID>"`)、TOGAF との棲み分けは `compare_with_togaf`。',
+            'Every added tool costs maintenance. Adopt the top entry only, and add the second once you can name what is missing. Use `reference` (`of: "framework", id: "<id>"`) for detail and `compare_with_togaf` for the split.',
             l,
           ),
         );
@@ -504,8 +495,8 @@ export function registerFrameworkTools(server: McpServer): void {
         if (!f) return notFound(framework, l);
 
         const fallback: Bilingual = {
-          ja: '(この道具については未整理。`get_framework` の本文を参照)',
-          en: '(not tabulated for this tool; see the body of `get_framework`)',
+          ja: '(この道具については未整理。`reference` の `of: "framework"` の本文を参照)',
+          en: '(not tabulated for this tool; see the body of `reference` with `of: "framework"`)',
         };
         const granularity = f.comparison?.granularity ?? fallback;
         const artifacts = f.comparison?.artifacts ?? fallback;

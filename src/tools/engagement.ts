@@ -12,6 +12,7 @@ import {
   DECISION_STATUSES,
   DELIVERABLE_STATUSES,
   EngagementInputError,
+  EngagementValueError,
   INFLUENCE_LEVELS,
   OUTPUT_LIMITS,
   PHASE_STATUSES,
@@ -27,11 +28,13 @@ import {
   capRows,
   checkProvenance,
   createEngagement,
+  NO_SOURCE_LABEL,
+  NO_SOURCE_MARK,
   hasProvenance,
   makeId,
   mergeProvenance,
   now,
-  provenanceCell,
+  sourceCell,
   summarizeProgress,
   summarizeProvenance,
   type Action,
@@ -92,8 +95,8 @@ export const ID_HINT: Bilingual = {
 };
 
 export const PHASE_HINT: Bilingual = {
-  ja: 'フェーズは短い ID(a〜h など)で指定します。`list_adm_phases` で一覧を確認してください。',
-  en: 'A phase is given as a short id (a to h); list them with `list_adm_phases`.',
+  ja: 'フェーズは短い ID(a〜h など)で指定します。一覧は `reference` に `of: "adm-phase"` を渡すと出ます。',
+  en: 'A phase is given as a short id (a to h); list them by calling `reference` with `of: "adm-phase"`.',
 };
 
 export const QUARTER_HINT: Bilingual = {
@@ -202,16 +205,29 @@ export function runChecks(checks: (() => string | null)[]): string | null {
  */
 export function limitErrorResult(problem: string, lang: Lang): ToolResult {
   return errorResult(
+    // 「長さを直して」とは書かない。この経路には出典・確度の矛盾など長さと無関係な指摘も乗る。
+    // 実測: stated なのに出典が空という指摘の直後に「長さを直して」と出ていた。
     `${problem}\n\n${msg(
-      'この呼び出しでは何も保存していません。長さを直してもう一度同じ内容を渡してください。',
-      'Nothing was saved by this call. Shorten the field and send the same request again.',
+      'この呼び出しでは何も保存していません。上の指摘を直して、もう一度同じ内容を渡してください。',
+      'Nothing was saved by this call. Fix the point above and send the same request again.',
       lang,
     )}`,
   );
 }
 
-/** 想定外の例外をツールのエラー応答に整える(ハンドラから例外を投げないための最後の受け皿) */
+/**
+ * 想定外の例外をツールのエラー応答に整える(ハンドラから例外を投げないための最後の受け皿)。
+ *
+ * ただし `EngagementValueError` は**想定内**の入力の誤りなので、ここで別扱いにする。
+ * 実測: 既存項目に `confidence:"stated"` だけを渡すと(出典は付いていない)、
+ * この受け皿まで飛んで「想定外のエラーが発生しました」+ 英語だけの本文 +
+ * 「保存内容は変わっていない可能性が高い」と出ていた。実際には値を検査して
+ * **確実に何も保存していない**ので、利用者に現状確認をさせる理由が無い。
+ */
 export function unexpectedErrorResult(tool: string, error: unknown, lang: Lang): ToolResult {
+  if (error instanceof EngagementValueError) {
+    return limitErrorResult(`${error.field}: ${msg(error.detail.ja, error.detail.en, lang)}`, lang);
+  }
   const detail = capCell(error instanceof Error ? error.message : String(error), 200);
   return errorResult(
     msg(
@@ -250,10 +266,13 @@ function resolvePhaseId(value: string | undefined): string | undefined {
  * (risks / decisions / actions / stakeholders / deliverables)に複製されるので、
  * ここで 1 文字増やすと tools/list は 5 文字増える。詳しい約束事は
  * `update_engagement` のツール説明に 1 回だけ書く。
+ *
+ * 英語側に例を再掲しない。例はファイル名・ページ番号でほぼラテン文字なので、
+ * 日本語側の 1 組をそのまま読める(再掲は 5 か所ぶん重複するだけだった)。
  */
 export const SOURCE_DESC =
   '出典。例 "csr2026.pdf p.17 図3" / "2026-08-14 ヒアリング(情シス部長)"' +
-  ' / Where it came from, e.g. "csr2026.pdf p.17 fig.3"';
+  ' / Where it came from';
 
 /**
  * `confidence` の説明文。**省略時に何が起きるか**をここで約束する。
@@ -323,7 +342,9 @@ export function renderProvenanceSection(engagement: Engagement, touched: Touched
   if (touched.length > 0) {
     out.push(
       `- ${msg(
-        `この呼び出しで登録・更新: ${touched.length} 件(出典なし ${noSource.length} 件 / 確度未設定 ${noConfidence.length} 件)`,
+        // 語は表・凡例・健全性チェックと揃える(`? 出所未記入`)。同じ状態を
+        // 「出典なし」とここだけ別の語で呼ぶと、凡例に載っていない語が最初に目に入る。
+        `この呼び出しで登録・更新: ${touched.length} 件(${NO_SOURCE_MARK} ${NO_SOURCE_LABEL.ja} ${noSource.length} 件 / 確度未設定 ${noConfidence.length} 件)`,
         `This call touched ${touched.length} entr${touched.length === 1 ? 'y' : 'ies'} (${noSource.length} without a source, ${noConfidence.length} with confidence unset)`,
         l,
       )}`,
@@ -350,7 +371,7 @@ export function renderProvenanceSection(engagement: Engagement, touched: Touched
     `${one === 'ja' ? '未設定' : 'unset'} ${c.unset}`;
   out.push(
     `- ${msg(
-      `台帳全体: ${summary.total} 件中 ${summary.withoutSource} 件に出典なし(${counts('ja')})`,
+      `台帳全体: ${summary.total} 件中 ${summary.withoutSource} 件が ${NO_SOURCE_MARK} ${NO_SOURCE_LABEL.ja}(${counts('ja')})`,
       `Whole ledger: ${summary.withoutSource} of ${summary.total} entries have no source (${counts('en')})`,
       l,
     )}`,
@@ -363,7 +384,9 @@ export function renderProvenanceSection(engagement: Engagement, touched: Touched
     const capped = capRows(touched, OUTPUT_LIMITS.rows);
     for (const t of capped.rows) {
       const label = capCell(t.label, 60).replace(/\|/g, '\\|');
-      out.push(`| ${t.kind} | ${label} \`${t.id}\` | ${provenanceCell(t.entity, l)} |`);
+      // `sourceCell` を使う。`provenanceCell` は出典も確度も無い行に `—` を返すため、
+      // 同じ応答の中でダッシュボードの表は `? 出所未記入`、こちらは `—` と割れていた。
+      out.push(`| ${t.kind} | ${label} \`${t.id}\` | ${sourceCell(t.entity, l)} |`);
     }
     const notice = capNotice(
       capped,
@@ -435,8 +458,8 @@ const riskInput = z.object({
   ...provenanceFields(),
   title: z.string().optional(),
   description: z.string().optional(),
-  level: z.enum(RISK_LEVELS).optional().describe('対策前のリスクレベル'),
-  residualLevel: z.enum(RISK_LEVELS).optional().describe('対策後の残存リスクレベル'),
+  level: z.enum(RISK_LEVELS).optional().describe('対策前 / Before mitigation'),
+  residualLevel: z.enum(RISK_LEVELS).optional().describe('対策後の残存 / Residual'),
   status: z.enum(RISK_STATUSES).optional(),
   owner: z.string().optional(),
   mitigation: z.string().optional(),
@@ -446,10 +469,11 @@ const riskInput = z.object({
 const decisionInput = z.object({
   id: z.string().optional(),
   ...provenanceFields(),
-  title: z.string().optional(),
-  context: z.string().optional().describe('背景・検討した選択肢'),
-  decision: z.string().optional().describe('決定内容'),
-  rationale: z.string().optional().describe('根拠'),
+  // 決定だけは新規登録に 2 欄要る。どちらが欠けても登録されないので、スキーマ側で言っておく
+  title: z.string().optional().describe('見出し(新規は decision と併せて必須) / Title, required with decision for a new entry'),
+  context: z.string().optional().describe('背景・選択肢 / Background, options'),
+  decision: z.string().optional().describe('決定内容(新規は必須) / The decision, required for a new entry'),
+  rationale: z.string().optional().describe('根拠 / Why'),
   status: z.enum(DECISION_STATUSES).optional(),
   decidedBy: z.string().optional(),
   phase: z.string().optional(),
@@ -460,7 +484,7 @@ const actionInput = z.object({
   ...provenanceFields(),
   title: z.string().optional(),
   owner: z.string().optional(),
-  due: z.string().optional().describe('期限 YYYY-MM-DD'),
+  due: z.string().optional().describe('期限 / Due YYYY-MM-DD'),
   status: z.enum(ACTION_STATUSES).optional(),
   priority: z.enum(PRIORITIES).optional(),
   phase: z.string().optional(),
@@ -475,14 +499,14 @@ const stakeholderInput = z.object({
   organization: z.string().optional(),
   influence: z.enum(INFLUENCE_LEVELS).optional(),
   interest: z.enum(INFLUENCE_LEVELS).optional(),
-  concerns: z.array(z.string()).optional().describe('関心事(本人の言葉で)'),
-  approach: z.string().optional().describe('関与方針'),
+  concerns: z.array(z.string()).optional().describe('関心事(本人の言葉で)/ Concerns, verbatim'),
+  approach: z.string().optional().describe('関与方針 / How to engage'),
 });
 
 const deliverableInput = z.object({
   id: z.string().optional(),
   ...provenanceFields(),
-  deliverableId: z.string().optional().describe('知識ベースの成果物 ID(例: architecture-vision)'),
+  deliverableId: z.string().optional().describe('知識ベースの成果物 ID / KB deliverable id, e.g. architecture-vision'),
   name: z.string().optional(),
   status: z.enum(DELIVERABLE_STATUSES).optional(),
   owner: z.string().optional(),
@@ -506,6 +530,8 @@ function upsert<T extends { id: string; updatedAt: string }>(
   changes: ChangeLog,
   kind: string,
   labelOf: (item: T) => string,
+  // 新規追加に要る欄の名前。「必須項目が足りません」だけでは何を足せばよいか分からない
+  required: string,
 ): string | null {
   if (input.id) {
     const found = list.find((x) => x.id === input.id);
@@ -516,7 +542,13 @@ function upsert<T extends { id: string; updatedAt: string }>(
     return null;
   }
   const created = build();
-  if (!created) return `${kind}: 新規追加には必須項目が足りません / missing required field for a new entry`;
+  if (!created) {
+    return (
+      `${kind}: 新規追加には ${required} が要ります(渡されていないので、この項目は登録していません)。` +
+      `既存の項目を直すつもりなら id を渡してください。 / ` +
+      `A new ${kind} needs ${required}; this entry was not created. Pass id instead to update an existing one.`
+    );
+  }
   apply(created);
   list.push(created);
   changes.added.push(`${kind} ${labelOf(created)}`);
@@ -603,7 +635,7 @@ export function registerEngagementTools(server: McpServer): void {
               `confidence は ${CONFIDENCE_DEFINITIONS.stated.marker} stated(原文を指させる) / ` +
               `${CONFIDENCE_DEFINITIONS.inferred.marker} inferred(書かれていないが導いた) / ` +
               `${CONFIDENCE_DEFINITIONS.unknown.marker} unknown(出所が辿れない)の 3 値です。` +
-              `省略すると未設定のまま保存し、応答が「出典なし」として数え続けます。`,
+              `省略すると未設定のまま保存し、応答が ${NO_SOURCE_MARK} ${NO_SOURCE_LABEL.ja} として数え続けます。`,
             `Next: register entries with \`update_engagement\`, and **attach source and confidence as you go.** ` +
               `source says which document and where, or who said it and when (for example "csr2026.pdf p.5", "2026-08-14 interview (Head of IT)"). ` +
               `confidence is one of ${CONFIDENCE_DEFINITIONS.stated.marker} stated (the passage can be pointed at), ` +
@@ -848,6 +880,7 @@ export function registerEngagementTools(server: McpServer): void {
             changes,
             'risk',
             (item) => `"${echo(item.title)}" (\`${item.id}\`)`,
+            'title',
           );
           if (err) problems.push(err);
         }
@@ -881,6 +914,7 @@ export function registerEngagementTools(server: McpServer): void {
             changes,
             'decision',
             (item) => `"${echo(item.title)}" (\`${item.id}\`)`,
+            'title と decision / title and decision',
           );
           if (err) problems.push(err);
         }
@@ -914,6 +948,7 @@ export function registerEngagementTools(server: McpServer): void {
             changes,
             'action',
             (item) => `"${echo(item.title)}" (\`${item.id}\`)`,
+            'title',
           );
           if (err) problems.push(err);
         }
@@ -948,6 +983,7 @@ export function registerEngagementTools(server: McpServer): void {
             changes,
             'stakeholder',
             (item) => `"${echo(item.name)}" (\`${item.id}\`)`,
+            'name',
           );
           if (err) problems.push(err);
         }
@@ -991,6 +1027,7 @@ export function registerEngagementTools(server: McpServer): void {
             changes,
             'deliverable',
             (item) => `"${echo(item.name)}" (\`${item.id}\`)`,
+            'name か deliverableId / name or deliverableId',
           );
           if (err) problems.push(err);
         }

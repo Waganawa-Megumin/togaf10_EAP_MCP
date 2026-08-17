@@ -1175,11 +1175,11 @@ interface Candidate {
 
 /** 拾わなかった / まとめた行。**黙って落とさない**ために必ず持ち回る。 */
 interface Dropped {
-  reason: 'duplicate' | 'placeholder' | 'idOnly' | 'notRisk';
+  reason: 'duplicate' | 'placeholder' | 'idOnly' | 'notRisk' | 'fragment';
   title: string;
   /** 対象の行番号(duplicate は「残した行, 落とした行…」の順) */
   lines: number[];
-  /** notRisk のときの具体的な理由(「集計文である」など) */
+  /** notRisk / fragment のときの具体的な理由(「集計文である」など) */
   detail?: Bilingual;
 }
 
@@ -1621,29 +1621,51 @@ const SYSTEM_NAME_RES: RegExp[] = [
   /\b([A-Z][A-Za-z0-9_.-]*[A-Z0-9][A-Za-z0-9_.-]*)\b/,
 ];
 
-/** 長い行を文に割る */
-function splitSentences(text: string): string[] {
-  const parts: string[] = [];
+/**
+ * 文と、その文が元の文字列のどこから始まるか。
+ *
+ * オフセットを返すのは**出典行番号のため**。折り返しを繋いだあとでも、
+ * 「この文はどの物理行から始まったか」を引けないと、利用者が原文に戻れなくなる。
+ */
+interface SentencePart {
+  text: string;
+  /** 入力文字列内の開始オフセット(UTF-16 単位) */
+  offset: number;
+}
+
+/** 長い行を文に割る(開始オフセット付き) */
+function splitSentenceParts(text: string): SentencePart[] {
+  const raw: SentencePart[] = [];
   let buf = '';
+  let start = 0;
+  let idx = 0;
   for (const ch of text) {
+    if (buf.length === 0) start = idx;
     buf += ch;
+    idx += ch.length;
     if (ch === '。' || ch === '！' || ch === '？' || ch === '；') {
-      parts.push(buf);
+      raw.push({ text: buf, offset: start });
       buf = '';
     }
   }
-  if (buf.length > 0) parts.push(buf);
-  const out: string[] = [];
-  for (const p of parts) {
-    const t = p.trim();
+  if (buf.length > 0) raw.push({ text: buf, offset: start });
+  const out: SentencePart[] = [];
+  for (const p of raw) {
+    const lead = p.text.length - p.text.replace(/^\s+/, '').length;
+    const t = p.text.trim();
     if (t.length === 0) continue;
     if (t.length <= 400) {
-      out.push(t);
+      out.push({ text: t, offset: p.offset + lead });
       continue;
     }
-    for (let i = 0; i < t.length; i += 400) out.push(t.slice(i, i + 400));
+    for (let i = 0; i < t.length; i += 400) out.push({ text: t.slice(i, i + 400), offset: p.offset + lead + i });
   }
   return out;
+}
+
+/** 長い行を文に割る */
+function splitSentences(text: string): string[] {
+  return splitSentenceParts(text).map((p) => p.text);
 }
 
 /** 箇条書き・番号・表の行らしいか(自由文より候補としての確度が高い) */
@@ -1694,15 +1716,238 @@ function textConfidence(sentence: string, structured: boolean, strong: boolean, 
   return bleed ? 'medium' : 'high';
 }
 
+// ---------------------------------------------------------------------------
+// 行の途中から始まる / 途中で終わる断片の検出
+//
+// 実物の PDF 抽出テキスト(32 ページ・10,688 行)で、リスク候補が 272 件出た。
+// 原因は候補の判定条件ではなく **入力の 1 行が文の途中から始まっていること**。
+//   行 686「リティ管理推進者への依頼、督促などを行います。」 ← 前行の「情報セキュ」の続き
+//   行 2985「行政法人情報処理推進機構）」          ← 原文は「(独立行政法人情報処理推進機構)」
+// 1 行を 1 つの文として扱う限り、こうした断片はいくらでも候補になる。
+//
+// 対処は 2 段階。
+//   1) **繋げられるものは繋ぐ** — 折り返しで切れただけの隣接行は 1 つの論理行にする。
+//      出典行番号は繋ぐ前の物理行を保持する(利用者が原文に戻れなくなるため)。
+//   2) **繋げられないものは落とす** — 空行や段組で分断されていて前後関係が復元できない
+//      断片は候補にしない。落とした件数と理由は `dropped` に残して必ず表示する。
+// ---------------------------------------------------------------------------
+
+/** 折り返しを繋いだ論理行 1 本に許す最大文字数 */
+const JOIN_MAX_CHARS = 600;
+/** 1 つの論理行に繋ぐ物理行の上限 */
+const JOIN_MAX_LINES = 8;
+/** 断片とみなす行の割合がこれを超えたら「文が分断された入力」と判定する */
+const FRAGMENT_RATIO_THRESHOLD = 0.5;
+/** 割合で判定するのに必要な最低ブロック数(数行の入力で判定が揺れないように) */
+const FRAGMENT_MIN_BLOCKS = 20;
+
+/**
+ * 文の先頭に来ることがある語。
+ * 助詞と同じ字で始まる接続詞・副詞(「ところが」「もちろん」「できる」)を
+ * 断片扱いにしないための例外。
+ */
+const SENTENCE_INITIAL_RE =
+  /^(?:はじめ|はたして|ところ|とはいえ|ともに|とも[にはな]|とくに|とりわけ|とりあえず|となる|となり|でも|ですが|できる|できれ|できな|できて(?:い|お)|もちろん|もし|もはや|もっと|やはり|やがて|にもかかわらず|には[^\s]|にあたり|において)/;
+
+/**
+ * 行頭が文の途中に見えるパターン。
+ * - 助詞そのもの(「は」「が」「を」…)で始まる
+ * - 活用語尾・接続形(「して」「により」「ており」…)で始まる
+ * - 読点・閉じ括弧で始まる
+ */
+const MID_SENTENCE_HEAD_RE =
+  /^(?:[、。，．・…〜～：:；;）)\]】」』〕》]|[はがをにへとでのもや]|する|して|され|しており|ており|ている|ていた|であ|により|による|における|として|とする|という|ながら|つつ|ました|ません|できず|られ|れる|いま(?:す|し)|いた(?:だ|し)?[。、]?$|ため[、，])/;
+
+/**
+ * 桁揃えの空白を含む行か = 2 段組の左右が 1 行に混ざった痕跡。
+ * `assessInputQuality` の判定と同じ形にしてある(片方だけ緩いと結論がずれる)。
+ */
+function hasColumnPadding(text: string): boolean {
+  if (text.includes('|')) return false;
+  const gaps = text.match(/[ 　]{3,}/g) ?? [];
+  if (gaps.length === 0) return false;
+  return /[ 　]{6,}/.test(text) || gaps.length >= 2;
+}
+
+/** 開き括弧が無いのに閉じ括弧が現れる = 括弧の途中で切れている */
+function hasUnbalancedClose(text: string): boolean {
+  let depth = 0;
+  for (const ch of text) {
+    if ('（(「『【〔[{《〈'.includes(ch)) depth += 1;
+    else if ('）)」』】〕]}》〉'.includes(ch)) {
+      if (depth === 0) return true;
+      depth -= 1;
+    }
+  }
+  return false;
+}
+
+/** 文として閉じている行末か(閉じ括弧や引用符が後ろに付いていてもよい) */
+function endsSentence(text: string): boolean {
+  const t = text.replace(/[\s　]+$/, '');
+  if (t.length === 0) return true;
+  if (/[。．！？!?；;][」』）)】\]"'”’]*$/.test(t)) return true;
+  // 英文の "." は版番号・略語でも出るので、直前が語末のときだけ文末とみなす
+  if (/[A-Za-z0-9”"'）)\]]\s*[.!?]["'”’)\]]*$/.test(t)) return true;
+  // 「責任部門:」のようなラベル行は、次の行と繋がずにそこで切る
+  if (/[:：]$/.test(t)) return true;
+  return false;
+}
+
+/**
+ * 行頭が文の途中か。
+ * 箇条書き記号・見出し番号を落としたうえで判定する(「・は、…」の「・」で誤判定しない)。
+ */
+function startsMidSentence(text: string, structured: boolean): boolean {
+  const body = stripBullet(text).trim();
+  if (body.length === 0) return false;
+  if (SENTENCE_INITIAL_RE.test(body)) return false;
+  if (MID_SENTENCE_HEAD_RE.test(body)) return true;
+  // 「行政法人情報処理推進機構）」— 開き括弧の無い閉じ括弧は、括弧の途中で切れた印
+  if (!structured && hasUnbalancedClose(body)) return true;
+  return false;
+}
+
+/** 折り返しを繋いだ論理行。出典行番号は繋ぐ前の物理行を保持する。 */
+interface LogicalLine {
+  /** 繋いだあとの本文 */
+  text: string;
+  /** 先頭の物理行番号(1 始まり) */
+  line: number;
+  /** text 内の開始オフセット → 物理行番号(文ごとに出典行を引くための対応表) */
+  parts: { offset: number; line: number }[];
+  /** 繋いだ物理行数 */
+  joined: number;
+  /** 先頭の物理行が箇条書き・番号付きか */
+  structured: boolean;
+  /** 見出し行か(章の名前であって中身ではない) */
+  heading: boolean;
+  /** 行頭が文の途中(前の行の続き)に見えるか */
+  midStart: boolean;
+  /** 文が閉じないまま行が終わっているか(次の行に続くはずが繋げられなかった) */
+  openTail: boolean;
+  /** 左右の段が 1 行に混ざっているか(桁揃えの空白が残っている) */
+  spliced: boolean;
+}
+
+/** 論理行のオフセットから物理行番号を引く */
+function lineOfOffset(ll: LogicalLine, offset: number): number {
+  let line = ll.line;
+  for (const p of ll.parts) {
+    if (p.offset <= offset) line = p.line;
+    else break;
+  }
+  return line;
+}
+
+/**
+ * 物理行を論理行にまとめる。
+ *
+ * `join=false`(2 段組ダンプ)では繋がない。左段と右段が 1 行に混ざっているので、
+ * 隣接行を繋いでも意味のある文にはならず、むしろ長い雑音が 1 本できるだけになる。
+ */
+function buildLogicalLines(doc: LoadedDoc, join: boolean, skip?: Set<number>): LogicalLine[] {
+  const out: LogicalLine[] = [];
+  let cur: LogicalLine | null = null;
+  let prevIndex = -2;
+  for (let i = 0; i < doc.lines.length; i += 1) {
+    const lineNo = i + 1;
+    const raw = doc.lines[i];
+    const t = raw.trim();
+    if (t.length === 0 || isSeparatorRow(t) || (skip && skip.has(lineNo))) {
+      cur = null;
+      continue;
+    }
+    const heading = /^#{1,6}\s/.test(t) || /^={3,}$|^-{3,}$/.test(t);
+    const structured = looksStructured(raw);
+    const isField = /^\s*[^\s:：|#][^:：|]{0,15}\s*[:：]\s*\S/.test(raw);
+    const startsNew = heading || structured || isField || t.includes('|');
+    if (
+      join &&
+      cur &&
+      prevIndex === i - 1 &&
+      !startsNew &&
+      !cur.heading &&
+      !cur.text.includes('|') &&
+      !endsSentence(cur.text) &&
+      cur.text.length + t.length <= JOIN_MAX_CHARS &&
+      cur.joined < JOIN_MAX_LINES
+    ) {
+      // 英単語同士が繋がらないよう、**両側がラテン文字のときだけ**空白を挟む。
+      // 片側だけで判定すると「サービス・」+「38 システム」に空白が入り、原文に無い空白が
+      // 台帳の表題に残る(日本語は行末で分かち書きしないので、繋ぐときも空白を入れない)。
+      const glue = /[A-Za-z0-9,;:.)]$/.test(cur.text) && /^[A-Za-z0-9(]/.test(t) ? ' ' : '';
+      cur.parts.push({ offset: cur.text.length + glue.length, line: lineNo });
+      cur.text += glue + t;
+      cur.joined += 1;
+      prevIndex = i;
+      continue;
+    }
+    cur = {
+      text: t,
+      line: lineNo,
+      parts: [{ offset: 0, line: lineNo }],
+      joined: 1,
+      structured,
+      heading,
+      midStart: false,
+      openTail: false,
+      spliced: false,
+    };
+    out.push(cur);
+    prevIndex = i;
+  }
+  for (const ll of out) {
+    if (ll.heading) continue;
+    ll.midStart = startsMidSentence(ll.text, ll.structured);
+    // 体言止めの箇条書き(「バックアップからの復旧試験が 3 年間未実施」)は
+    // 文末記号が無いのが普通なので、断片扱いにしない。
+    ll.openTail = !ll.structured && !ll.text.includes('|') && !endsSentence(ll.text);
+    // 桁揃えの空白が残っている行は、左段の途中と右段の途中が 1 文につながって見えている。
+    // 文としては読めても、原文にはそんな文は無い。
+    ll.spliced = hasColumnPadding(ll.text);
+  }
+  return out;
+}
+
+/** 断片の割合を測る対象になる行か(見出し・表・短すぎる行は除く) */
+function isProseBlock(ll: LogicalLine): boolean {
+  return !ll.heading && !ll.text.includes('|') && ll.text.length >= 10;
+}
+
+/** 断片であることの理由(利用者向け) */
+const FRAGMENT_HEAD_REASON: Bilingual = {
+  ja: '行頭が文の途中(前の行の続き)で、何についての記述か行内から復元できない',
+  en: 'the line starts mid-sentence (it continues the previous line), so what it is about cannot be recovered',
+};
+const FRAGMENT_TAIL_REASON: Bilingual = {
+  ja: '文が閉じないまま行が終わっており、続きが別の場所に散っている',
+  en: 'the sentence is cut off at the end of the line and its continuation is elsewhere',
+};
+const FRAGMENT_SPLICED_REASON: Bilingual = {
+  ja: '2 段組の左段と右段が 1 行に混ざっており、原文にはこの並びの文が存在しない',
+  en: 'left and right columns are interleaved on one line, so this sentence does not exist in the original',
+};
+
 interface ExtractContext {
   doc: LoadedDoc;
   /** 表として処理済みの行(本文側で二重に拾わない) */
   tableLines: Set<number>;
   /** 2 段組 PDF ダンプらしき入力か(確度を上げない) */
   bleed: boolean;
+  /** 文が行の途中で分断された入力か(末尾が切れた文も候補にしない) */
+  fragmented: boolean;
   /** 拾わなかった行の記録 */
   dropped: Dropped[];
 }
+
+/**
+ * 表題が文そのものになる種別。
+ * ここは断片がそのまま台帳の 1 行になるので、末尾が切れた文も候補にしない。
+ * 関係者・システムは**文ではなく名前**を抜き出すので、末尾の切れは致命的ではない
+ * (行頭が途中で切れている場合は名前自体が壊れるため、そちらは全種別で落とす)。
+ */
+const SENTENCE_TITLE_KINDS: ReadonlySet<ExtractKind> = new Set<ExtractKind>(['risks', 'requirements', 'actions']);
 
 /** タイトル列に選んではいけない列 */
 const AVOID_TITLE = [HEADER_ID_RE, HEADER_DATE_RE, HEADER_STATUS_RE, HEADER_LEVEL_RE, HEADER_LEVEL_PHASE_RE];
@@ -2110,19 +2355,51 @@ function extractFromHeadings(ctx: ExtractContext, kind: ExtractKind, sections: D
 function extractFromText(ctx: ExtractContext, kind: ExtractKind, sections: DocSection[]): Candidate[] {
   const out: Candidate[] = [];
   const sectionAt = sectionLookup(sections);
+  // 表題が文そのものになる種別だけ、折り返しの連結と、末尾切れ・段組の混線の除外を行う。
+  // 関係者・システムは**文ではなく名前**を抜くので、
+  // - 連結すると 1 文あたり 1 件しか名前を取らない実装のせいで 2 つ目の名前が落ちる
+  // - 末尾切れ・混線で落とすと、1 語として正しく取れている CISO などまで消える
+  // ため、これらは物理行のまま扱う(行頭が途中で切れている行だけは全種別で落とす)。
+  const sentenceKind = SENTENCE_TITLE_KINDS.has(kind);
+  // 折り返しで切れただけの行は繋いでから判定する(2 段組ダンプでは繋がない)。
+  // 出典行番号は繋ぐ前の物理行を `parts` で保持しているので、原文には戻れる。
+  const logical = buildLogicalLines(ctx.doc, !ctx.bleed && sentenceKind, ctx.tableLines);
+  const dropTail = ctx.fragmented && sentenceKind;
+  const dropSplice = ctx.bleed && sentenceKind;
 
-  for (let i = 0; i < ctx.doc.lines.length; i += 1) {
-    const lineNo = i + 1;
-    if (ctx.tableLines.has(lineNo)) continue;
-    const rawLine = ctx.doc.lines[i];
-    const line = rawLine.trim();
-    if (line.length === 0) continue;
-    if (isSeparatorRow(line)) continue;
+  for (const ll of logical) {
     // 見出しは「章の名前」であって中身ではない(「## 指摘事項」はリスクではない)
-    if (/^#{1,6}\s/.test(line) || /^={3,}$|^-{3,}$/.test(line)) continue;
-    const structured = looksStructured(rawLine);
+    if (ll.heading) continue;
+    const structured = ll.structured;
+    const bulletMatch = /^\s*(?:[-*・●○◆■□▪]|\d+[.)、]|\(\d+\)|[①-⑳])\s*/.exec(ll.text);
+    const base = bulletMatch ? bulletMatch[0].length : 0;
+    const parts = splitSentenceParts(ll.text.slice(base));
 
-    for (const sentence of splitSentences(stripBullet(line))) {
+    for (let si = 0; si < parts.length; si += 1) {
+      const sentence = parts[si].text;
+      const lineNo = lineOfOffset(ll, base + parts[si].offset);
+      // 断片の判定。**候補になりかけたものだけ** dropped に記録する
+      // (走査した全行を記録すると、報告が数千件になって誰も読まない)。
+      const cutHead = si === 0 && ll.midStart;
+      const cutTail = si === parts.length - 1 && ll.openTail && dropTail;
+      const cutSplice = ll.spliced && dropSplice;
+      const fragmentReason = cutHead
+        ? FRAGMENT_HEAD_REASON
+        : cutSplice
+          ? FRAGMENT_SPLICED_REASON
+          : cutTail
+            ? FRAGMENT_TAIL_REASON
+            : undefined;
+      const dropFragment = (): boolean => {
+        if (!fragmentReason) return false;
+        ctx.dropped.push({
+          reason: 'fragment',
+          title: safeText(sentence, 70),
+          lines: [lineNo],
+          detail: fragmentReason,
+        });
+        return true;
+      };
       const lower = sentence.toLowerCase();
       if (kind === 'risks') {
         const explicit = hasAny(lower, RISK_WORDS);
@@ -2133,6 +2410,8 @@ function extractFromText(ctx: ExtractContext, kind: ExtractKind, sections: DocSe
         // 「リスク」と書かれていなくても、危ない**状態**を述べた文は候補にする
         const stated = !explicit && !asserted && hasAny(lower, RISK_STATE_WORDS);
         if (!explicit && !asserted && !stated) continue;
+        // 行の途中から始まる / 途中で終わる断片は、そのまま台帳の 1 行になってしまう
+        if (dropFragment()) continue;
         // 語は合っていても、リスクを述べていない文は台帳に入れない(理由は残す)
         const notRisk = nonRiskReason(sentence);
         if (notRisk) {
@@ -2162,6 +2441,9 @@ function extractFromText(ctx: ExtractContext, kind: ExtractKind, sections: DocSe
         // 立派なステークホルダーなので、役職の門で落とさない。
         const org = extractOrganization(sentence);
         if (!hasAny(lower, STAKEHOLDER_WORDS) && org.length === 0) continue;
+        // 行頭が語の途中で切れていると、名前そのものが壊れる
+        // (「(独立行政法人情報処理推進機構)」→「行政法人情報処理推進機構」)
+        if (dropFragment()) continue;
         const role = extractRole(sentence);
         const useRole = role.length > 0 && !GENERIC_ROLE_RE.test(role);
         if (!useRole && org.length === 0) {
@@ -2189,6 +2471,7 @@ function extractFromText(ctx: ExtractContext, kind: ExtractKind, sections: DocSe
         });
       } else if (kind === 'systems') {
         if (!hasAny(lower, SYSTEM_WORDS)) continue;
+        if (dropFragment()) continue;
         let name = '';
         let named = false;
         for (let r = 0; r < SYSTEM_NAME_RES.length; r += 1) {
@@ -2215,6 +2498,7 @@ function extractFromText(ctx: ExtractContext, kind: ExtractKind, sections: DocSe
         const weak = hasAny(lower, REQUIREMENT_WEAK);
         if (!strong && !weak) continue;
         if (!strong && !structured) continue; // 弱い語だけの地の文は拾わない
+        if (dropFragment()) continue;
         out.push({
           kind,
           line: lineNo,
@@ -2231,6 +2515,7 @@ function extractFromText(ctx: ExtractContext, kind: ExtractKind, sections: DocSe
         const found = findDate(sentence);
         // 「対応」「実施」は日本語文書に頻出するので、日付か構造化行のどちらかを要求する
         if (!found.raw && !structured && !strong) continue;
+        if (dropFragment()) continue;
         out.push({
           kind,
           line: lineNo,
@@ -2295,7 +2580,14 @@ interface ExtractResult {
 }
 
 /** 1 種別を抽出する */
-function extractKind(doc: LoadedDoc, tables: DocTable[], sections: DocSection[], kind: ExtractKind, bleed: boolean): ExtractResult {
+function extractKind(
+  doc: LoadedDoc,
+  tables: DocTable[],
+  sections: DocSection[],
+  kind: ExtractKind,
+  bleed: boolean,
+  fragmented: boolean,
+): ExtractResult {
   // 「是正期限: 2026年10月31日」のような欄は、見出し側の候補に担当・期限として
   // 取り込み済み。本文としても拾うと「是正期限: …」という表題のアクションが増えるだけ。
   const consumed = new Set<number>();
@@ -2304,7 +2596,7 @@ function extractKind(doc: LoadedDoc, tables: DocTable[], sections: DocSection[],
       if (FIELD_DUE_RE.test(f.key) || FIELD_PERSON_RE.test(f.key) || FIELD_DEPT_RE.test(f.key)) consumed.add(f.line);
     }
   }
-  const ctx: ExtractContext = { doc, tableLines: consumed, bleed, dropped: [] };
+  const ctx: ExtractContext = { doc, tableLines: consumed, bleed, fragmented, dropped: [] };
   const fromTables = extractFromTables(ctx, kind, tables);
   const fromHeadings = extractFromHeadings(ctx, kind, sections);
   const fromText = extractFromText(ctx, kind, sections);
@@ -2348,20 +2640,27 @@ function renderDropped(result: ExtractResult, lang: Lang): string[] {
   const ids = result.dropped.filter((d) => d.reason === 'idOnly');
   const holes = result.dropped.filter((d) => d.reason === 'placeholder');
   const notRisk = result.dropped.filter((d) => d.reason === 'notRisk');
+  const fragments = result.dropped.filter((d) => d.reason === 'fragment');
   const droppedRows =
-    merged.reduce((acc, d) => acc + d.lines.length - 1, 0) + ids.length + holes.length + notRisk.length;
+    merged.reduce((acc, d) => acc + d.lines.length - 1, 0) +
+    ids.length +
+    holes.length +
+    notRisk.length +
+    fragments.length;
   // 一覧は長くなりすぎないよう頭打ちにする。**打ち切ったなら「全部出す」と書いてはいけない**
   // ので、見出しの文言も件数に応じて変える(「黙って落とさない」ための節が自分で嘘をつかないように)。
   const listedMerged = Math.min(merged.length, 10);
   const listedIds = Math.min(ids.length, 5);
   const listedHoles = Math.min(holes.length, 5);
   const listedNotRisk = Math.min(notRisk.length, 5);
+  const listedFragments = Math.min(fragments.length, 5);
   const hiddenEntries =
     merged.length -
     listedMerged +
     (ids.length - listedIds) +
     (holes.length - listedHoles) +
-    (notRisk.length - listedNotRisk);
+    (notRisk.length - listedNotRisk) +
+    (fragments.length - listedFragments);
   parts.push('');
   parts.push(
     `> ${
@@ -2378,6 +2677,40 @@ function renderDropped(result: ExtractResult, lang: Lang): string[] {
           )
     }`,
   );
+  if (fragments.length > 0) {
+    const heads = fragments.filter((d) => d.detail === FRAGMENT_HEAD_REASON).length;
+    const splices = fragments.filter((d) => d.detail === FRAGMENT_SPLICED_REASON).length;
+    const tails = fragments.length - heads - splices;
+    parts.push(
+      `> - ${inline(
+        `**行の途中から始まる / 途中で終わる断片 ${fragments.length} 件を候補から外しました**` +
+          `(行頭が前の行の続き ${heads} 件、2 段組の左右が 1 行に混ざったもの ${splices} 件、文が閉じないまま行が終わっているもの ${tails} 件)。` +
+          '2 段組の PDF から起こしたテキストは 1 行が文の途中から始まるため、そのまま台帳に入れると出所も意味も追えない行が量産されます。',
+        `**${fragments.length} candidate(s) were dropped as mid-sentence fragments** ` +
+          `(${heads} continue the previous line, ${splices} interleave two columns on one line, ${tails} are cut off before the sentence closes). ` +
+          'Text taken from a two-column PDF splits sentences across lines, and such rows can be traced back to neither a source nor a meaning.',
+        lang,
+      )}`,
+    );
+  }
+  for (const d of fragments.slice(0, 5)) {
+    parts.push(
+      `> - ${inline(
+        `断片なので除外(${d.detail ? d.detail.ja : '理由不明'}): 「${safeCell(d.title, 60)}」 — 行 ${d.lines.join(', ')}`,
+        `dropped as a fragment (${d.detail ? d.detail.en : 'no reason recorded'}): "${safeCell(d.title, 60)}" — line ${d.lines.join(', ')}`,
+        lang,
+      )}`,
+    );
+  }
+  if (fragments.length > 5) {
+    parts.push(
+      `> - ${inline(
+        `…ほかに ${fragments.length - 5} 件、行の途中で切れた断片があります(表示は省略。全部見るには章・節を切り出した入力で再実行してください)`,
+        `…and ${fragments.length - 5} more mid-sentence fragments (not listed; re-run on a single section to see them all)`,
+        lang,
+      )}`,
+    );
+  }
   for (const d of merged.slice(0, 10)) {
     parts.push(
       `> - ${inline(
@@ -2690,7 +3023,11 @@ function toUpdatePayload(doc: LoadedDoc, results: ExtractResult[]): UpdatePayloa
         influence: c.influence ?? 'medium',
         interest: 'medium' as InfluenceLevel,
         concerns: [safeText(c.evidence, 160)],
-        approach: `要確認(自動抽出) / to be confirmed — ${ref(c)}`,
+        // approach(関与方針)は空のままにする。**機械には書けない欄だから。**
+        // 以前はここに「要確認(自動抽出)」という定型文を入れていたが、
+        // 欄が埋まっている＝方針があると数える箇所(健全性チェックの「良好な点」・
+        // ステークホルダー表の未記入指摘)が、誰も何も決めていない案件を
+        // 「合意形成が設計されている」と褒めていた。空欄のほうが正しい。
         source: sourceRef(doc, c.line),
         confidence: EXTRACTED_CONFIDENCE,
       }));
@@ -3257,6 +3594,18 @@ interface InputQuality {
   gapRatio: number;
   /** 該当行の例(先頭 5 件) */
   sample: number[];
+  /** 文が行の途中で分断された入力か(末尾が切れた文も候補から外す) */
+  fragmented: boolean;
+  /** 折り返しとして前の行に繋いだ物理行の数 */
+  joinedLines: number;
+  /** 断片の割合を測った本文ブロック数 */
+  proseBlocks: number;
+  /** そのうち行頭 / 行末が文の途中で切れているブロック数 */
+  fragmentBlocks: number;
+  /** fragmentBlocks / proseBlocks */
+  fragmentRatio: number;
+  /** 断片の例(先頭 3 件の行番号) */
+  fragmentSample: number[];
 }
 
 /**
@@ -3297,7 +3646,41 @@ function assessInputQuality(doc: LoadedDoc): InputQuality {
   // 確度 high が復活していた(実測: 本文 59 行 / 該当 4 行 / 0.068 で警告なし)。
   // 助言に従うと判定が甘くなるのは最悪なので、切り出しても変わらない指標に変える。
   const columnBleed = !delimited && nonEmptyLines >= 5 && bleedLines >= 3 && (lineRatio >= 0.15 || gapRatio >= 0.06);
-  return { columnBleed, bleedLines, nonEmptyLines, gapRatio, sample };
+
+  // **折り返しを繋いだあとで**、まだ文として閉じていないブロックの割合を測る。
+  // 繋ぐ前に数えると、普通に折り返された報告書まで「分断されている」と判定してしまう
+  // (実測: きれいな Markdown でも 79% の行が句点で終わっていない)。
+  const logical = delimited ? [] : buildLogicalLines(doc, !columnBleed);
+  let joinedLines = 0;
+  let proseBlocks = 0;
+  let fragmentBlocks = 0;
+  const fragmentSample: number[] = [];
+  for (const ll of logical) {
+    joinedLines += ll.joined - 1;
+    if (!isProseBlock(ll)) continue;
+    proseBlocks += 1;
+    if (ll.midStart || ll.openTail) {
+      fragmentBlocks += 1;
+      if (fragmentSample.length < 3) fragmentSample.push(ll.line);
+    }
+  }
+  const fragmentRatio = proseBlocks > 0 ? fragmentBlocks / proseBlocks : 0;
+  // 件数ではなく割合で見る(columnBleed と同じ考え方。章を切り出しても判定が変わらない)
+  const fragmented = proseBlocks >= FRAGMENT_MIN_BLOCKS && fragmentRatio >= FRAGMENT_RATIO_THRESHOLD;
+
+  return {
+    columnBleed,
+    bleedLines,
+    nonEmptyLines,
+    gapRatio,
+    sample,
+    fragmented,
+    joinedLines,
+    proseBlocks,
+    fragmentBlocks,
+    fragmentRatio,
+    fragmentSample,
+  };
 }
 
 /**
@@ -3330,7 +3713,7 @@ function analyzeDocument(doc: LoadedDoc, kinds: ExtractKind[]): Analysis {
   const tables = findTables(doc);
   const sections = findSections(doc);
   const quality = assessInputQuality(doc);
-  const results = kinds.map((k) => extractKind(doc, tables, sections, k, quality.columnBleed));
+  const results = kinds.map((k) => extractKind(doc, tables, sections, k, quality.columnBleed, quality.fragmented));
   const warnings: Bilingual[] = [];
 
   const pct = (v: number): string => `${Math.round(v * 100)}%`;
@@ -3352,6 +3735,44 @@ function analyzeDocument(doc: LoadedDoc, kinds: ExtractKind[]): Analysis {
         'Because line structure cannot be trusted here, no text-derived candidate is marked high confidence; ' +
         'items that survive as a single token (job titles, for example) are kept and their confidence is shown in the table.',
     });
+  }
+
+  const fragmentDrops = results.reduce(
+    (acc, r) => acc + r.dropped.filter((d) => d.reason === 'fragment').length,
+    0,
+  );
+  if (quality.joinedLines > 0 || fragmentDrops > 0 || quality.fragmented) {
+    const head: string[] = [];
+    const headEn: string[] = [];
+    if (quality.joinedLines > 0) {
+      head.push(
+        `折り返しで切れていた ${quality.joinedLines} 行を前の行に繋いでから判定しました(出典の行番号は繋ぐ前の物理行のままです)。`,
+      );
+      headEn.push(
+        `${quality.joinedLines} wrapped line(s) were re-joined to the line above before matching; the cited line numbers still point at the original physical lines.`,
+      );
+    }
+    if (quality.fragmented) {
+      head.push(
+        `**本文 ${quality.proseBlocks} ブロックのうち ${quality.fragmentBlocks} ブロック(${pct(quality.fragmentRatio)})が、行の途中で始まるか途中で終わっています。**` +
+          (quality.fragmentSample.length > 0 ? `(例: ${quality.fragmentSample.join(', ')} 行目)` : '') +
+          '文が行をまたいで散っている入力なので、リスク・要件・アクションは**文として閉じている行だけ**を候補にしました。' +
+          '元の PDF を段組みのまま読み順で抽出すると、こうなります。改善するには、章単位で本文をコピーして `text` で渡すか、抽出時に段組みを解除してください。',
+      );
+      headEn.push(
+        `**${quality.fragmentBlocks} of ${quality.proseBlocks} body blocks (${pct(quality.fragmentRatio)}) start or end mid-sentence.**` +
+          (quality.fragmentSample.length > 0 ? ` (e.g. lines ${quality.fragmentSample.join(', ')})` : '') +
+          ' Sentences are scattered across lines here, so only lines that form a complete sentence were kept as risk / requirement / action candidates. ' +
+          'To improve this, copy the body chapter by chapter and pass it via `text`, or de-column the text when extracting it.',
+      );
+    }
+    if (fragmentDrops > 0) {
+      head.push(`**行の途中から始まる / 途中で終わる断片 ${fragmentDrops} 件を候補から外しました**(内訳は各種別の下に出しています)。`);
+      headEn.push(
+        `**${fragmentDrops} candidate(s) were dropped as mid-sentence fragments** — the breakdown is listed under each kind.`,
+      );
+    }
+    warnings.push({ ja: head.join(''), en: headEn.join(' ') });
   }
 
   const total = results.reduce((acc, r) => acc + r.totalBeforeCap, 0);
@@ -3768,7 +4189,8 @@ export function registerDocumentTools(server: McpServer): void {
                 influence: c.influence ?? 'medium',
                 interest: 'medium',
                 concerns: [safeText(c.evidence, 160)],
-                approach: `要確認(自動抽出) / to be confirmed — ${sourceNote}`,
+                // approach は入れない(上の貼り付け用 JSON と同じ理由。
+                // 定型文で埋めると「関与方針あり」と数えられ、褒めの根拠にされる)
                 source,
                 confidence: EXTRACTED_CONFIDENCE,
                 createdAt: timestamp,

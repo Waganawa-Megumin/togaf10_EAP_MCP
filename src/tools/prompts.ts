@@ -203,10 +203,10 @@ export function registerPrompts(server: McpServer): void {
 
 ## 手順
 
-1. \`get_adm_phase\` を \`phase="${p}"\` で呼び、目的・入力・ステップ・成果物・実務のコツを取得する。
+1. \`reference\` を \`of="adm-phase" id="${p}"\` で呼び、目的・入力・ステップ・成果物・実務のコツを取得する。
 2. \`get_engagement\` で現在のエンゲージメント状態(進捗・リスク・決定・アクション・ステークホルダー)を取得する。
    未開始なら \`start_engagement\` の実行を提案し、必要な入力項目を先に質問する。
-3. 手順 1 で得た関連技法・関連成果物を \`get_technique\` / \`get_deliverable\` で 2〜3 件だけ深掘りする
+3. 手順 1 で得た関連技法・関連成果物を \`reference\`(\`of="technique"\` / \`of="deliverable"\`)で 2〜3 件だけ深掘りする
    (全部は読まない。このフェーズの成否を左右するものを選ぶ)。
 4. 上記を突き合わせて、下記の構成でキックオフ資料を作る。
 
@@ -230,11 +230,11 @@ Focus for this kickoff: ${f.en}
 
 ## Steps
 
-1. Call \`get_adm_phase\` with \`phase="${p}"\` to get the purpose, inputs, steps, outputs, and practitioner tips.
+1. Call \`reference\` with \`of="adm-phase" id="${p}"\` to get the purpose, inputs, steps, outputs, and practitioner tips.
 2. Call \`get_engagement\` for the current state: phase progress, risks, decisions, actions, stakeholders.
    If no engagement exists, propose running \`start_engagement\` and ask for the inputs it needs first.
 3. Take the related techniques and deliverables from step 1 and go deep on only two or three of them
-   with \`get_technique\` / \`get_deliverable\`. Do not read them all - pick the ones this phase lives or dies by.
+   with \`reference\` (\`of="technique"\` / \`of="deliverable"\`). Do not read them all - pick the ones this phase lives or dies by.
 4. Combine the above into a kickoff pack with the structure below.
 
 ## Output
@@ -291,10 +291,10 @@ actions and risks you identified. Ask for confirmation before running it.
 ## 手順
 
 1. \`get_engagement\` で現在の原則・決定事項・制約を確認する(既存の決定と矛盾する設計は最優先の指摘)。
-2. \`get_adm_phase\` を \`phase="g"\` で呼び、実装ガバナンスの観点を確認する。
-   併せて \`get_technique\` を \`technique="architecture-principles-technique"\` と
+2. \`reference\` を \`of="adm-phase" id="g"\` で呼び、実装ガバナンスの観点を確認する。
+   併せて \`reference\` を \`of="technique" id="architecture-principles-technique"\` と
    \`technique="architecture-governance"\` で呼び、原則の立て方と逸脱の扱い方をそろえる。
-   既存の原則そのものを見たいときは \`get_deliverable\` を \`deliverable="architecture-principles"\` で呼ぶ
+   既存の原則そのものを見たいときは \`reference\` を \`of="deliverable" id="architecture-principles"\` で呼ぶ
    (原則は成果物、その策定手順は技法として別 ID になっている)。
 3. 対象資料が会話に無ければ、何を見せてほしいかを箇条書きで要求してから進める。
 
@@ -331,10 +331,10 @@ Scope: ${s.en}
 
 1. Call \`get_engagement\` for the current principles, decisions, and constraints. A design that contradicts an
    existing decision is the highest-priority finding.
-2. Call \`get_adm_phase\` with \`phase="g"\` for the implementation governance angle. Then call \`get_technique\`
+2. Call \`reference\` with \`of="adm-phase" id="g"\` for the implementation governance angle. Then call \`reference\` with \`of="technique"\`
    with \`technique="architecture-principles-technique"\` and \`technique="architecture-governance"\` so that how
    principles are written and how deviations are handled are consistent. To see the principles artifact itself,
-   call \`get_deliverable\` with \`deliverable="architecture-principles"\` - the principles are a deliverable, and
+   call \`reference\` with \`of="deliverable" id="architecture-principles"\` - the principles are a deliverable, and
    the method for setting them is a separate technique id.
 3. If the material under review is not in the conversation, ask for it as a bullet list before going further.
 
@@ -497,7 +497,7 @@ Decision sought: ${d.en}
 1. \`get_engagement\` を呼び、登録済みステークホルダー情報(影響力・関心・立場)を確認する。
    \`${who}\` が未登録なら、まず 5 つの質問で人物像(役割・評価指標・懸念・決裁権・情報の好み)を聞き出し、
    \`update_engagement\` で登録する案を出す。
-2. \`get_technique\` で \`stakeholder-management\` を参照し、関心事の分類軸をそろえる。
+2. \`reference\` を \`of="technique" id="stakeholder-management"\` で呼び、関心事の分類軸をそろえる。
 3. \`get_dashboard\` で現状値を取得し、相手に関係する部分だけを抜き出す。
 
 ## 出力構成
@@ -525,7 +525,7 @@ Topic: ${tp.en}
 1. Call \`get_engagement\` and check the recorded stakeholder data: influence, interest, position.
    If \`${who}\` is not recorded, ask five questions first - role, the metrics they are judged on, their worries,
    what they can sign off, how they like to receive information - then propose registering them with \`update_engagement\`.
-2. Call \`get_technique\` for \`stakeholder-management\` so the way concerns are classified is consistent.
+2. Call \`reference\` with \`of="technique" id="stakeholder-management"\` so the way concerns are classified is consistent.
 3. Call \`get_dashboard\` for the current numbers and pull out only the parts that touch this person.
 
 ## Output
@@ -584,7 +584,7 @@ Topic: ${tp.en}
 ## 手順
 
 1. \`get_engagement\` で登録済みリスク・決定・アクションを取得し、既出のリスクを重複させない。
-2. \`get_technique\` で \`risk-management\` を参照し、評価軸(発生可能性・影響・残存リスク)をそろえる。
+2. \`reference\` を \`of="technique" id="risk-management"\` で呼び、評価軸(発生可能性・影響・残存リスク)をそろえる。
 3. 下記のリスクカテゴリを使って、参加者に問いかける形で洗い出しを進める。
 
 ## リスクカテゴリと呼び水の問い
@@ -620,7 +620,7 @@ Horizon: ${h.en}
 ## Steps
 
 1. Call \`get_engagement\` for the risks, decisions, and actions already recorded, so nothing is raised twice.
-2. Call \`get_technique\` for \`risk-management\` so likelihood, impact, and residual risk are scored consistently.
+2. Call \`reference\` with \`of="technique" id="risk-management"\` so likelihood, impact, and residual risk are scored consistently.
 3. Work through the categories below by asking the participants the trigger questions, not by listing risks yourself.
 
 ## Categories and trigger questions
@@ -689,8 +689,8 @@ Finish by proposing the \`update_engagement\` call (the \`risks\` array) that re
 
 ## 手順
 
-1. \`get_technique\` を \`technique="gap-analysis"\` で呼び、手順と落とし穴を確認する。
-2. 対象ドメインに対応する ADM フェーズを \`get_adm_phase\` で確認する
+1. \`reference\` を \`of="technique" id="gap-analysis"\` で呼び、手順と落とし穴を確認する。
+2. 対象ドメインに対応する ADM フェーズを \`reference\`(\`of="adm-phase"\`)で確認する
    (business→\`b\`, data/application→\`c\`, technology→\`d\`)。目的と成果物をそろえる。
 3. \`get_engagement\` で既存の成果物・決定事項を確認し、ベースライン情報の有無を把握する。
 4. ベースラインか目標のどちらかが未定義なら、ギャップ表を作る前にその欠落を明示して埋め方を提案する。
@@ -723,8 +723,8 @@ Scope: ${s.en}
 
 ## Steps
 
-1. Call \`get_technique\` with \`technique="gap-analysis"\` for the method and its pitfalls.
-2. Call \`get_adm_phase\` for the phase that owns this domain (business → \`b\`, data or application → \`c\`,
+1. Call \`reference\` with \`of="technique" id="gap-analysis"\` for the method and its pitfalls.
+2. Call \`reference\` with \`of="adm-phase"\` for the phase that owns this domain (business → \`b\`, data or application → \`c\`,
    technology → \`d\`) so the purpose and deliverables line up.
 3. Call \`get_engagement\` for the existing deliverables and decisions, and establish whether baseline data exists.
 4. If either the baseline or the target is undefined, say so explicitly and propose how to fill it
@@ -793,8 +793,8 @@ Finish by proposing how to record the confirmed gaps and candidate work packages
 
 ## 手順
 
-1. \`get_deliverable\` を \`deliverable="${dv}"\` で呼び、目的・記載項目・作成のコツを確認する。
-   見つからなければ \`list_deliverables\` または \`search_togaf\` で近いものを 3 件提示し、選ばせる。
+1. \`reference\` を \`of="deliverable" id="${dv}"\` で呼び、目的・記載項目・作成のコツを確認する。
+   見つからなければ \`reference\`(\`of="deliverable"\`、id なし)または \`search_togaf\` で近いものを 3 件提示し、選ばせる。
 2. \`generate_deliverable_template\` で Markdown 雛形を取得し、章立てのベースにする。
 3. \`get_engagement\` と \`get_dashboard\` で、埋められる実データ(決定事項・リスク・ステークホルダー・進捗)を集める。
 4. 雛形の各節を、次の 3 状態のいずれかで埋める。
@@ -822,8 +822,8 @@ Primary audience: ${a.en}
 
 ## Steps
 
-1. Call \`get_deliverable\` with \`deliverable="${dv}"\` for its purpose, contents, and authoring tips.
-   If it is not found, offer the three closest matches from \`list_deliverables\` or \`search_togaf\` and let the user pick.
+1. Call \`reference\` with \`of="deliverable" id="${dv}"\` for its purpose, contents, and authoring tips.
+   If it is not found, offer the three closest matches from \`reference\` (\`of="deliverable"\`, no id) or \`search_togaf\` and let the user pick.
 2. Call \`generate_deliverable_template\` for the Markdown skeleton and use it as the chapter structure.
 3. Call \`get_engagement\` and \`get_dashboard\` to collect the real data you can fill in: decisions, risks,
    stakeholders, progress.

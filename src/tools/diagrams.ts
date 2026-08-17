@@ -30,6 +30,7 @@ import {
   CONFIDENCE_LEVELS,
   INFLUENCE_LEVELS,
   isConfidence,
+  isWrittenByHuman,
   PHASE_STATUSES,
   NO_SOURCE_LABEL,
   NO_SOURCE_MARK,
@@ -1931,7 +1932,9 @@ const MARK = STAKEHOLDER_BORDERLINE_MARK;
  * この図をそのまま会議に出す人がいる以上、本人が決めた方針を一般論に置き換えてはならない。
  */
 function approachCell(point: StakeholderPoint, lang: Lang): string {
-  const own = (point.approach ?? '').trim();
+  // 機械が置いた仮置き文字列(旧 ingest_document の「要確認(自動抽出)」)は、
+  // 本人が決めた方針ではないので出さない。未設定として一般論のほうを出す。
+  const own = isWrittenByHuman(point.approach) ? (point.approach ?? '').trim() : '';
   // 書いてもらった文言は削らない。600 は表を壊さないための保険で、
   // 実際の 1〜2 文の方針には届かない長さ(超えたときは `…` が付いて分かる)。
   if (own.length > 0) return md(own, '-', 600);
@@ -2134,8 +2137,8 @@ function registerStakeholderMatrix(server: McpServer): void {
           list
             .map((p) => `${md(p.name, lang === 'en' ? '(unnamed)' : '(名称未設定)', 24)}${p.borderline ? MARK : ''}`)
             .join(lang === 'en' ? ', ' : '、');
-        const withOwnApproach = points.filter((p) => (p.approach ?? '').trim().length > 0);
-        const withoutApproach = points.filter((p) => (p.approach ?? '').trim().length === 0);
+        const withOwnApproach = points.filter((p) => isWrittenByHuman(p.approach));
+        const withoutApproach = points.filter((p) => !isWrittenByHuman(p.approach));
         const borderlineNames = points.filter((p) => p.borderline);
         // 確度は象限とは別軸なので、象限の集計とは別に数える
         const usedConfidence = new Set<ProvenanceConfidence>();

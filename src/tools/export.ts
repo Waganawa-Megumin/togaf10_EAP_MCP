@@ -12,6 +12,12 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { DELIVERABLES, findDeliverable, text, type Lang } from '../knowledge/index.js';
 import { getDataDir, loadEngagement } from '../engagement/store.js';
+import {
+  CONFIDENCE_DEFINITIONS,
+  CONFIDENCE_LEVELS,
+  summarizeProvenance,
+  type ProvenanceSummary,
+} from '../engagement/model.js';
 import { renderDashboardMarkdown } from '../dashboard/markdown.js';
 import { L, label } from '../dashboard/labels.js';
 import { renderDeliverableTemplate } from './format.js';
@@ -246,6 +252,8 @@ function writeExport(
   overwrite: boolean,
   lang: Lang,
   heading: { ja: string; en: string },
+  /** 書き出し結果の後ろに足す行(出典の集計など。書き出しが失敗したときは出さない) */
+  extra: readonly string[] = [],
 ): ToolResult {
   let existedBefore = false;
   try {
@@ -303,8 +311,77 @@ function writeExport(
   if (existedBefore) {
     out.push(`- ${pair('既存ファイルを上書きしました', 'An existing file was overwritten', lang)}`);
   }
+  if (extra.length > 0) {
+    out.push('');
+    out.push(...extra);
+  }
   out.push('');
   return textResult(out.join('\n'));
+}
+
+// ---------------------------------------------------------------------------
+// 出典 / Provenance
+//
+// 書き出したファイルは会話の外に出ていく。本文(ダッシュボードの Markdown)には
+// 出典列と凡例が入っているが、印刷して 1 枚目だけを見る読者もいるので、
+// 表紙の 1 行と、書き出しツールの戻り値にも同じ数字を出す。
+// 集計は必ず `summarizeProvenance` を通す(数字が本文とずれない唯一の方法)。
+// ---------------------------------------------------------------------------
+
+/** 印ごとの内訳 "● 6 / △ 5 / × 0" */
+function confidenceBreakdown(summary: ProvenanceSummary): string {
+  return CONFIDENCE_LEVELS.map((v) => `${CONFIDENCE_DEFINITIONS[v].marker} ${summary.byConfidence[v]}`).join(' / ');
+}
+
+/**
+ * HTML の表紙に足す 1 行。台帳が空なら何も足さない
+ * (0/0 を「出典が揃っている」と読ませないため)。
+ */
+function provenanceSubtitle(summary: ProvenanceSummary, lang: Lang): string {
+  if (summary.total === 0) return '';
+  const inferred = summary.byConfidence.inferred;
+  const ja =
+    `出典: ${summary.withSource}/${summary.total} 件 (${confidenceBreakdown(summary)}` +
+    `、確度未設定 ${summary.byConfidence.unset})` +
+    (inferred > 0 ? ` — 推測 ${inferred} 件を含む。確認前の記述を事実として引用しないこと` : '');
+  const en =
+    `Sources: ${summary.withSource}/${summary.total} (${confidenceBreakdown(summary)}` +
+    `, confidence unset ${summary.byConfidence.unset})` +
+    (inferred > 0 ? ` — includes ${inferred} inferred entries; do not quote them as fact before confirming` : '');
+  return pair(ja, en, lang);
+}
+
+/**
+ * 書き出し結果に足す注意書き。**配る前に読む人が見るのはここ**なので、
+ * 「何件が辿れないか」と「推測が何件混ざっているか」を数字で言う。
+ */
+function provenanceNotice(summary: ProvenanceSummary, lang: Lang): string[] {
+  if (summary.total === 0) return [];
+  const inferred = summary.byConfidence.inferred;
+  const out: string[] = [];
+  out.push(
+    `- ${pair('出典', 'Sources', lang)}: ${summary.withSource}/${summary.total} ` +
+      `(${confidenceBreakdown(summary)} / ${pair('確度未設定', 'confidence unset', lang)} ${summary.byConfidence.unset})`,
+  );
+  if (inferred > 0) {
+    out.push(
+      `- ${pair(
+        `⚠ このファイルには推測が ${inferred} 件含まれます(${CONFIDENCE_DEFINITIONS.inferred.marker} の行)。配る前に、相手に確認する項目として印を残すか消すかを決めてください。`,
+        `⚠ This file contains ${inferred} inferred entries (rows marked ${CONFIDENCE_DEFINITIONS.inferred.marker}). Before handing it over, decide whether to flag them for confirmation or remove them.`,
+        lang,
+      )}`,
+    );
+  }
+  if (summary.withoutSource > 0) {
+    out.push(
+      `- ${pair(
+        `出典の無い ${summary.withoutSource} 件は後から真偽を確かめられません。\`inspect_findings\` で埋める行を絞り込めます。`,
+        `The ${summary.withoutSource} entries without a source cannot be verified later. Use \`inspect_findings\` to narrow down which rows to fill in.`,
+        lang,
+      )}`,
+    );
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -329,20 +406,32 @@ function escapeHtml(value: string): string {
  * コードスパンを先に切り出し、その中では強調記法を解釈しない。
  * リンク記法は「外部ホストへの参照を作らない」方針からテキストのまま残す。
  */
+/** コードスパンの置き場所を示す番号札。本文に現れない制御文字を使う */
+const CODE_OPEN = '\u0001';
+const CODE_CLOSE = '\u0002';
+
 function renderInline(raw: string): string {
-  return raw
-    .split(/(`[^`]+`)/g)
-    .map((segment) => {
-      if (segment.length >= 2 && segment.startsWith('`') && segment.endsWith('`')) {
-        return `<code>${escapeHtml(segment.slice(1, -1))}</code>`;
-      }
-      let s = escapeHtml(segment);
-      s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-      s = s.replace(/(^|[^*])\*([^*\s][^*]*)\*/g, '$1<em>$2</em>');
-      s = s.replace(/(^|\s)_([^_\s][^_]*)_(?=$|[\s.,;:!?)])/g, '$1<em>$2</em>');
-      return s;
-    })
-    .join('');
+  // コードスパンは先に取り出して番号札に置き換える。
+  //
+  // 以前はここで文字列を分割し、断片ごとに強調記法を当てていた。すると
+  // `_… `△` …_` のようにコードスパンを跨いだ強調が、開く `_` と閉じる `_` が
+  // 別の断片に落ちるせいで一度も一致せず、アンダースコアが本文に生のまま出ていた。
+  // 実害が出ていたのは出典の警告行と凡例行(どちらも `●` などのコードスパンを含む)。
+  const spans: string[] = [];
+  const marked = raw.replace(/`[^`]+`/g, (span) => {
+    spans.push(`<code>${escapeHtml(span.slice(1, -1))}</code>`);
+    return `${CODE_OPEN}${spans.length - 1}${CODE_CLOSE}`;
+  });
+  let s = escapeHtml(marked);
+  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/(^|[^*])\*([^*\s][^*]*)\*/g, '$1<em>$2</em>');
+  // 閉じる `_` の後ろに許す文字。全角の句読点・括弧と番号札()を含めないと、
+  // 日本語の行末「…です。_」やコードスパンで終わる強調が一致しない。
+  s = s.replace(
+    /(^|[\s\u0002])_([^_\s][^_]*)_(?=$|[\s.,;:!?)\u0001。、，．・」』】〉》!?)])/g,
+    '$1<em>$2</em>',
+  );
+  return s.replace(/\u0001(\d+)\u0002/g, (_m, i: string) => spans[Number(i)] ?? '');
 }
 
 /** 表の 1 行をセルに分解する(`\|` はエスケープされたパイプとして扱う) */
@@ -676,13 +765,26 @@ tr:last-child td { border-bottom: none; }
 .subtitle { color: var(--muted); font-size: 12px; margin: -8px 0 18px; }
 footer { max-width: 980px; margin: 18px auto 0; color: var(--muted); font-size: 12px; text-align: center; }
 @media print {
+  /* 印刷は必ず紙側の配色に戻す。ダークテーマの端末から印刷すると、
+     表紙の出典サマリ(.subtitle は --muted)が白地に薄灰で載って読めなくなる。
+     出典の印(● △ × ?)は字形で区別できるので、色が落ちても意味は残る */
+  :root {
+    --bg: #ffffff;
+    --panel: #ffffff;
+    --ink: #000000;
+    --muted: #444444;
+    --line: #999999;
+    --accent: #000000;
+    --accent-soft: #f4f4f4;
+  }
   body { background: #fff; color: #000; padding: 0; font-size: 10.5pt; }
-  .sheet { border: none; border-radius: 0; padding: 0; max-width: none; }
+  .sheet { background: #fff; border: none; border-radius: 0; padding: 0; max-width: none; }
   .toolbar { display: none !important; }
   h2 { break-after: avoid; page-break-after: avoid; }
   table, blockquote, pre { break-inside: avoid; page-break-inside: avoid; }
   thead { display: table-header-group; }
   code, pre, blockquote { background: #f4f4f4 !important; color: #000 !important; }
+  .subtitle, th, footer { color: #000 !important; }
   a { color: #000; text-decoration: none; }
   h1 { font-size: 16pt; }
 }
@@ -737,7 +839,18 @@ export function registerExportTools(server: McpServer): void {
 
       // ファイルに書き出すものは全件。会話に載せる get_dashboard と違って
       // 長さの制約が無く、途中で切れた成果物を配ってしまうほうが害が大きい。
+      // compact=false なので出典列も絞り込みで落ちない(会話内より優先して全部出す)。
       const markdown = renderDashboardMarkdown(engagement, l, { compact: false });
+      // 会話の外に出ていくファイルなので、出典の付き具合は本文だけでなく
+      // 表紙(subtitle)と呼び出し元への戻り値にも出す。印刷して配られた資料に
+      // 「どれが未確認か」が書いていない、という事故はここで止める。
+      const summary = summarizeProvenance(engagement);
+      const snapshot = pair(
+        `静的スナップショット(${formatDateTime(new Date())} 時点)`,
+        `Static snapshot taken at ${formatDateTime(new Date())}`,
+        l,
+      );
+      const coverage = provenanceSubtitle(summary, l);
       const content =
         format === 'markdown'
           ? markdown
@@ -745,11 +858,7 @@ export function registerExportTools(server: McpServer): void {
               title: `${label(L.dashboard, l === 'both' ? 'ja' : l)} — ${engagement.name}`,
               bodyMarkdown: markdown,
               lang: l,
-              subtitle: pair(
-                `静的スナップショット(${formatDateTime(new Date())} 時点)`,
-                `Static snapshot taken at ${formatDateTime(new Date())}`,
-                l,
-              ),
+              subtitle: coverage ? `${snapshot} — ${coverage}` : snapshot,
               printLabel: label(L.print, l),
             });
 
@@ -766,10 +875,14 @@ export function registerExportTools(server: McpServer): void {
         target = checked.path;
       }
 
-      return writeExport(target, content, overwrite, l, {
-        ja: 'レポートを書き出しました',
-        en: 'Report exported',
-      });
+      return writeExport(
+        target,
+        content,
+        overwrite,
+        l,
+        { ja: 'レポートを書き出しました', en: 'Report exported' },
+        provenanceNotice(summary, l),
+      );
     },
   );
 

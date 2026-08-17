@@ -16,7 +16,6 @@ import { registerExportTools } from './tools/export.js';
 import { registerPrompts } from './tools/prompts.js';
 import { registerResources } from './tools/resources.js';
 import { registerArchiMateTools } from './tools/archimate.js';
-import { registerArchiMateReferenceTools } from './tools/archimate-reference.js';
 import { registerArchiMateExportTools } from './tools/archimate-export.js';
 import { registerDiagramTools } from './tools/diagrams.js';
 import { registerFrameworkTools } from './tools/frameworks.js';
@@ -36,7 +35,7 @@ const INSTRUCTIONS = `TOGAF 10 EAP MCP — TOGAF Standard 10th Edition (Enterpri
 
 使い分け:
 - 状況を相談されたら、まず \`consult\` に状況を自由記述で渡す。関連フェーズ・技法・成果物・アクション・確認質問が返る。
-- 個別の知識は \`get_adm_phase\` / \`get_technique\` / \`get_deliverable\` / \`get_glossary_term\`、横断検索は \`search_togaf\`。
+- 知識を引くのは \`reference\` の 1 本。\`of\` で分野(adm-phase / technique / deliverable / glossary / framework / archimate-layer / archimate-element / archimate-relationship / security-layer)を選び、\`id\` を省略すれば一覧、渡せばその 1 件。ID が分からないときだけ \`search_togaf\` で横断検索する。
 - 案件として追跡するなら \`start_engagement\` → \`update_engagement\`。状態は JSON に永続化される。
 - 進捗を見せるときは \`get_dashboard\`(Markdown)、ブラウザで常時表示するなら \`open_dashboard\`(SSE ライブ更新・印刷用 CSS 付き)。
 
@@ -135,7 +134,6 @@ export function createServer(): McpServer {
   registerFrameworkTools(server);
   registerBusinessArchitectureTools(server);
   registerArchiMateTools(server);
-  registerArchiMateReferenceTools(server);
   registerSecurityTools(server);
   // コンサルティング
   registerConsultTool(server);

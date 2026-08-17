@@ -27,6 +27,7 @@ import {
   capRows,
   checkProvenance,
   hasProvenance,
+  isWrittenByHuman,
   makeId,
   normalizeProvenance,
   now,
@@ -167,13 +168,13 @@ function quote(value: string, max = 80): string {
 function techniquePointer(id: string, lang: Lang): string | null {
   const t = findTechnique(id);
   if (!t) return null;
-  return `\`get_technique ${t.id}\` — ${text(t.name, lang)}`;
+  return `\`reference of="technique" id="${t.id}"\` — ${text(t.name, lang)}`;
 }
 
 function deliverablePointer(id: string, lang: Lang): string | null {
   const d = findDeliverable(id);
   if (!d) return null;
-  return `\`get_deliverable ${d.id}\` — ${text(d.name, lang)}`;
+  return `\`reference of="deliverable" id="${d.id}"\` — ${text(d.name, lang)}`;
 }
 
 /** 参照行をまとめて「参考」節にする */
@@ -2853,7 +2854,8 @@ function runStakeholderMatrix(lang: Lang): ToolResult {
         },
       });
     }
-    if (!(s.approach && s.approach.trim().length > 0)) {
+    // 仮置きの定型文は未設定として扱う(欄が埋まっているだけでは方針にならない)
+    if (!isWrittenByHuman(s.approach)) {
       findings.push({
         severity: q === 'manageClosely' || q === 'keepSatisfied' ? 'high' : 'low',
         subject: s.name,

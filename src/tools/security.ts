@@ -33,7 +33,7 @@ import {
 import { splitSituationClauses } from '../knowledge/consulting.js';
 import { loadEngagement } from '../engagement/store.js';
 import type { Engagement } from '../engagement/model.js';
-import { errorResult, langSchema, msg, textResult } from './common.js';
+import { errorResult, langSchema, msg, textResult, type ToolResult } from './common.js';
 import {
   capInline,
   checkFreeText,
@@ -1760,21 +1760,34 @@ function scopeSpecificChecks(sit: Situation, lang: Lang): Bilingual[] {
  * ツール登録
  * ------------------------------------------------------------------ */
 
-export function registerSecurityTools(server: McpServer): void {
-  /* ---------------------------------------------------------------- *
-   * list_sabsa_layers
-   * ---------------------------------------------------------------- */
-  server.registerTool(
-    'list_sabsa_layers',
-    {
-      title: 'List the SABSA layers with their ADM counterparts',
-      description:
-        'セキュリティアーキテクチャの検討で使う 6 つの層(文脈・概念・論理・物理・コンポーネント・運用)を、「その層で何を決めるのか」「決めそこねると何が起きるか」「並走させる ADM フェーズ」付きで一覧する。6 つの問い(資産・動機・プロセス・人・場所・時間)も返す。 / List the six security-architecture layers — contextual, conceptual, logical, physical, component, operational — with what each layer decides, what breaks if it is skipped, and which ADM phases it runs alongside. Also returns the six questions: assets, motivation, process, people, location, time.',
-      inputSchema: { lang: langSchema },
-    },
-    async ({ lang }) => {
+/* -------------------------------------------------------------------------- *
+ * 参照系レンダラ / Reference renderer.
+ *
+ * かつての list_sabsa_layers の本体。統合ツール `reference` から
+ * `of: "security-layer"` で呼ばれる。`layerId` を渡すとその層だけを返す。
+ * 出力の中身は当時のまま(削っていない)。
+ * -------------------------------------------------------------------------- */
+
+/** セキュリティアーキテクチャの 6 層。ID を渡すとその 1 層だけを返す */
+export function renderSecurityLayerList(layerId: string | undefined, lang: Lang): ToolResult {
       try {
-        const l = lang as Lang;
+        const l = lang;
+        let scope = SABSA_LAYERS;
+        if (layerId) {
+          const key = layerId.trim().toLowerCase();
+          scope = SABSA_LAYERS.filter(
+            (x) => x.id.toLowerCase() === key || x.name.en.toLowerCase() === key,
+          );
+          if (scope.length === 0) {
+            return errorResult(
+              msg(
+                `層「${layerId.trim().slice(0, 60)}」が見つかりません。利用可能: ${SABSA_LAYERS.map((x) => x.id).join(', ')}`,
+                `Layer "${layerId.trim().slice(0, 60)}" not found. Available: ${SABSA_LAYERS.map((x) => x.id).join(', ')}`,
+                l,
+              ),
+            );
+          }
+        }
         const out: string[] = [];
 
         out.push(msg('# セキュリティアーキテクチャの 6 層', '# The six security-architecture layers', l));
@@ -1791,7 +1804,7 @@ export function registerSecurityTools(server: McpServer): void {
         // 一覧表(全体像を先に見せる)
         out.push(`| ${label('層', 'Layer', l)} | ID | ${label('何を決める層か', 'What it decides', l)} | ${label('並走する ADM フェーズ', 'Runs alongside', l)} |`);
         out.push('| --- | --- | --- | --- |');
-        for (const layer of SABSA_LAYERS) {
+        for (const layer of scope) {
           const phases = layer.phaseIds.map((id) => findPhase(id)?.code ?? id).join(', ');
           out.push(
             `| ${compact(layer.name, l)} | \`${layer.id}\` | ${compact(layer.viewpoint, l)} | ${phases} |`,
@@ -1799,7 +1812,7 @@ export function registerSecurityTools(server: McpServer): void {
         }
         out.push('');
 
-        for (const layer of SABSA_LAYERS) {
+        for (const layer of scope) {
           out.push(`## ${text(layer.name, l)} (\`${layer.id}\`)`);
           out.push('');
           out.push(`- ${label('目線', 'Viewpoint', l)}: ${text(layer.viewpoint, l)}`);
@@ -1855,13 +1868,13 @@ export function registerSecurityTools(server: McpServer): void {
           msg(
             `層一覧の生成に失敗しました: ${error instanceof Error ? error.message : String(error)}`,
             `Failed to render the layer list: ${error instanceof Error ? error.message : String(error)}`,
-            lang as Lang,
+            lang,
           ),
         );
       }
-    },
-  );
+}
 
+export function registerSecurityTools(server: McpServer): void {
   /* ---------------------------------------------------------------- *
    * map_security_to_adm
    * ---------------------------------------------------------------- */

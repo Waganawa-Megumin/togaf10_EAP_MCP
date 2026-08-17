@@ -26,7 +26,7 @@ import {
   type Bilingual,
   type Lang,
 } from '../knowledge/index.js';
-import { errorResult, langSchema, msg, textResult } from './common.js';
+import { errorResult, langSchema, msg, textResult, type ToolResult } from './common.js';
 
 /* ------------------------------------------------------------------ *
  * 型定義
@@ -3846,19 +3846,32 @@ function layerAdmPhases(layer: ArchiLayer): string {
  * ツール登録
  * ------------------------------------------------------------------ */
 
-export function registerArchiMateTools(server: McpServer): void {
-  /* ---------------- 1. list_archimate_layers ---------------- */
-  server.registerTool(
-    'list_archimate_layers',
-    {
-      title: 'List ArchiMate layers',
-      description:
-        'ArchiMate の 7 層を「何を表すか」「対応する ADM フェーズ」「代表要素」「その層で最も多い失敗」付きで一覧。 / List the seven ArchiMate layers with what each represents, its ADM phases, representative elements, and the mistake most often made in it.',
-      inputSchema: { lang: langSchema },
-    },
-    async ({ lang }) => {
+/* -------------------------------------------------------------------------- *
+ * 参照系レンダラ / Reference renderer.
+ *
+ * かつての list_archimate_layers の本体。統合ツール `reference` から
+ * `of: "archimate-layer"` で呼ばれる。`layerId` を渡すとその層だけを返す。
+ * 出力の中身は当時のまま(削っていない)。
+ * -------------------------------------------------------------------------- */
+
+/** ArchiMate の 7 層。ID を渡すとその 1 層だけを返す */
+export function renderArchiMateLayerList(layerId: string | undefined, lang: Lang): ToolResult {
       try {
-        const l = lang as Lang;
+        const l = lang;
+        let scope = LAYERS;
+        if (layerId) {
+          const key = layerId.trim().toLowerCase();
+          scope = LAYERS.filter((x) => x.id.toLowerCase() === key || x.name.en.toLowerCase() === key);
+          if (scope.length === 0) {
+            return errorResult(
+              msg(
+                `層「${layerId.trim().slice(0, 60)}」が見つかりません。利用可能: ${LAYERS.map((x) => x.id).join(', ')}`,
+                `Layer "${layerId.trim().slice(0, 60)}" not found. Available: ${LAYERS.map((x) => x.id).join(', ')}`,
+                l,
+              ),
+            );
+          }
+        }
         const out: string[] = [];
         out.push(msg('# ArchiMate の 7 層', '# The Seven ArchiMate Layers', l));
         out.push('');
@@ -3878,7 +3891,7 @@ export function registerArchiMateTools(server: McpServer): void {
           `| ${inline('層', 'Layer', l)} | ${inline('答える問い', 'Question it answers', l)} | ${inline('ADM フェーズ', 'ADM phases', l)} | ${inline('代表要素', 'Representative elements', l)} |`,
         );
         out.push('| --- | --- | :-: | --- |');
-        for (const layer of LAYERS) {
+        for (const layer of scope) {
           const elems = layer.elementIds.slice(0, 5).map(elementShort).join(', ');
           out.push(
             `| **${cell(layer.name, l)}** | ${cell(layer.question, l)} | ${layerAdmPhases(layer)} | ${elems}${layer.elementIds.length > 5 ? ' …' : ''} |`,
@@ -3886,7 +3899,7 @@ export function registerArchiMateTools(server: McpServer): void {
         }
         out.push('');
         out.push(msg('## 各層の中身と、いちばん多い失敗', '## What each layer holds, and how it usually goes wrong', l));
-        for (const layer of LAYERS) {
+        for (const layer of scope) {
           out.push('');
           out.push(`### ${text(layer.name, l)}`);
           out.push('');
@@ -3950,14 +3963,14 @@ export function registerArchiMateTools(server: McpServer): void {
           msg(
             `層の一覧生成に失敗しました: ${e instanceof Error ? e.message : String(e)}`,
             `Failed to build the layer list: ${e instanceof Error ? e.message : String(e)}`,
-            lang as Lang,
+            lang,
           ),
         );
       }
-    },
-  );
+}
 
-  /* ---------------- 2. map_togaf_to_archimate ---------------- */
+export function registerArchiMateTools(server: McpServer): void {
+  /* ---------------- 1. map_togaf_to_archimate ---------------- */
   server.registerTool(
     'map_togaf_to_archimate',
     {
@@ -4060,7 +4073,7 @@ export function registerArchiMateTools(server: McpServer): void {
     },
   );
 
-  /* ---------------- 3. validate_archimate_relationship ---------------- */
+  /* ---------------- 2. validate_archimate_relationship ---------------- */
   server.registerTool(
     'validate_archimate_relationship',
     {
@@ -4126,8 +4139,8 @@ export function registerArchiMateTools(server: McpServer): void {
           out.push('');
           out.push(
             msg(
-              '`list_archimate_layers` で要素名の一覧を確認できます。独自の要素名を使っている場合は、いちばん近い ArchiMate 要素名に置き換えて再度実行してください。',
-              'Run `list_archimate_layers` for the element names. If you are using your own naming, substitute the nearest ArchiMate element name and try again.',
+              '`reference` に `of: "archimate-element"` を渡すと要素名の一覧が出ます。独自の要素名を使っている場合は、いちばん近い ArchiMate 要素名に置き換えて再度実行してください。',
+              'Call `reference` with `of: "archimate-element"` for the element names. If you are using your own naming, substitute the nearest ArchiMate element name and try again.',
               l,
             ),
           );
@@ -4203,7 +4216,7 @@ export function registerArchiMateTools(server: McpServer): void {
     },
   );
 
-  /* ---------------- 4. suggest_archimate_view ---------------- */
+  /* ---------------- 3. suggest_archimate_view ---------------- */
   server.registerTool(
     'suggest_archimate_view',
     {
@@ -4381,7 +4394,7 @@ export function registerArchiMateTools(server: McpServer): void {
     },
   );
 
-  /* ---------------- 5. archimate_vs_togaf ---------------- */
+  /* ---------------- 4. archimate_vs_togaf ---------------- */
   server.registerTool(
     'archimate_vs_togaf',
     {

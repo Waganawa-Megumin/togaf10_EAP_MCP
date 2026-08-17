@@ -9,7 +9,9 @@ import type { Lang } from '../knowledge/index.js';
 export const langSchema = z
   .enum(['ja', 'en', 'both'])
   .default('both')
-  .describe('出力言語 / Output language. "both" returns Japanese and English together.');
+  // 75 ツール全部に載るので、1 バイトが 75 倍になる。enum の値(ja/en/both)が
+  // それ自体で意味を伝えるので、説明は最小限でよい。
+  .describe('出力言語 / Output language');
 
 export type ToolResult = {
   content: { type: 'text'; text: string }[];

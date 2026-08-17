@@ -66,8 +66,23 @@ const LOCAL = {
     ja: '「? 出所未記入」は出典が 1 文字も書かれていない行で、「× 出所不明」(書いたが辿れない)とは別物です。',
     en: '"? no source" means nothing was recorded at all, which is not the same as "× untraceable" (recorded but cannot be traced).',
   },
+  factorSource: {
+    ja: '評価そのものの出典。因子ごとの出典は各因子の下',
+    en: 'source of the assessment itself; per-factor sources sit under each factor',
+  },
   sourceCoverage: { ja: '出典あり', en: 'With a source' },
   confidenceUnset: { ja: '確度未設定', en: 'Confidence unset' },
+  sourceLegendLead: { ja: '出典欄の読み方', en: 'How to read the Source column' },
+  // 画面はツールチップで補えるが、この 1 枚は印刷して配られる。印の意味は紙の上に残す。
+  inferredWarning: {
+    ja: '相手に確認するまで、確定した事実として引用しないでください。',
+    en: 'Do not quote these as established fact until the client confirms them.',
+  },
+  inferredCount: { ja: 'この資料に含まれる推測', en: 'Inferred entries on this page' },
+  noSourceWarning: {
+    ja: '出典の無い項目は、後から真偽を確かめられません。配る前に、数字と固有名詞の行だけでも埋めてください。',
+    en: 'Entries without a source cannot be checked later. Before handing this page over, fill in at least the rows carrying figures and proper nouns.',
+  },
 } satisfies Record<string, Bilingual>;
 
 /** JSON をそのまま <script> に埋めても壊れないようにする */
@@ -243,7 +258,10 @@ h3.sub { font-size: 13px; margin: 18px 0 8px; color: var(--muted); font-weight: 
 .bar > i { display: block; height: 100%; background: var(--accent); transition: width .4s ease; }
 .src { font-size: 12px; }
 .src.none { color: var(--muted); }
+/* 印は色ではなく字形(● △ × ?)で区別する。白黒印刷でも意味が落ちない */
 .src.conf { font-size: 13px; }
+.srclegend { font-size: 12px; color: var(--muted); margin: 10px 0 0; line-height: 1.7; }
+.srclegend.warntx { color: var(--high); }
 .stats { display: flex; flex-wrap: wrap; gap: 20px; margin-top: 12px; }
 .stat .n { font-size: 20px; font-weight: 600; }
 .stat .k { font-size: 12px; color: var(--muted); }
@@ -385,6 +403,9 @@ footer { margin-top: 24px; color: var(--muted); font-size: 12px; text-align: cen
   section { border: 1px solid #ccc; box-shadow: none; break-inside: avoid; page-break-inside: avoid; margin-top: 10pt; }
   .phase.current { background: #f0f0f0 !important; }
   .tag { border-color: #999 !important; color: #000 !important; }
+  /* 出典の凡例と印は紙に残す。色が落ちても ● △ × ? の字形で意味が伝わる */
+  .srclegend, .srclegend.warntx, .src, .src.none { color: #000 !important; }
+  .srclegend { break-inside: avoid; page-break-inside: avoid; }
   a { color: #000; text-decoration: none; }
   h1 { font-size: 16pt; }
   .tl-scroll, .tblwrap { overflow: visible !important; }
@@ -427,7 +448,7 @@ footer { margin-top: 24px; color: var(--muted); font-size: 12px; text-align: cen
   var themeBtn = document.getElementById('themeBtn');
 
   /* 画面の状態(フィルタは再取得なしで再描画するためここに持つ) */
-  var state = { engagement: null, openRisksOnly: false, openActionsOnly: false };
+  var state = { engagement: null, openRisksOnly: false, openActionsOnly: false, prov: null };
   var navItems = [];
 
   document.getElementById('printBtn').textContent = S.print;
@@ -466,18 +487,73 @@ footer { margin-top: 24px; color: var(--muted); font-size: 12px; text-align: cen
     if (conf) out += '<span class="src conf" title="' + esc(conf.label) + '">' + esc(conf.marker) + '</span> ';
     return out + '<span class="src">' + esc(src || conf.label) + '</span>';
   }
-  /* 出典の付き具合を数える(件数だけ見せると「これだけ積み上がった」で話が終わる) */
+  /* 出典の付き具合を数える(件数だけ見せると「これだけ積み上がった」で話が終わる)。
+
+     **engagement/model.ts の summarizeProvenance と同じ数を出すこと。**
+     ヘッダの「10/17 件」と表に並ぶ印の数が食い違うと、どちらが本当か読者に判断できず、
+     出典表示そのものが信用されなくなる。合わせてあるのは次の 3 点:
+       - 台帳の種別と順序(kinds)
+       - オブジェクトでない要素(手編集された JSON の null など)は総数にも数えない
+       - 「出典あり」は source が空白だけでないこと(hasProvenance と同じ判定)
+     サーバー側は /api/state で案件をそのまま返すため、集計済みの値は降ってこない。
+     ここを直すときは model.ts の summarizeProvenance を同時に見ること。 */
+  var PROVENANCE_KINDS = ['risks', 'decisions', 'actions', 'stakeholders', 'deliverables', 'transitions', 'workPackages', 'assessments'];
   function provenanceStats(e) {
-    var kinds = ['risks', 'decisions', 'actions', 'stakeholders', 'deliverables', 'transitions', 'workPackages', 'assessments'];
     var total = 0, withSource = 0, by = { stated: 0, inferred: 0, unknown: 0, unset: 0 };
-    kinds.forEach(function (k) {
-      (e[k] || []).forEach(function (x) {
+    PROVENANCE_KINDS.forEach(function (k) {
+      var list = e[k];
+      if (!list || typeof list.length !== 'number') return;
+      for (var i = 0; i < list.length; i++) {
+        var x = list[i];
+        if (!x || typeof x !== 'object') continue;
         total += 1;
-        if (x && typeof x.source === 'string' && x.source.trim()) withSource += 1;
-        if (x && D.confidence[x.confidence]) by[x.confidence] += 1; else by.unset += 1;
-      });
+        if (typeof x.source === 'string' && x.source.trim()) withSource += 1;
+        /* hasOwnProperty で見る。素の添字だと confidence が "constructor" や
+           "toString"(手編集された JSON)のときに真になり、by[x.confidence] += 1 が
+           NaN になって内訳が総数と合わなくなる。model.ts の isConfidence は
+           列挙値との一致で見ているので、そちらと結果を揃える */
+        if (Object.prototype.hasOwnProperty.call(D.confidence, x.confidence)) by[x.confidence] += 1;
+        else by.unset += 1;
+      }
     });
-    return { total: total, withSource: withSource, by: by };
+    return { total: total, withSource: withSource, withoutSource: total - withSource, by: by };
+  }
+  /* 出典列を出すか。1 件も記録が無い案件では列ごと出さない
+     (全行が「? 出所未記入」の列が並ぶだけで、読む側の目が滑る)。
+     判定は markdown ダッシュボードの viewProvenance と同じ。 */
+  function provOn() {
+    var p = state.prov;
+    if (!p) return false;
+    return p.withSource > 0 || (p.total - p.by.unset) > 0;
+  }
+  /* 表のヘッダに足す出典列(出さないときは空配列) */
+  function srcHead() { return provOn() ? [{ t: S.source }] : []; }
+  /* 表の行に足す出典セル(出さないときは空文字) */
+  function srcTd(x) { return provOn() ? '<td>' + srcCell(x) + '</td>' : ''; }
+  /* 箇条書き(dl)に足す出典行 */
+  function srcDt(x) {
+    return provOn() ? '<dt>' + esc(S.source) + '</dt><dd>' + srcCell(x) + '</dd>' : '';
+  }
+  /* 印の意味。ツールチップは印刷に出ないので、紙に残る本文として書く */
+  function provenanceLegend() {
+    if (!provOn()) return '';
+    var marks = Object.keys(D.confidence).map(function (k) {
+      return '<span class="src conf">' + esc(D.confidence[k].marker) + '</span> ' + esc(D.confidence[k].label);
+    });
+    marks.push('<span class="src conf">' + esc(D.noSource.marker) + '</span> ' + esc(D.noSource.label));
+    var out = '<p class="srclegend"><strong>' + esc(S.sourceLegendLead) + '</strong>: '
+      + marks.join(' / ') + ' — ' + esc(S.sourceLegend) + '</p>';
+    var p = state.prov;
+    if (p && p.by.inferred > 0) {
+      out += '<p class="srclegend warntx"><strong>' + esc(S.inferredCount) + ': ' + p.by.inferred + '</strong> ('
+        + esc(D.confidence.inferred.marker + ' ' + D.confidence.inferred.label) + ') — '
+        + esc(S.inferredWarning) + '</p>';
+    }
+    if (p && p.withoutSource > 0) {
+      out += '<p class="srclegend">' + esc(D.noSource.marker + ' ' + D.noSource.label) + ': '
+        + p.withoutSource + ' — ' + esc(S.noSourceWarning) + '</p>';
+    }
+    return out;
   }
   /* 保管先はローカルパスや file:// も許すが、クリックでコードが走る URL はリンクにしない */
   function safeHref(url) {
@@ -531,14 +607,17 @@ footer { margin-top: 24px; color: var(--muted); font-size: 12px; text-align: cen
     var extra = '';
     if ((e.workPackages || []).length) extra += stat(e.workPackages.length, S.workPackages);
     if ((e.transitions || []).length) extra += stat(e.transitions.length, S.transitions);
-    /* 台帳が空のときは出さない。0/0 を「100%」や「出典管理が良い」と読ませないため */
-    var prov = provenanceStats(e);
-    if (prov.total > 0) {
+    /* 台帳が空のときは出さない。0/0 を「100%」や「出典管理が良い」と読ませないため。
+       集計は render() で 1 回だけ行い state.prov に置いてある(表の列と同じ数を使う) */
+    var prov = state.prov;
+    var legend = '';
+    if (prov && prov.total > 0) {
       var marks = D.noSource ? Object.keys(D.confidence).map(function (k) {
         return D.confidence[k].marker + ' ' + prov.by[k];
       }).join(' / ') : '';
       extra += stat(prov.withSource + '/' + prov.total, S.sourceCoverage + ' — ' + marks
         + ' / ' + S.confidenceUnset + ' ' + prov.by.unset);
+      legend = provenanceLegend();
     }
     return '<section>'
       + '<div class="bar"><i style="width:' + pct + '%"></i></div>'
@@ -550,7 +629,7 @@ footer { margin-top: 24px; color: var(--muted); font-size: 12px; text-align: cen
       + stat(e.decisions.length, S.decisions)
       + stat(e.deliverables.length, S.deliverables)
       + extra
-      + '</div></section>';
+      + '</div>' + legend + '</section>';
   }
 
   function renderPhases(e) {
@@ -698,11 +777,12 @@ footer { margin-top: 24px; color: var(--muted); font-size: 12px; text-align: cen
           + '</td><td class="c">' + tag(w.businessValue, D.priority[w.businessValue] || w.businessValue)
           + '</td><td class="c">' + tag(w.effort, D.priority[w.effort] || w.effort)
           + '</td><td>' + esc(deps)
-          + '</td><td class="n">' + esc(w.owner) + '</td></tr>';
+          + '</td><td class="n">' + esc(w.owner) + '</td>' + srcTd(w) + '</tr>';
       });
       body += '<h3 class="sub">' + esc(S.workPackages) + '</h3>' + table(
         [{ t: S.title }, { t: S.status, c: 1 }, { t: S.transition, n: 1 }, { t: S.quarter, n: 1 },
-         { t: S.businessValue, c: 1 }, { t: S.effort, c: 1 }, { t: S.dependsOn }, { t: S.owner, n: 1 }],
+         { t: S.businessValue, c: 1 }, { t: S.effort, c: 1 }, { t: S.dependsOn }, { t: S.owner, n: 1 }]
+          .concat(srcHead()),
         rows);
     }
 
@@ -723,6 +803,7 @@ footer { margin-top: 24px; color: var(--muted); font-size: 12px; text-align: cen
           dl += '<dt>' + esc(S.disposalPlan) + '</dt><dd class="warntx">' + esc(S.disposalMissing) + '</dd>';
         }
         if (t.note) dl += '<dt>' + esc(S.note) + '</dt><dd>' + esc(t.note) + '</dd>';
+        dl += srcDt(t);
         return '<div class="tcard' + (warn ? ' warn' : '') + '"><h3>' + esc(t.name)
           + tag(warn ? 'critical' : 'completed', S.standalone + ': ' + (warn ? S.standaloneNo : S.standaloneYes))
           + '</h3><dl>' + dl + '</dl></div>';
@@ -739,10 +820,11 @@ footer { margin-top: 24px; color: var(--muted); font-size: 12px; text-align: cen
         + '</td><td class="c">' + tag(s.influence, D.influence[s.influence] || s.influence)
         + '</td><td class="c">' + tag(s.interest, D.influence[s.interest] || s.interest)
         + '</td><td>' + esc((s.concerns || []).join('; ')) + '</td><td>' + esc(s.approach)
-        + '</td><td>' + srcCell(s) + '</td></tr>';
+        + '</td>' + srcTd(s) + '</tr>';
     });
     return section(S.stakeholders, e.stakeholders.length, table(
-      [{ t: S.name, n: 1 }, { t: S.role, n: 1 }, { t: S.influence, c: 1 }, { t: S.interest, c: 1 }, { t: S.concerns }, { t: S.approach }, { t: S.source }],
+      [{ t: S.name, n: 1 }, { t: S.role, n: 1 }, { t: S.influence, c: 1 }, { t: S.interest, c: 1 }, { t: S.concerns }, { t: S.approach }]
+        .concat(srcHead()),
       rows), 'stakeholders');
   }
 
@@ -793,11 +875,12 @@ footer { margin-top: 24px; color: var(--muted); font-size: 12px; text-align: cen
         + '</td><td class="c">' + (r.residualLevel ? tag(r.residualLevel, D.riskLevel[r.residualLevel]) : '')
         + '</td><td class="c">' + tag(r.status, D.riskStatus[r.status] || r.status)
         + '</td><td class="n">' + esc(r.owner) + '</td><td>' + esc(r.mitigation)
-        + '</td><td>' + srcCell(r) + '</td></tr>';
+        + '</td>' + srcTd(r) + '</tr>';
     });
     var count = state.openRisksOnly ? list.length + ' / ' + e.risks.length : e.risks.length;
     return section(S.risks, count, table(
-      [{ t: S.title }, { t: S.level, c: 1 }, { t: S.residual, c: 1 }, { t: S.status, c: 1 }, { t: S.owner, n: 1 }, { t: S.mitigation }, { t: S.source }],
+      [{ t: S.title }, { t: S.level, c: 1 }, { t: S.residual, c: 1 }, { t: S.status, c: 1 }, { t: S.owner, n: 1 }, { t: S.mitigation }]
+        .concat(srcHead()),
       rows), 'risks', toggleBtn('risks', state.openRisksOnly));
   }
 
@@ -846,6 +929,9 @@ footer { margin-top: 24px; color: var(--muted); font-size: 12px; text-align: cen
       dl += '<dt>' + esc(S.decision) + '</dt><dd>' + esc(d.decision) + '</dd>';
       if (d.rationale) dl += '<dt>' + esc(S.rationale) + '</dt><dd>' + esc(d.rationale) + '</dd>';
       if (d.decidedBy) dl += '<dt>' + esc(S.decidedBy) + '</dt><dd>' + esc(d.decidedBy) + '</dd>';
+      /* 決定は表ではなく明細なので、列ではなく 1 項目として出典を足す。
+         どこで決めたか辿れない決定は、覆されたときに理由が残らない */
+      dl += srcDt(d);
       return '<div class="decision"><h3>' + esc(d.title) + tag(d.status, D.decisionStatus[d.status] || d.status)
         + '</h3><dl>' + dl + '</dl></div>';
     }).join('');
@@ -864,11 +950,12 @@ footer { margin-top: 24px; color: var(--muted); font-size: 12px; text-align: cen
       return '<tr><td>' + esc(a.title) + (a.note ? '<br><span class="empty">' + esc(a.note) + '</span>' : '')
         + '</td><td class="n">' + esc(a.owner) + '</td><td class="n">' + esc(a.due)
         + '</td><td class="c">' + tag(a.priority, D.priority[a.priority] || a.priority)
-        + '</td><td class="c">' + tag(a.status, D.actionStatus[a.status] || a.status) + '</td></tr>';
+        + '</td><td class="c">' + tag(a.status, D.actionStatus[a.status] || a.status) + '</td>' + srcTd(a) + '</tr>';
     });
     var count = state.openActionsOnly ? list.length + ' / ' + e.actions.length : e.actions.length;
     return section(S.actions, count, table(
-      [{ t: S.title }, { t: S.owner, n: 1 }, { t: S.due, n: 1 }, { t: S.priority, c: 1 }, { t: S.status, c: 1 }], rows),
+      [{ t: S.title }, { t: S.owner, n: 1 }, { t: S.due, n: 1 }, { t: S.priority, c: 1 }, { t: S.status, c: 1 }]
+        .concat(srcHead()), rows),
       'actions', toggleBtn('actions', state.openActionsOnly));
   }
 
@@ -881,10 +968,11 @@ footer { margin-top: 24px; color: var(--muted); font-size: 12px; text-align: cen
       return '<tr><td>' + esc(d.name) + (d.note ? '<br><span class="empty">' + esc(d.note) + '</span>' : '')
         + '</td><td class="c">' + esc(codes[d.phaseId] || '')
         + '</td><td class="c">' + tag(d.status, D.deliverableStatus[d.status] || d.status)
-        + '</td><td class="n">' + esc(d.owner) + '</td><td>' + link + '</td></tr>';
+        + '</td><td class="n">' + esc(d.owner) + '</td><td>' + link + '</td>' + srcTd(d) + '</tr>';
     });
     return section(S.deliverables, e.deliverables.length, table(
-      [{ t: S.title }, { t: S.phase, c: 1 }, { t: S.status, c: 1 }, { t: S.owner, n: 1 }, { t: S.link }], rows),
+      [{ t: S.title }, { t: S.phase, c: 1 }, { t: S.status, c: 1 }, { t: S.owner, n: 1 }, { t: S.link }]
+        .concat(srcHead()), rows),
       'deliverables');
   }
 
@@ -899,6 +987,19 @@ footer { margin-top: 24px; color: var(--muted); font-size: 12px; text-align: cen
       if (a.assessedAt) subs.push(S.assessedAt + ': ' + fmtDay(a.assessedAt));
       subs.push(S.scale + ': 0–' + scale);
       var sub = '<div class="sub">' + esc(subs.join(' · ')) + '</div>';
+      /* 因子ごとの出典。評価は「評価そのもの」と「因子 1 件ずつ」の 2 段で出典を持てる。
+         因子側だけに出典があるとき評価の出典だけを見せると「? 出所未記入」になり、
+         原文を指せる点数が出所不明の点数に見えてしまう */
+      var factorProv = (a.factors || []).some(function (f) {
+        return (typeof f.source === 'string' && f.source.trim()) || f.confidence;
+      });
+      /* 成熟度の点数は「誰がどこで付けたか」が消えると、次の四半期に比較できなくなる。
+         srcCell は HTML を返すので、esc を通す subs には混ぜず別行にする */
+      if (provOn()) {
+        sub += '<div class="sub">' + esc(S.source) + ': ' + srcCell(a)
+          + (factorProv && provOn() ? esc(' (' + S.factorSource + ')') : '') + '</div>';
+      }
+      var showFactorSrc = provOn() && factorProv;
       var factors = (a.factors || []).map(function (f) {
         /* 数値は記録された値をそのまま出し、バーの長さだけ尺度に収める
            (尺度外の値が入っていても表示を書き換えないため) */
@@ -908,7 +1009,8 @@ footer { margin-top: 24px; color: var(--muted); font-size: 12px; text-align: cen
         var tgt = Math.max(0, Math.min(scale, tgtVal));
         var gap = Math.round((tgtVal - curVal) * 100) / 100;
         var hint = S.current + ': ' + curVal + ' / ' + S.target + ': ' + tgtVal;
-        return '<div class="fn">' + esc(f.name) + (f.note ? '<small>' + esc(f.note) + '</small>' : '') + '</div>'
+        return '<div class="fn">' + esc(f.name) + (f.note ? '<small>' + esc(f.note) + '</small>' : '')
+          + (showFactorSrc ? '<small class="src">' + esc(S.source) + ': ' + srcCell(f) + '</small>' : '') + '</div>'
           + '<div class="fb" title="' + esc(hint) + '">'
           + '<i style="width:' + (cur / scale * 100) + '%"></i>'
           + '<b style="left:calc(' + (tgt / scale * 100) + '% - 1px)" title="' + esc(S.target + ': ' + tgtVal) + '"></b>'
@@ -947,6 +1049,9 @@ footer { margin-top: 24px; color: var(--muted); font-size: 12px; text-align: cen
   function render() {
     var e = state.engagement;
     navItems = [];
+    /* 出典の集計は 1 描画につき 1 回。概況の数字と各表の列が同じ集計を見るようにする
+       (別々に数えると、絞り込みや並べ替えを足したときに片方だけ狂う) */
+    state.prov = e ? provenanceStats(e) : null;
     if (!e) {
       document.getElementById('title').textContent = S.dashboard;
       document.getElementById('meta').textContent = '';

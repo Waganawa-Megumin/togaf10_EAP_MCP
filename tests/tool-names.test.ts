@@ -40,8 +40,8 @@ const ALLOWED = new Map<string, string>([
  *
  * アンダースコアを必須にしているのは意図的。外すと `a` `true` `risk` のような
  * ただの語まで拾ってしまい(実測: 未知トークンが 0 個 → 45 個)、許可リストが
- * 肥大化して検査そのものが形骸化する。登録済み 84 ツールのうち
- * アンダースコアを持たないのは `consult` の 1 件だけなので、
+ * 肥大化して検査そのものが形骸化する。登録済み 75 ツールのうち
+ * アンダースコアを持たないのは `consult` と `reference` の 2 件だけなので、
  * **存在しないツール名は事実上すべて snake_case で書かれる**。
  */
 const TOKEN = /`([a-z][a-z0-9]*(?:_[a-z0-9]+)+)`/g;
@@ -133,7 +133,9 @@ afterAll(async () => {
 
 describe('src が名指しする識別子 / identifiers named by the source', () => {
   it('registers the expected surface (guards against an empty scan)', () => {
-    expect(toolNames.size).toBeGreaterThanOrEqual(80);
+    // 参照系 14 本を `reference` 1 本に統合したため 88 → 75。
+    // ここは「走査が空でないこと」を守るための下限なので、統合ぶんを反映して下げる。
+    expect(toolNames.size).toBeGreaterThanOrEqual(70);
     expect(knownWords.size).toBeGreaterThan(50);
   });
 

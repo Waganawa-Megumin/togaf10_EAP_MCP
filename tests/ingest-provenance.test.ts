@@ -21,7 +21,7 @@ import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createServer } from '../src/server.js';
-import { provenanceCell } from '../src/engagement/model.js';
+import { NO_SOURCE_LABEL, provenanceCell } from '../src/engagement/model.js';
 
 let dataDir = '';
 let docPath = '';
@@ -173,24 +173,58 @@ describe('出典を要求される項目には、出典を記録する手段が�
 });
 
 describe('確度だけがあって出典が無い行は、確認済みに見せない', () => {
+  // 「出典が空」を指す語は凡例側の語(NO_SOURCE_LABEL)に揃えている途中なので、
+  // 文言そのものではなく「印だけで終わらせない」ことを固定する。
+  const noSourceJa = NO_SOURCE_LABEL.ja;
+  const noSourceEn = NO_SOURCE_LABEL.en;
+
   it('`● 記載あり` を単独で出さず、出典が無いことをセル内で言う', () => {
-    expect(provenanceCell({ confidence: 'stated' }, 'ja')).toBe('● 記載あり(出典なし)');
-    expect(provenanceCell({ confidence: 'inferred' }, 'ja')).toContain('出典なし');
-    expect(provenanceCell({ confidence: 'stated' }, 'en')).toContain('no source');
+    const stated = provenanceCell({ confidence: 'stated' }, 'ja');
+    expect(stated).not.toBe('● 記載あり');
+    expect(stated).toContain('● 記載あり');
+    expect(stated).toContain(noSourceJa);
+    expect(provenanceCell({ confidence: 'inferred' }, 'ja')).toContain(noSourceJa);
+    expect(provenanceCell({ confidence: 'stated' }, 'en')).toContain(noSourceEn);
   });
 
   it('出典があるときは従来どおり印と出典だけを出す', () => {
     expect(provenanceCell({ source: 'doc.md:3', confidence: 'stated' }, 'ja')).toBe('● 記載あり doc.md:3');
-    expect(provenanceCell({ source: 'doc.md:3', confidence: 'stated' }, 'ja')).not.toContain('出典なし');
+    expect(provenanceCell({ source: 'doc.md:3', confidence: 'stated' }, 'ja')).not.toContain(noSourceJa);
   });
 
-  it('リスクの表でも「記載あり」だけの行が出ない', async () => {
+  // 第 5 波: 「stated なのに出典が空」は**書き込み時に止める**ようになった(model.ts)。
+  // したがってツール経由ではもう作れない。作れないことと、
+  // それでも既存の保存データには残っていて表示側が印を付けることの両方を固定する。
+  it('stated なのに出典が空の項目は、そもそも保存させない', async () => {
     await freshEngagement('出典なし stated');
-    await callTool('update_engagement', {
+    const out = await callTool('update_engagement', {
       lang: 'ja',
       risks: [{ title: '出典の無い断定', level: 'high', status: 'open', confidence: 'stated' }],
     });
+    expect(out).toContain('stated');
+    expect(out).toContain('保存できません');
+    expect(storedEngagement().risks).toHaveLength(0);
+  });
+
+  it('既に保存されている「出典なし stated」は、表で印を付けて出す', async () => {
+    await freshEngagement('出典なし stated(既存データ)');
+    await callTool('update_engagement', {
+      lang: 'ja',
+      risks: [{ title: '出典の無い断定', level: 'high', status: 'open', confidence: 'unknown' }],
+    });
+    // 書き込み経路では作れないので、旧版が残した状態をファイルに直接作る
+    const dir = join(dataDir, 'engagements');
+    const file = readdirSync(dir).find((f) => f.endsWith('.json'));
+    if (!file) throw new Error('engagement file not found');
+    const path = join(dir, file);
+    const stored = JSON.parse(readFileSync(path, 'utf8'));
+    stored.risks[0].confidence = 'stated';
+    delete stored.risks[0].source;
+    writeFileSync(path, JSON.stringify(stored), 'utf8');
+
     const table = await callTool('risk_matrix', { lang: 'ja' });
-    expect(table).toContain('● 記載あり(出典なし)');
+    expect(table).toContain('出典の無い断定');
+    expect(table).toContain('● 記載あり');
+    expect(table).toContain(noSourceJa);
   });
 });

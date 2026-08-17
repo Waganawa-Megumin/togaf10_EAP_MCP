@@ -15,6 +15,7 @@ import {
   type Lang,
   type Technique,
 } from '../knowledge/index.js';
+import { isWrittenByHuman } from '../engagement/model.js';
 import type {
   Assessment,
   Engagement,
@@ -496,7 +497,8 @@ function stakeholderTable(people: Stakeholder[], lang: Lang): string[] {
 /** ステークホルダー表の下に付ける、未記入欄の指摘 */
 function stakeholderGaps(people: Stakeholder[], lang: Lang): string[] {
   const noConcern = people.filter((s) => (s.concerns ?? []).length === 0).map((s) => s.name);
-  const noApproach = people.filter((s) => !s.approach || s.approach.trim().length === 0).map((s) => s.name);
+  // 機械が置いた仮置き文字列(旧 ingest_document の「要確認(自動抽出)」)は未記入として扱う
+  const noApproach = people.filter((s) => !isWrittenByHuman(s.approach)).map((s) => s.name);
   const out: string[] = [];
   if (noConcern.length > 0) {
     out.push(

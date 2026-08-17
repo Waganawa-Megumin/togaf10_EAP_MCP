@@ -101,9 +101,19 @@ interface Entry {
   /** 数値をひとまとめにするキー(subject があればそれ、無ければ label) */
   groupLabel: string;
   groupKey: string;
+  /**
+   * `subject` が実際に渡されたか。
+   *
+   * **渡し忘れと省略を区別するために持つ。** groupLabel だけを見ると、
+   * 「label を代用した」項目と「label と同じ文字列を subject に入れた」項目が
+   * 区別できず、表の「対象」欄が空白になって読み手が理由を推測できなくなる。
+   */
+  subjectGiven: boolean;
   /** 表記ゆれ比較に使うキー */
   nameKey: string;
   number: ParsedNumber | null;
+  /** value が日付表記だったとき。日付は数値検査から外す(下の parseDate を参照) */
+  date: ParsedDate | null;
   /** 明示された unit を優先し、無ければ value から取り出したもの */
   unit: string;
 }
@@ -363,6 +373,113 @@ function parseNumber(raw: string): ParsedNumber | null {
 function fmtNumber(value: number): string {
   if (!Number.isFinite(value)) return '?';
   return Number.isInteger(value) ? value.toLocaleString('en-US') : String(value);
+}
+
+// ---------------------------------------------------------------------------
+// 日付の解釈 / Date parsing
+// ---------------------------------------------------------------------------
+
+type DateGrain = 'day' | 'month' | 'year';
+
+const GRAIN_LABEL: Record<DateGrain, Bilingual> = {
+  day: { ja: '日付', en: 'date' },
+  month: { ja: '年月', en: 'year-month' },
+  year: { ja: '年', en: 'year' },
+};
+
+interface ParsedDate {
+  /** 渡された元の表記(そのまま見せる) */
+  raw: string;
+  /** 比較用に YYYYMMDD の整数にしたもの(粒度が粗いときは 1 で埋める) */
+  key: number;
+  grain: DateGrain;
+}
+
+/**
+ * 「2024年3月31日」「2025年度」「2024-03-31」のような**日付表記**を読む。読めなければ null。
+ *
+ * **これが無いと数値検査が嘘をつく。** 日付を数値として読むと「2024年3月31日」は 2024、
+ * 「2025年3月31日」は 2025 になり、同じ subject に並べたときに
+ * 「同じ対象の数値が 4% 食い違っている(重み高)」という**存在しない矛盾**が出る
+ * (実測で再現した)。日付は数値検査から外し、日付として別に見る。
+ *
+ * 採るのは 1900〜2099 の 4 桁年に、`年` / `年度` か `-` `/` の区切りが続くものだけ。
+ * 「5年」「10年間」のような期間は年が 4 桁でないので採らない。
+ * 小数点区切り(`2024.5`)は **採らない** — 2024.5 億円のような小数と区別できないため、
+ * `2024.3.31` のように 2 つ点があるときだけ日付とみなす。
+ */
+function parseDate(raw: string): ParsedDate | null {
+  const source = nfkc(raw).trim();
+  if (source.length === 0) return null;
+  // 先頭近く(FY / 約 などの短い前置きは許す)に年が来るものだけを日付扱いする
+  const patterns: readonly { re: RegExp; grain: DateGrain }[] = [
+    { re: /^[^0-9]{0,4}((?:19|20)\d{2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日/, grain: 'day' },
+    { re: /^[^0-9]{0,4}((?:19|20)\d{2})\s*年\s*(\d{1,2})\s*月/, grain: 'month' },
+    { re: /^[^0-9]{0,4}((?:19|20)\d{2})\s*年度?(?!\d)/, grain: 'year' },
+    { re: /^[^0-9]{0,4}((?:19|20)\d{2})[-/](\d{1,2})[-/](\d{1,2})(?!\d)/, grain: 'day' },
+    { re: /^[^0-9]{0,4}((?:19|20)\d{2})\.(\d{1,2})\.(\d{1,2})(?!\d)/, grain: 'day' },
+    { re: /^[^0-9]{0,4}((?:19|20)\d{2})[-/](\d{1,2})(?!\d)/, grain: 'month' },
+  ];
+  for (const { re, grain } of patterns) {
+    const m = source.match(re);
+    if (!m) continue;
+    const year = Number(m[1]);
+    const month = m[2] === undefined ? 1 : Number(m[2]);
+    const day = m[3] === undefined ? 1 : Number(m[3]);
+    if (month < 1 || month > 12) continue;
+    if (day < 1 || day > 31) continue;
+    return { raw: source, key: year * 10_000 + month * 100 + day, grain };
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// 数値として読めなかった理由 / Why a value could not be read as a number
+// ---------------------------------------------------------------------------
+
+/**
+ * 「読めませんでした」だけでは直しようがない。**何を直せばよいか**まで返す。
+ * 分類は文字種で機械的に決まるものだけに限る(中身の意味は推測しない)。
+ */
+type UnreadableReason = 'blank' | 'redacted' | 'kanjiNumeral' | 'nonArabicDigit' | 'noDigit';
+
+const REDACTION_RE =
+  /^(?:非公開|未公開|未公表|非開示|開示なし|不明|未定|未記載|記載なし|なし|無し|該当なし|対象外|n\/?a|tbd|unknown|undisclosed|not\s+disclosed|[-—―‐~〜…*?・．.]+)$/i;
+
+const KANJI_NUMERAL_RE = /[〇零一二三四五六七八九十百千万億兆]/;
+
+function unreadableReason(raw: string): UnreadableReason {
+  const s = nfkc(raw).trim();
+  if (s.length === 0) return 'blank';
+  if (REDACTION_RE.test(s)) return 'redacted';
+  if (/[0-9]/.test(s)) return 'nonArabicDigit';
+  if (KANJI_NUMERAL_RE.test(s)) return 'kanjiNumeral';
+  return 'noDigit';
+}
+
+const UNREADABLE_LABEL: Record<UnreadableReason, Bilingual> = {
+  blank: { ja: '空白でした', en: 'it was blank' },
+  redacted: {
+    ja: '伏せ字か記号だけで数字がありません',
+    en: 'redacted or symbols only, with no digits',
+  },
+  kanjiNumeral: {
+    ja: '漢数字で書かれています(算用数字にすると読めます)',
+    en: 'written with kanji numerals; rewrite with Arabic digits',
+  },
+  nonArabicDigit: {
+    ja: '数字らしき文字はありますが算用数字として読めません(丸数字・ローマ数字・別の数字体系など)',
+    en: 'has digit-like characters that are not Arabic numerals (circled, Roman, or another numeral system)',
+  },
+  noDigit: {
+    ja: '数字が含まれていません(区分名や文章のようです)',
+    en: 'contains no digits at all (it reads as a category name or prose)',
+  },
+};
+
+/** 1 行に畳んで長さを抑える(引用ブロックに入れるので表のエスケープは不要) */
+function flat(value: string, limit = 40): string {
+  return capCell(String(value), limit).replace(/\r?\n/g, ' ');
 }
 
 // ---------------------------------------------------------------------------
@@ -641,8 +758,55 @@ function checkNameVariants(entries: readonly Entry[]): CheckResult {
 // 検査 3: 数値の食い違い / Numeric conflicts
 // ---------------------------------------------------------------------------
 
+/**
+ * 2 件がまったく同じ出典を指しているか。同じなら、その表記を返す。
+ *
+ * 同じページの中の食い違いは「時点が違う」「範囲が違う」では説明しにくい。
+ * **新しい指摘を作らず、既にある指摘に注記を足すだけ**にしてある(誤検出を増やさないため)。
+ */
+function sharedSource(a: Entry, b: Entry): string | null {
+  const sa = (a.item.source ?? '').trim();
+  const sb = (b.item.source ?? '').trim();
+  if (sa.length === 0 || sb.length === 0) return null;
+  return normalizeKey(sa) === normalizeKey(sb) ? sa : null;
+}
+
+/**
+ * 同じ出典から来ている指摘に、その事実を注記する(重みは変えない)。
+ *
+ * **足すのではなく差し替える。** 元の「確認してほしいこと」に前置きを足すと、
+ * セルの上限(120 文字)を越えて肝心の後半が切られる(実測で切れた)。
+ * 出典が同一なら「時点が違う」「集計範囲が違う」という一般的な助言はそもそも効かないので、
+ * その場合だけの短い指示に置き換える。
+ */
+function withSharedSourceNote(finding: Finding, a: Entry, b: Entry): Finding {
+  const src = sharedSource(a, b);
+  if (!src) return finding;
+  const shown = flat(src, 24);
+  return {
+    ...finding,
+    title: {
+      ja: `${finding.title.ja}(同一出典)`,
+      en: `${finding.title.en} (same source)`,
+    },
+    evidence: {
+      ja: `${finding.evidence.ja} — 出典はどちらも「${shown}」`,
+      en: `${finding.evidence.en} — both cite "${shown}"`,
+    },
+    ask: {
+      ja: `出典が同一(「${shown}」)なので、時点や集計範囲の違いでは説明しにくい組み合わせです。その 1 か所の原文を開き、どちらが本文の値かを確かめてください。`,
+      en: `Both cite "${shown}", so date or scope is an unlikely explanation. Open that one spot and settle which figure it states.`,
+    },
+  };
+}
+
 /** 同じ対象についての 2 つの数値を比べる。指摘不要なら null */
 function compareNumbers(a: Entry, b: Entry, groupLabel: string): Finding | null {
+  const finding = compareNumbersCore(a, b, groupLabel);
+  return finding ? withSharedSourceNote(finding, a, b) : null;
+}
+
+function compareNumbersCore(a: Entry, b: Entry, groupLabel: string): Finding | null {
   const na = a.number;
   const nb = b.number;
   if (!na || !nb) return null;
@@ -777,8 +941,14 @@ function checkNumberConflicts(entries: readonly Entry[]): CheckResult {
     }
   }
 
+  // 日付は日付の検査に回してあるので、ここでは「読めなかった」に数えない。
+  // 数えると「2024年3月31日 が読めませんでした」という、直しようのない指摘になる。
   const unparsed = entries.filter(
-    (e) => e.number === null && e.item.value !== undefined && String(e.item.value).trim().length > 0,
+    (e) =>
+      e.number === null &&
+      e.date === null &&
+      e.item.value !== undefined &&
+      String(e.item.value).trim().length > 0,
   );
   return {
     key: 'number',
@@ -786,13 +956,32 @@ function checkNumberConflicts(entries: readonly Entry[]): CheckResult {
     findings: sink.list(),
     detected: sink.detected,
     scanned: withNumber.length,
-    note:
-      unparsed.length > 0
-        ? {
-            ja: `value を渡したのに数値として読めなかった項目が ${unparsed.length} 件あります(番号: ${unparsed.map((e) => e.index).join(', ')})。この検査の対象外です。`,
-            en: `${unparsed.length} item(s) had a value that could not be read as a number (index: ${unparsed.map((e) => e.index).join(', ')}). They were not checked.`,
-          }
-        : undefined,
+    note: unparsed.length > 0 ? unparsedNote(unparsed) : undefined,
+  };
+}
+
+/**
+ * 「読めませんでした」で終わらせない。**どれが・どう書かれていて・なぜ読めなかったか**まで出す。
+ * 番号だけを返していたときは、利用者が元の入力を開き直さないと直せなかった。
+ */
+function unparsedNote(unparsed: readonly Entry[]): Bilingual {
+  const SHOWN = 8;
+  const lines = unparsed.slice(0, SHOWN).map((e) => {
+    const raw = flat(String(e.item.value ?? ''));
+    const reason = UNREADABLE_LABEL[unreadableReason(String(e.item.value ?? ''))];
+    return {
+      ja: `[${e.index}] ${flat(e.label, 30)}「${raw}」— ${reason.ja}`,
+      en: `[${e.index}] ${flat(e.label, 30)} "${raw}" — ${reason.en}`,
+    };
+  });
+  const rest = unparsed.length - lines.length;
+  const more = {
+    ja: rest > 0 ? `(ほか ${rest} 件)` : '',
+    en: rest > 0 ? ` (and ${rest} more)` : '',
+  };
+  return {
+    ja: `value を渡したのに数値として読めなかった項目が ${unparsed.length} 件あります。数値の突き合わせの対象外です。内訳: ${lines.map((l) => l.ja).join(' ／ ')}${more.ja}。数値として比べたいものは「101800」「12万」「35%」のような算用数字の表記に直して渡し直してください。伏せ字や区分名はそのままで構いません(比べる相手がいないだけです)。`,
+    en: `${unparsed.length} item(s) carried a value that could not be read as a number, so they were left out of the numeric comparison. They are: ${lines.map((l) => l.en).join(' / ')}${more.en}. Rewrite the ones you want compared as Arabic figures such as "101800", "12万", or "35%". Redacted or categorical values can stay as they are — they simply have nothing to be compared against.`,
   };
 }
 
@@ -899,14 +1088,221 @@ function checkAssertiveInferred(entries: readonly Entry[]): CheckResult {
 }
 
 // ---------------------------------------------------------------------------
+// 検査 6: 日付の前後 / Date ordering
+// ---------------------------------------------------------------------------
+
+/** 「始まり」を表す語。label にこれが入っていれば開始側とみなす */
+const START_MARKERS: readonly string[] = [
+  '開始',
+  '着手',
+  '起点',
+  '設立',
+  '発足',
+  '策定',
+  '公表',
+  '起算',
+  'start',
+  'begin',
+  'from',
+  'since',
+  'kickoff',
+  'kick-off',
+];
+
+/** 「終わり」を表す語 */
+const END_MARKERS: readonly string[] = [
+  '終了',
+  '完了',
+  '期限',
+  '締切',
+  '締め切り',
+  '納期',
+  '目標時期',
+  '到達',
+  '廃止',
+  'end',
+  'until',
+  'due',
+  'deadline',
+  'completion',
+  'target date',
+];
+
+function hasMarker(value: string, markers: readonly string[]): boolean {
+  const lower = nfkc(value).toLowerCase();
+  return markers.some((m) => lower.includes(m.toLowerCase()));
+}
+
+/** 開始 / 終了 の役割が読み取れるか。読み取れなければ null */
+function dateRole(entry: Entry): 'start' | 'end' | null {
+  const body = `${entry.label} ${entry.item.statement ?? ''}`;
+  const start = hasMarker(body, START_MARKERS);
+  const end = hasMarker(body, END_MARKERS);
+  if (start === end) return null; // 両方入っている / どちらも無い → 判断しない
+  return start ? 'start' : 'end';
+}
+
+function fmtDate(d: ParsedDate, lang: Lang): string {
+  return `${d.raw}(${text(GRAIN_LABEL[d.grain], lang === 'both' ? 'ja' : lang)})`;
+}
+
+/**
+ * 同じ subject に入った日付どうしを見る。
+ *
+ * 出すのは 2 つだけ:
+ * - **開始が終了より後**(label から役割が読み取れたときだけ)。ここは重み高。
+ * - 役割が読み取れないまま**違う時点が同じ対象に入っている**。重み低。
+ *
+ * 役割が読み取れて順序も正しい組は**何も出さない**。開始日と終了日が並んでいるのは
+ * 正常な状態で、そこに指摘を出すと正しく使っている人ほど雑音が増える。
+ */
+function checkDateOrder(entries: readonly Entry[]): CheckResult {
+  const withDate = entries.filter((e) => e.date !== null);
+  const groups = new Map<string, Entry[]>();
+  for (const e of withDate) {
+    const list = groups.get(e.groupKey);
+    if (list) list.push(e);
+    else groups.set(e.groupKey, [e]);
+  }
+
+  const sink = new FindingSink();
+  for (const list of groups.values()) {
+    for (let i = 0; i < list.length; i += 1) {
+      for (let j = i + 1; j < list.length; j += 1) {
+        const a = list[i];
+        const b = list[j];
+        const da = a.date;
+        const db = b.date;
+        if (!da || !db || da.key === db.key) continue;
+
+        const ra = dateRole(a);
+        const rb = dateRole(b);
+        const earlier = da.key < db.key ? a : b;
+        const later = da.key < db.key ? b : a;
+        const earlierRole = earlier === a ? ra : rb;
+        const laterRole = later === a ? ra : rb;
+
+        if (earlierRole === 'end' && laterRole === 'start') {
+          sink.push({
+            severity: 'high',
+            title: { ja: '開始が終了より後になっている可能性', en: 'Possible start-after-end date order' },
+            evidence: {
+              ja: `${a.groupLabel}: [${later.index}] ${later.label}(開始)= ${fmtDate(later.date!, 'ja')} が、[${earlier.index}] ${earlier.label}(終了)= ${fmtDate(earlier.date!, 'ja')} より後です`,
+              en: `${a.groupLabel}: [${later.index}] ${later.label} (start) = ${fmtDate(later.date!, 'en')} falls after [${earlier.index}] ${earlier.label} (end) = ${fmtDate(earlier.date!, 'en')}`,
+            },
+            ask: {
+              ja: '開始と終了が逆に見えます。役割は項目名から読み取っただけなので、まず label が本当に開始/終了を指すかを確かめてください。指すなら日付のどちらかが誤りです。年度表記でずれて見えることもあります。',
+              en: 'Start looks later than end. The roles came from the labels — check they really mean start and end; if so, one date is wrong. Fiscal-year notation can also make this look reversed.',
+            },
+            refs: [a.index, b.index],
+          });
+          continue;
+        }
+        if (ra !== null && rb !== null) continue; // 開始→終了の並びが正しい組は黙る
+
+        sink.push({
+          severity: 'low',
+          title: { ja: '同じ対象に違う時点が入っている', en: 'Same subject carries two different dates' },
+          evidence: {
+            ja: `${a.groupLabel}: [${a.index}] ${a.label} = ${fmtDate(da, 'ja')}／[${b.index}] ${b.label} = ${fmtDate(db, 'ja')}`,
+            en: `${a.groupLabel}: [${a.index}] ${a.label} = ${fmtDate(da, 'en')} / [${b.index}] ${b.label} = ${fmtDate(db, 'en')}`,
+          },
+          ask: {
+            ja: '同じ対象に 2 つの時点が入っています。矛盾とは限りません(改定・更新なら当然)。どちらが最新かを決めるか、時点の違いを subject に書き足して分けてください。数値も一緒に動いているなら、その数値の時点も確認してください。',
+            en: 'Two points in time sit under one subject. Not necessarily a contradiction — a revision would look like this. Decide which is current, or split them by writing the date into the subject. If figures move with the date, check those too.',
+          },
+          refs: [a.index, b.index],
+        });
+      }
+    }
+  }
+
+  return {
+    key: 'date',
+    name: { ja: '日付の前後', en: 'Date ordering' },
+    findings: sink.list(),
+    detected: sink.detected,
+    scanned: withDate.length,
+    note:
+      withDate.length === 0
+        ? {
+            ja: '日付として読める value がありません。時点(いつのデータか)は機械では照合できていないので、人が見てください。「2024年3月31日」「2025年度」のように value に入れて渡すと、この検査が働きます。',
+            en: 'No value could be read as a date, so nothing about timing was checked mechanically — that lens is still yours. Pass dates in `value` as "2024年3月31日" or "2025年度" to switch this check on.',
+          }
+        : undefined,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 検査 7: 重複した項目 / Duplicate items
+// ---------------------------------------------------------------------------
+
+/**
+ * label・subject・value がすべて一致する項目。**完全一致だけを見るので誤検出は起きない**
+ * (「同じかもしれない」ではなく「同じ文字列である」)。
+ *
+ * 32 ページの資料から抽出すると、同じ事実が章をまたいで 2 回入るのは普通に起きる。
+ * 重複したまま数えると件数が水増しされ、「何件確認したか」が信用できなくなる。
+ */
+function checkDuplicates(entries: readonly Entry[]): CheckResult {
+  const buckets = new Map<string, Entry[]>();
+  for (const e of entries) {
+    const valueKey = e.item.value === undefined ? '' : normalizeKey(String(e.item.value));
+    const key = `${e.nameKey}\u0000${e.groupKey}\u0000${valueKey}`;
+    const list = buckets.get(key);
+    if (list) list.push(e);
+    else buckets.set(key, [e]);
+  }
+
+  const sink = new FindingSink();
+  for (const list of buckets.values()) {
+    if (list.length < 2) continue;
+    const first = list[0];
+    for (let i = 1; i < list.length; i += 1) {
+      const other = list[i];
+      const src = sharedSource(first, other);
+      const sameOrigin = src !== null || ((first.item.source ?? '').trim() === '' && (other.item.source ?? '').trim() === '');
+      sink.push({
+        severity: 'low',
+        title: sameOrigin
+          ? { ja: '同じ項目が二重に入っている', en: 'The same item was passed twice' }
+          : { ja: '同じ記述が別の出典から重複している', en: 'The same wording appears under two different sources' },
+        evidence: {
+          ja: `[${first.index}] ${first.label} ／ [${other.index}] ${other.label} — 項目名・対象・値がすべて一致(出典: ${flat((first.item.source ?? '').trim() || '—', 30)} と ${flat((other.item.source ?? '').trim() || '—', 30)})`,
+          en: `[${first.index}] ${first.label} / [${other.index}] ${other.label} — label, subject, and value are all identical (sources: ${flat((first.item.source ?? '').trim() || '—', 30)} and ${flat((other.item.source ?? '').trim() || '—', 30)})`,
+        },
+        ask: sameOrigin
+          ? {
+              ja: '同じ項目が 2 件入っています。片方を消してください。重複したまま数えると「何件確認したか」が実際より多く見えます。',
+              en: 'One item is present twice. Drop one — a duplicated list inflates how much you appear to have verified.',
+            }
+          : {
+              ja: '同じ記述が 2 か所に出ています。再掲(同じ事実を別ページでもう一度書いている)なら 1 件にまとめて出典を両方書いてください。別々に数えた値なら、二重計上になっていないかを確認してください。',
+              en: 'The same statement appears in two places. If it is a restatement, merge into one item citing both sources; if the two were counted separately, check for double counting.',
+            },
+        refs: [first.index, other.index],
+      });
+    }
+  }
+
+  return {
+    key: 'duplicate',
+    name: { ja: '重複した項目', en: 'Duplicate items' },
+    findings: sink.list(),
+    detected: sink.detected,
+    scanned: entries.length,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // 出力 / Rendering
 // ---------------------------------------------------------------------------
 
 /** 0 件のときに人が見るべき観点。機械が見ていない側だけを挙げる */
 const HUMAN_LENSES: readonly Bilingual[] = [
   {
-    ja: '**時点**: 同じ数値でも、どの年度・どの時点のものかが混ざっていないか(機械は日付を照合していません)。',
-    en: '**As-of date**: are figures from different years or dates mixed together? The machine did not compare dates.',
+    ja: '**時点**: 同じ数値でも、どの年度・どの時点のものかが混ざっていないか。`value` に日付を入れた項目どうしは機械も並べていますが、本文に「2023年度実績」と書いてあるだけの時点は機械には見えていません。',
+    en: '**As-of date**: are figures from different years mixed together? Items whose `value` is a date do get compared, but a date that only appears in the prose ("FY2023 actuals") is invisible to the machine.',
   },
   {
     ja: '**範囲**: 連結/単体、国内/海外、正社員/派遣を含むか。範囲が違えば数が違って当然で、これは矛盾ではなく説明不足です。',
@@ -1040,8 +1436,23 @@ function renderReport(
   out.push('| --- | --- | --- | --- | --- | --- |');
   for (const e of capped.rows) {
     const conf = e.item.confidence ? CONFIDENCE_DEFINITIONS[e.item.confidence] : undefined;
+    // subject を渡していない項目は、空欄ではなく「代用した label」を括弧と斜体で見せる。
+    // 空欄のままだと、渡し忘れたのか意図して省いたのかが読み手に分からない。
+    const subjectCell = e.subjectGiven ? cell(e.groupLabel) : `_(${cell(e.label)})_`;
+    const valueCell = e.item.value === undefined ? '—' : cell(String(e.item.value)) || '—';
     out.push(
-      `| ${e.index} | ${cell(e.label)} | ${cell(e.groupLabel === e.label ? '' : e.groupLabel)} | ${cell(e.item.value === undefined ? '' : String(e.item.value))} | ${cell(e.item.source) || '—'} | ${conf ? `${conf.marker} ${cell(confidenceLabel(e.item.confidence, lang === 'both' ? 'ja' : lang))}` : '—'} |`,
+      `| ${e.index} | ${cell(e.label)} | ${subjectCell} | ${valueCell} | ${cell(e.item.source) || '—'} | ${conf ? `${conf.marker} ${cell(confidenceLabel(e.item.confidence, lang === 'both' ? 'ja' : lang))}` : '—'} |`,
+    );
+  }
+  const borrowed = capped.rows.filter((e) => !e.subjectGiven).length;
+  if (borrowed > 0) {
+    out.push('');
+    out.push(
+      para(
+        `「対象」欄の _(括弧つき斜体)_ ${borrowed} 件は、\`subject\` を渡していないので \`label\` をそのまま対象名として代用した項目です。数値と単位の突き合わせは**対象名が完全に一致した項目どうしだけ**で行うので、比べてほしい項目には同じ \`subject\` を明示的に入れてください(代用のままだと、同じことを指していても別々の対象として扱われます)。`,
+        `The ${borrowed} _(parenthesised, italic)_ cell(s) in the Subject column mean no \`subject\` was passed, so the \`label\` was borrowed as the subject name. Figures and units are only compared **between items whose subject matches exactly**, so give the items you want compared the same explicit \`subject\` — borrowed names keep them apart even when they describe the same thing.`,
+        lang,
+      ),
     );
   }
   const notice = capNotice(
@@ -1104,8 +1515,12 @@ function renderReport(
 function buildEntries(items: readonly InspectItem[]): Entry[] {
   return items.map((item, i) => {
     const label = String(item.label ?? '').trim();
-    const groupLabel = (item.subject ?? '').trim() || label;
-    const parsed = item.value === undefined ? null : parseNumber(String(item.value));
+    const subject = (item.subject ?? '').trim();
+    const groupLabel = subject || label;
+    const rawValue = item.value === undefined ? null : String(item.value);
+    // 日付は数値ではない。先に日付として読み、読めたら数値としては見ない。
+    const date = rawValue === null ? null : parseDate(rawValue);
+    const parsed = rawValue === null || date !== null ? null : parseNumber(rawValue);
     const explicitUnit = (item.unit ?? '').trim();
     return {
       index: i + 1,
@@ -1113,8 +1528,10 @@ function buildEntries(items: readonly InspectItem[]): Entry[] {
       label,
       groupLabel,
       groupKey: normalizeKey(groupLabel),
+      subjectGiven: subject.length > 0,
       nameKey: normalizeKey(label),
       number: parsed,
+      date,
       unit: explicitUnit || parsed?.unit || '',
     };
   });
@@ -1177,6 +1594,8 @@ function runInspect({ items, title, lang }: InspectArgs): ToolResult {
       checkNameVariants(entries),
       checkNumberConflicts(entries),
       checkUnits(entries),
+      checkDateOrder(entries),
+      checkDuplicates(entries),
       checkAssertiveInferred(entries),
     ];
     return textResult(renderReport(entries, results, title, lang));
@@ -1236,7 +1655,7 @@ export function registerInspectTools(server: McpServer): void {
     {
       title: 'Cross-check structured findings for contradictions',
       description:
-        '**あなた(Claude)が資料を読んで構造化した項目の一覧**を受け取り、機械にしか見つけられない食い違いを突き合わせて返す。サーバーは資料を読まない。検査は 5 つ: (1) 出典が付いていない項目、(2) 同じ実体の別表記の候補(文字バイグラムの類似度と共通部分を根拠として併記)、(3) 同じ subject に対する数値の食い違い(万/億の桁、「約」「以上」「以下」、丸めの粒度を解釈し、丸めで説明できるものは弱い指摘に落とす)、(4) 単位の不揃い(名/人のような同義の表記ゆれと、社/拠点のような数え方そのものの違いを区別する)、(5) confidence=inferred なのに断定的な語で書かれている項目。指摘はすべて「可能性(要確認)」として、どの項目とどの項目かを番号付きで併記して返す。0 件のときは「機械的な矛盾は無い。ただし正しさの保証ではない」と明示し、人が見るべき観点(時点・範囲・書かれていないこと・因果の飛躍・重み)を示す。 / Takes the list of items **you** structured after reading the material and mechanically cross-checks them; the server never reads the document. Five checks: missing sources; naming-variant candidates (with similarity and the shared substring as evidence); numeric conflicts for the same subject (understanding Japanese magnitude words, approximate/at-least/at-most qualifiers, and rounding granularity, downgrading anything rounding explains); unit mismatches (separating synonymous spellings from genuinely different counting units); and items marked inferred but written as assertions. Every finding is phrased as something to confirm and cites the item numbers on both sides. When nothing is found it says so honestly and lists the lenses only a human can apply.',
+        '**あなた(Claude)が資料を読んで構造化した項目の一覧**を受け取り、機械にしか見つけられない食い違いを突き合わせて返す。サーバーは資料を読まない。検査は 7 つ: (1) 出典が付いていない項目、(2) 同じ実体の別表記の候補(文字バイグラムの類似度と共通部分を根拠として併記)、(3) 同じ subject に対する数値の食い違い(万/億の桁、「約」「以上」「以下」、丸めの粒度を解釈し、丸めで説明できるものは弱い指摘に落とす。両方が同じ出典を指していれば「時点や範囲の違いでは説明しにくい」と注記する)、(4) 単位の不揃い(名/人のような同義の表記ゆれと、社/拠点のような数え方そのものの違いを区別する)、(5) 日付の前後(「2024年3月31日」「2025年度」のような値は数値ではなく日付として読み、項目名から開始/終了が読み取れる組で順序が逆なら重み高、役割が読めない組は「同じ対象に違う時点」として弱く出す)、(6) 項目名・対象・値が完全に一致する重複項目、(7) confidence=inferred なのに断定的な語で書かれている項目。指摘はすべて「可能性(要確認)」として、どの項目とどの項目かを番号付きで併記して返す。数値として読めなかった value は、番号・元の表記・読めなかった理由(漢数字・伏せ字・数字なし など)を添えて返す。0 件のときは「機械的な矛盾は無い。ただし正しさの保証ではない」と明示し、人が見るべき観点(時点・範囲・書かれていないこと・因果の飛躍・重み)を示す。 / Takes the list of items **you** structured after reading the material and mechanically cross-checks them; the server never reads the document. Seven checks: missing sources; naming-variant candidates (with similarity and the shared substring as evidence); numeric conflicts for the same subject (understanding Japanese magnitude words, approximate/at-least/at-most qualifiers, and rounding granularity, downgrading anything rounding explains, and noting when both figures cite the same source); unit mismatches (separating synonymous spellings from genuinely different counting units); date ordering (values such as "2024年3月31日" are read as dates rather than numbers; a start dated after an end is weighted high, other date pairs are reported weakly); exact duplicate items; and items marked inferred but written as assertions. Every finding is phrased as something to confirm and cites the item numbers on both sides. Values that could not be read as numbers come back with the original text and the reason. When nothing is found it says so honestly and lists the lenses only a human can apply.',
       inputSchema: {
         items: z
           .array(itemSchema)

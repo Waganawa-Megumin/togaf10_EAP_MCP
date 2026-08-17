@@ -1423,11 +1423,56 @@ const SOFT_NEGATION_JA = ['ではない', 'ではありません', 'じゃない
 /** 「〜ではない」を取り下げと読んでよい節の目印 */
 const SCOPE_WORDS_JA = ['対象', 'スコープ', '範囲', '今回', 'テーマ', '目的', '狙い', '主題', '本題'];
 
+/**
+ * 「まだその段階ではない」型の取り下げ / "Not at that stage yet" withdrawals.
+ *
+ * SCOPE_WORDS_JA + SOFT_NEGATION_JA の組み合わせでは拾えない。
+ * 実測された不具合: 「判断を仰ぐ段階ではない。」から `explain_for` が
+ * 「判断・承認を求める話である」を論点として拾い、しかも「外した話題」にも出さなかった。
+ * 利用者は決裁を求めていないと書いているのに、経営層への説明を承認依頼として組み立てる。
+ *
+ * ここは語ではなく句で持つ。「段階」だけを SCOPE_WORDS_JA に足すと
+ * 「この段階では十分ではない」のような状態の説明まで取り下げとして落ちる。
+ * 「話ではない」も採らない(「電話ではない」に当たる)。
+ */
+const STAGE_NEGATION_JA = [
+  '段階ではない', '段階ではありません', '段階じゃない', '段階にはない', '段階にない',
+  'フェーズではない', 'フェーズではありません', '局面ではない',
+  '時期ではない', '時期ではありません', 'タイミングではない',
+];
+
+/**
+ * 「(それ)の話ではない / の依頼ではない」型の取り下げ。
+ *
+ * 実測された不具合(explain_for): 「予算の話ではない。」から「金額が書かれている」を、
+ * 「これは承認の依頼ではない。」から「判断・承認を求める話である」を論点として拾い、
+ * どちらも「外した話題」にも出さなかった。利用者が明示的に否定した話題を、
+ * 出力の冒頭に据えて話させることになる。
+ *
+ * SCOPE_WORDS_JA(対象・スコープ・今回…)には当たらないので拾えなかった。
+ * ここも語ではなく句で持つ。**必ず「の」「を」「が」を含めた形にする** —
+ * 「話ではない」だけにすると「電話ではない」に当たる(STAGE_NEGATION_JA と同じ理由)。
+ */
+const TOPIC_NEGATION_JA = [
+  'の話ではない', 'の話ではありません', 'の話じゃない',
+  'の依頼ではない', 'の依頼ではありません',
+  'の相談ではない', 'の議論ではない', 'の検討ではない',
+  'を求める話ではない', 'を求めるものではない', 'を求めていない', 'を求めていません',
+  'が論点ではない', 'が主題ではない', 'が本題ではない',
+];
+
 /** 打ち消しを示す語(英語)。素の "not" は広すぎるので採らない */
 const NEGATION_MARKERS_EN = [
   'not doing', 'decided not to', 'ruled out', 'out of scope', 'not in scope', 'off the table',
   'no longer', 'cancelled', 'canceled', 'called off', 'shelved', 'abandoned', 'dropped',
   'will not', "won't", 'not going ahead', 'not going to', 'is not happening', 'scrapped',
+  // 「まだその段階ではない」型。上の STAGE_NEGATION_JA と同じ理由で必要
+  'not at that stage', 'not at the stage', 'not at that point', 'too early to',
+  'not asking for', 'not looking for', 'not seeking',
+  // 「これは承認の依頼ではない」型。上の TOPIC_NEGATION_JA と同じ理由で必要
+  'not a request for', 'not a request to', 'not an approval request',
+  'not a decision request', 'not for approval', 'not a proposal',
+  'not asking you to', 'not up for decision', 'not a budget request',
 ];
 
 /** 打ち消しを補強する語(単独では打ち消しにしない) */
@@ -1600,6 +1645,10 @@ function patternCues(text: string, condition: SituationCondition): string[] {
 
 /** 「〜ではない」を取り下げとして読んでよい節かを見る */
 function softNegationMarker(part: string): string | undefined {
+  const stage = STAGE_NEGATION_JA.find((m) => part.includes(m));
+  if (stage) return stage;
+  const topic = TOPIC_NEGATION_JA.find((m) => part.includes(m));
+  if (topic) return topic;
   if (!SCOPE_WORDS_JA.some((w) => part.includes(w))) return undefined;
   return SOFT_NEGATION_JA.find((m) => part.includes(m));
 }

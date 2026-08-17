@@ -29,6 +29,7 @@ import {
 // 打ち消された節から論点を拾わないため(consult 側と同じ節分割を使う)
 import { splitSituationClauses } from '../knowledge/consulting.js';
 import {
+  isWrittenByHuman,
   summarizeProgress,
   type Assessment,
   type Engagement,
@@ -189,13 +190,21 @@ function findDeliverableProgress(engagement: Engagement, deliverableId: string, 
   );
 }
 
-/** 知識ベースの種別ごとの参照ツール */
+/**
+ * 知識ベースの種別 → 統合参照ツール `reference` の `of` に渡す値。
+ * 参照系は `reference` 1 本に統合済みで、種別ごとの個別ツールはもう無い。
+ */
 const KIND_TOOL: Record<KnowledgeKind, string> = {
-  phase: 'get_adm_phase',
-  technique: 'get_technique',
-  deliverable: 'get_deliverable',
-  glossary: 'get_glossary_term',
+  phase: 'adm-phase',
+  technique: 'technique',
+  deliverable: 'deliverable',
+  glossary: 'glossary',
 };
+
+/** 検索ヒットを `reference` の呼び出し方に直す */
+function referenceCall(kind: KnowledgeKind, id: string): string {
+  return `reference of="${KIND_TOOL[kind]}" id="${id}"`;
+}
 
 /** 小数第 1 位まで */
 function round1(value: number): number {
@@ -626,7 +635,7 @@ function computeNextActions(engagement: Engagement, horizon: Horizon): NextActio
         tool: 'update_engagement',
       });
     }
-    const unattended = highInfluence.filter((s) => !s.approach || s.concerns.length === 0);
+    const unattended = highInfluence.filter((s) => !isWrittenByHuman(s.approach) || s.concerns.length === 0);
     if (unattended.length > 0) {
       out.push({
         score: 66,
@@ -662,8 +671,8 @@ function computeNextActions(engagement: Engagement, horizon: Horizon): NextActio
         en: 'Both the progress figure and every recommendation here are built from the current phase. While it points nowhere, neither can be trusted.',
       },
       done: {
-        ja: `currentPhaseId が実在するフェーズ ID になっている(一覧は ${code('list_adm_phases')})`,
-        en: `currentPhaseId holds a real phase id (list them with ${code('list_adm_phases')})`,
+        ja: `currentPhaseId が実在するフェーズ ID になっている(一覧は ${code('reference of="adm-phase"')})`,
+        en: `currentPhaseId holds a real phase id (list them with ${code('reference of="adm-phase"')})`,
       },
       tool: 'update_engagement',
     });
@@ -1176,7 +1185,7 @@ const LENS_APPROVAL: GoalLens = {
             tool: 'update_engagement',
           };
         }
-        const ready = high.filter((s) => s.approach && s.concerns.length > 0);
+        const ready = high.filter((s) => isWrittenByHuman(s.approach) && s.concerns.length > 0);
         if (ready.length === 0) {
           return {
             level: 'thin',
@@ -1358,7 +1367,7 @@ const LENS_CONSENSUS: GoalLens = {
             tool: 'stakeholder_matrix',
           };
         }
-        const unattended = danger.filter((s) => !s.approach);
+        const unattended = danger.filter((s) => !isWrittenByHuman(s.approach));
         return {
           level: unattended.length > 0 ? 'missing' : 'ok',
           state: { ja: `${danger.length} 名(例: ${clip(danger[0].name, 18)})、うち関与方針が空なのが ${unattended.length} 名`, en: `${danger.length} in that quadrant (e.g. ${clip(danger[0].name, 18)}); ${unattended.length} have no approach recorded` },
@@ -1778,7 +1787,7 @@ function renderColdStart(goal: string | undefined, lang: Lang): string {
         );
         out.push('');
         for (const h of hits) {
-          out.push(`- ${code(`${KIND_TOOL[h.kind]} ${h.id}`)} — ${flat(one(h.title, lang))}`);
+          out.push(`- ${code(referenceCall(h.kind, h.id))} — ${flat(one(h.title, lang))}`);
         }
         out.push('');
       }
@@ -2911,7 +2920,27 @@ interface SignalDef {
   per: Record<Audience, { meaning: Bilingual; say: Bilingual }>;
 }
 
-const SIGNAL_DEFS: SignalDef[] = [
+/**
+ * 短い英字トークンを語として扱うための境界規則 / Boundary rule for short ASCII tokens.
+ *
+ * `\b` は「語かどうか」ではなく「単語構成文字の切れ目かどうか」しか見ない。
+ * `go\b` はハイフンの手前でも成立するので **"go-live" に当たり**、左端の境界が無いため
+ * "ago" / "cargo" / "Chicago" にも当たる。同じ理由で 3 文字の頭字語も危険で、
+ * `api` は "capital" に、`erp` は "enterprise" に部分一致する。
+ * どれも「利用者が書いていない論点」を出力の最も目立つ場所に据えることになる。
+ *
+ * そこで短いトークンには前後に明示の境界を置く。長さで扱いを分ける:
+ *
+ * - **3 文字以下**(頭字語・`go` など): 前後とも英数字を禁止する。語形変化しないので
+ *   末尾の `s` だけ許す(`APIs`)。
+ * - **4 文字**(`risk` / `saas`): 前だけ禁止する。`risks` / `risky` は拾いたいので
+ *   後ろは塞がない。
+ * - **5 文字以上**: 部分一致の実害が確認できていないので触らない。
+ *
+ * 具体的には `(?<![a-z0-9])` / `(?![a-z0-9])` を直接書く。
+ * `tests/explain-for-signals.test.ts` がこの規則を全 `patterns` に対して機械的に検査する。
+ */
+export const SIGNAL_DEFS: SignalDef[] = [
   {
     id: 'money',
     label: { ja: '金額が書かれている', en: 'A money figure is stated' },
@@ -2919,7 +2948,11 @@ const SIGNAL_DEFS: SignalDef[] = [
       /\d[\d,.]*\s*(?:兆|億|千万|百万|万)\s*円/,
       /[¥$€]\s?\d[\d,.]*\s*(?:億|万|billion|million|bn|m|k)?/i,
       /\d[\d,.]*\s*(?:billion|million|bn|usd|jpy|yen|dollars?|pounds?)/i,
-      /(?:予算|投資額|投資規模|費用|コスト|金額|budget|capex|opex|investment)/i,
+      // 「12M USD」型。通貨語が続くときだけ m / k / b を桁と読む。
+      // 単体の `\d+[mk]` は「50k users」「3 km」を金額にしてしまうので採らない
+      /\d[\d,.]*\s*[mkb]n?\s*(?:usd|jpy|eur|gbp|yen|dollars?|pounds?|euros?)/i,
+      /(?:予算|投資額|投資規模|費用|コスト|金額|budget|investment)/i,
+      /(?<![a-z0-9])(?:capex|opex)/i,
     ],
     per: {
       executive: {
@@ -2945,7 +2978,9 @@ const SIGNAL_DEFS: SignalDef[] = [
     label: { ja: '期日・時期が書かれている', en: 'A date or deadline is stated' },
     patterns: [
       /\d{4}\s*[-年/]\s*\d{1,2}\s*月?/,
-      /(?:来月|来週|今月中|今期|来期|年度内|年度末|期末|上期|下期|第[1-4一二三四]四半期|Q[1-4])/i,
+      /(?:来月|来週|今月中|今期|来期|年度内|年度末|期末|上期|下期|第[1-4一二三四]四半期)/,
+      // 「2026Q1」は拾いたいので直前の数字は許し、「FAQ1」は拾わない
+      /(?<![a-z])Q[1-4](?![0-9])/i,
       /\d{1,2}\s*月末?まで/,
       /(?:期限|納期|いつまで|締切|deadline|due date|by the end of)/i,
     ],
@@ -3050,7 +3085,9 @@ const SIGNAL_DEFS: SignalDef[] = [
     id: 'tech',
     label: { ja: '技術方式・移行方式が論点', en: 'A technical or migration approach is at stake' },
     patterns: [
-      /(?:クラウド|オンプレ|saas|erp|crm|api|マイクロサービス|コンテナ|kubernetes|データ連携|マスタ|レガシー|移行|統合|内製|生成ai|llm|パッケージ|スクラッチ)/i,
+      /(?:クラウド|オンプレ|マイクロサービス|コンテナ|kubernetes|データ連携|マスタ|レガシー|移行|統合|内製|生成ai|パッケージ|スクラッチ)/i,
+      // 頭字語は前後を塞ぐ。塞がないと "capital" が api に、"enterprise" が erp に当たる
+      /(?<![a-z0-9])(?:saas|erp|crm|api|llm)s?(?![a-z0-9])/i,
       /(?:cloud|on-?prem|legacy|microservice|integration|migration|replatform|in-?house build)/i,
     ],
     per: {
@@ -3077,7 +3114,8 @@ const SIGNAL_DEFS: SignalDef[] = [
     label: { ja: 'リスク・規制・統制が絡む', en: 'Risk, regulation, or control is involved' },
     patterns: [
       /(?:リスク|監査|指摘|規制|コンプラ|個人情報|情報漏|インシデント|障害|停止|セキュリティ|統制|内部統制|認証)/,
-      /(?:risk|audit|finding|compliance|regulat|incident|outage|breach|security|control)/i,
+      // risk は語形変化するので後ろは塞がない(risks / risky は拾う)。前だけ塞いで "asterisk" を外す
+      /(?<![a-z0-9])risk|(?:audit|finding|compliance|regulat|incident|outage|breach|security|control)/i,
     ],
     per: {
       executive: {
@@ -3102,8 +3140,11 @@ const SIGNAL_DEFS: SignalDef[] = [
     id: 'decision',
     label: { ja: '判断・承認を求める話である', en: 'You are asking for a decision' },
     patterns: [
-      /(?:判断|承認|決裁|稟議|選定|意思決定|再開|可否|方針を決|go\b|ゴーサイン)/i,
-      /(?:approve|approval|decide|decision|select|sign-?off|go\/no-?go|green ?light)/i,
+      /(?:判断|承認|決裁|稟議|選定|意思決定|再開|可否|方針を決|ゴーサイン)/,
+      // go は前後をハイフンごと塞ぐ。`go\b` は "go-live"("稼働日")と "ago" / "cargo" に当たる
+      /(?<![a-z0-9-])go(?![a-z0-9-])/i,
+      // 前を塞がないと "undecided"("未定")の中の decide を「承認を求めている」と読む
+      /(?<![a-z])(?:approve|approval|decide|decision|select|sign-?off|go\/no-?go|green ?light)/i,
     ],
     per: {
       executive: {
@@ -3129,7 +3170,7 @@ const SIGNAL_DEFS: SignalDef[] = [
     label: { ja: 'まだ決まっていない部分がある', en: 'Parts of it are still undecided' },
     patterns: [
       /(?:未定|検討中|要検討|たたき台|ドラフト|仮に|仮の|不明|わからない|模索|見えていない)/,
-      /(?:tbd|undecided|unclear|draft|to be determined|not yet decided)/i,
+      /(?:(?<![a-z0-9])tbd(?![a-z0-9])|undecided|unclear|draft|to be determined|not yet decided)/i,
     ],
     per: {
       executive: {
@@ -3162,7 +3203,7 @@ const SIGNAL_DEFS: SignalDef[] = [
  * ここは explain_for 固有ではないので、いずれ consulting.ts の語彙に寄せてよい。
  */
 const ABSENT_RE =
-  /(?:読み取れ(?:ない|ません)|読み取れなかった|書かれて(?:いない|いません)|記載(?:が|は)?(?:ない|ありません|無い)|記述(?:が|は)?(?:ない|ありません)|不明|未定|わから(?:ない|ず)|判断できない|特定できない|公開されて(?:いない|いません)|not (?:stated|disclosed|available|specified|documented)|no (?:figure|number|amount|target)|cannot be (?:read|determined)|unknown|undisclosed)/i;
+  /(?:読み取れ(?:ない|ません)|読み取れなかった|書かれて(?:いない|いません)|記載(?:が|は)?(?:ない|ありません|無い)|記述(?:が|は)?(?:ない|ありません)|不明|未定|わから(?:ない|ず)|判断できない|特定できない|公開されて(?:いない|いません)|(?:まだ|いまだ)?(?:決|定)まって(?:い|お)?(?:ない|ません|りません)|not (?:stated|disclosed|available|specified|documented|set|fixed|agreed)|(?<![a-z])no (?:figure|number|amount|target|budget|deadline|due date|date|timeline|schedule|funding|cost|estimate|owner|sponsor)(?![a-z])|(?:has|have|had) not been (?:agreed|set|decided|fixed|approved|scheduled|determined|confirmed)|yet to be (?:agreed|set|decided|determined|confirmed|fixed)|cannot be (?:read|determined)|unknown|undisclosed)/i;
 
 /**
  * 論点の短い呼び名 / A short noun for each signal.
@@ -3222,48 +3263,147 @@ function sourceSentence(text: string): { sentence: string; truncated: boolean } 
  * 「投資額は…読み取れない」と書かれた topic から「金額が書かれている」を拾い、
  * 存在しない数字を「冒頭に置くのはこれ」として出力の最も目立つ場所に据えていた。
  * 相手が経営層のときに架空の金額を先に話させるので、実害が大きい。
+ *
+ * **打ち消しは 2 種類あり、効き方が違う。** どちらも「文まるごと落とす」で扱っていたころは、
+ * 逆向きの実害(利用者が書いたものを消す)が実測で 2 件出ていた。
+ *
+ * - `withdrawn` = 話題そのものの取り下げ(「レガシー刷新はやらないと決まった」
+ *   「予算の話ではない」)。その文の論点は全部落とす。
+ * - `absent` = **その情報が手元に無い**という記述(「投資額は書かれていない」「納期は未定」)。
+ *   落とすのは「無い」と言われた情報だけで、同じ文に**書かれているもの**は残す。
+ *
+ * `absent` を文まるごとの打ち消しにしていたときの実害:
+ * - 「納期は未定です。」→ **「未決事項」を「外した話題」に入れていた**。未決であること自体が
+ *   その論点なのに、利用者が書いた唯一の話題を外したと報告していた。
+ * - 「予算は 5 億円だが、期日は未定。」→ 未定は期日にしか掛かっていないのに、
+ *   **利用者が書いた「5 億円」ごと外していた**。
+ *
+ * そこで `absent` の文では次の 2 つだけ生き残らせる:
+ * 1. `unsettled`(未決事項)— 「未定 / 不明 / TBD」は ABSENT_RE の語彙そのものであり、
+ *    この論点の根拠でもある。打ち消しではなく肯定として読むのが正しい。
+ * 2. 根拠が**数字を含む**論点 — 「5 億円」「2027 年 3 月」は文中に実在する記述であって、
+ *    同じ文の「無い」は別のものに掛かっている。逆に「予算」「deadline」のような
+ *    語だけの一致は、無いと言われている当のものなので落とす。
+ *
+ * `withdrawn` にはこの緩和を掛けない(「5 億円の案件は中止した」で金額を残すのは誤り)。
  */
+/**
+ * 「値が書かれている」と主張する論点。`absent`(その情報は無い)が掛かるのはここだけ。
+ *
+ * 他の論点(技術方式・リスク・関係者への影響・未決事項…)は、値が無いと言われても
+ * 話題そのものは topic に書かれている。まとめて落とすと、利用者が書いた主題を
+ * 「外した話題」に送ってしまう。
+ */
+const VALUE_SIGNALS: ReadonlySet<SignalId> = new Set<SignalId>(['money', 'deadline', 'scale']);
+
 function detectSignals(topic: string): { signals: DetectedSignal[]; excluded: DetectedSignal[] } {
   // 文単位で見る。読点で切ると「投資額は」と「読み取れない」が別の節になり、
   // 打ち消しが主語に届かない。
+  // 素の `.` はどこで出ても文末とみなしていたため、「投資額は 1.5 億円。」が
+  // 「投資額は 1.」と「5 億円。」に割れ、根拠として引用する文が「投資額は 1.」になっていた。
+  // 3 列目は利用者が判定を検算するための引用なので、そこが千切れると検算にならない。
+  // ASCII の `.` は**後ろに空白が続くときだけ**文末として扱う。
   const sentences = topic
-    .split(/(?<=[。．.!?！?])\s*|\n+/)
+    .split(/(?<=[。．!?！？])\s*|(?<=\.)(?=\s)\s*|\n+/)
     .map((x) => x.trim())
     .filter((x) => x.length > 0);
   const usable = (sentences.length > 0 ? sentences : [topic]).map((text) => {
     // 「やらないと決まった」型の打ち消し(consult と同じ語彙)
     const clauses = splitSituationClauses(text);
-    const decided = clauses.some((c) => c.negated || c.hedged);
-    return { text, negated: decided || ABSENT_RE.test(text) };
+    const withdrawn = clauses.some((c) => c.negated || c.hedged);
+    return { text, withdrawn, absent: ABSENT_RE.test(text) };
   });
-  const positive = usable.filter((c) => !c.negated);
-  const dropped = usable.filter((c) => c.negated);
 
-  const pick = (texts: string[]): DetectedSignal[] => {
-    const out: DetectedSignal[] = [];
-    for (const def of SIGNAL_DEFS) {
-      let hit: DetectedSignal | undefined;
-      for (const text of texts) {
-        for (const pattern of def.patterns) {
-          pattern.lastIndex = 0;
-          const m = pattern.exec(text);
-          if (m && m[0].trim().length > 0) {
-            hit = { def, evidence: clip(m[0], 24), ...sourceSentence(text) };
-            break;
-          }
-        }
-        if (hit) break;
-      }
-      if (hit) out.push(hit);
-    }
-    return out;
+  /** この文でこの論点を「書かれている」として採ってよいか */
+  const survives = (
+    def: SignalDef,
+    evidence: string,
+    clause: { withdrawn: boolean; absent: boolean },
+  ): boolean => {
+    if (clause.withdrawn) return false;
+    if (!clause.absent) return true;
+    // 「その値が無い」は値を名指しする論点にしか掛からない。
+    // 「見積が出せない ERP 刷新」で ERP まで外すと、利用者が書いた主題ごと消える。
+    if (!VALUE_SIGNALS.has(def.id)) return true;
+    return /\d/.test(evidence);
   };
 
-  const signals = pick(positive.map((c) => c.text));
-  const kept = new Set(signals.map((s) => s.def.id));
-  // 打ち消された節にしか出てこなかった論点。「拾わなかった」と伝えるために残す。
-  const excluded = pick(dropped.map((c) => c.text)).filter((s) => !kept.has(s.def.id));
+  const signals: DetectedSignal[] = [];
+  const excluded: DetectedSignal[] = [];
+  for (const def of SIGNAL_DEFS) {
+    let kept: DetectedSignal | undefined;
+    let fallback: DetectedSignal | undefined;
+    for (const clause of usable) {
+      // **1 つ目に当たったパターンで打ち切らない。** money は「12M USD」を拾う式より
+      // 「budget」の 1 語だけを拾う式が後ろにあり、先に当たったほうで打ち切ると
+      // 「日付は未定だが予算は 12M USD」で根拠が "budget"(数字なし)になって
+      // 利用者が書いた金額ごと落ちる。生き残る根拠があればそちらを採る。
+      for (const pattern of def.patterns) {
+        pattern.lastIndex = 0;
+        const m = pattern.exec(clause.text);
+        if (!m || m[0].trim().length === 0) continue;
+        const hit: DetectedSignal = {
+          def,
+          evidence: clip(m[0], 24),
+          ...sourceSentence(clause.text),
+        };
+        if (survives(def, m[0], clause)) {
+          kept = hit;
+          break;
+        }
+        if (!fallback) fallback = hit;
+      }
+      if (kept) break;
+    }
+    if (kept) signals.push(kept);
+    // 打ち消された文にしか出てこなかった論点。「拾わなかった」と伝えるために残す。
+    else if (fallback) excluded.push(fallback);
+  }
   return { signals, excluded };
+}
+
+/**
+ * 経営層向けの骨子 2 番目「決めなかった場合に起きること」を何の単位で言うか。
+ *
+ * この行は元々「(金額か期間で)」で固定だった。topic が「投資額はこの資料から読み取れない」
+ * と言っていても同じ文が出るので、**利用者に無い数字を作らせる**方向に押す。
+ * 同じ出力の別の行(重さの見立て)が「金額も期日も書かれていない」と言うので矛盾もする。
+ *
+ * topic に有る軸だけを勧め、無いときは「何が止まるか」に振り替える。
+ */
+function consequenceUnit(signals: DetectedSignal[], excluded: DetectedSignal[]): Bilingual {
+  const has = (id: SignalId): boolean => signals.some((s) => s.def.id === id);
+  const wasDropped = (id: SignalId): boolean => excluded.some((s) => s.def.id === id);
+  const money = has('money');
+  const deadline = has('deadline');
+  if (money && deadline) {
+    return {
+      ja: '決めなかった場合に起きること(topic にある金額か期日で)',
+      en: 'What happens if it is not decided — in the money or the date your topic already has',
+    };
+  }
+  if (money) {
+    return {
+      ja: '決めなかった場合に起きること(topic にある金額で。期日は書かれていないので作らない)',
+      en: 'What happens if it is not decided — in the money your topic states. No date is in it, so do not invent one',
+    };
+  }
+  if (deadline) {
+    return {
+      ja: '決めなかった場合に起きること(topic にある期日で。金額は書かれていないので作らない)',
+      en: 'What happens if it is not decided — against the date your topic states. No figure is in it, so do not invent one',
+    };
+  }
+  if (wasDropped('money') || wasDropped('deadline')) {
+    return {
+      ja: '決めなかった場合に起きること(**金額と期日は topic 中で「無い」と書かれている。上の表のとおり外したので、代わりに「何が止まるか」で言う**)',
+      en: 'What happens if it is not decided (**your topic says the money and the date are not available — they are dropped above, so say what stops instead**)',
+    };
+  }
+  return {
+    ja: '決めなかった場合に起きること(**topic に金額も期日も無いので、何が止まるかで言う。数字は作らない**)',
+    en: 'What happens if it is not decided (**no money and no date appear in your topic, so say what stops. Do not invent a figure**)',
+  };
 }
 
 /** 話の重さ。同じ相手でも、重い話と軽い話では組み立てが違う */
@@ -3271,7 +3411,8 @@ type Weight = 'heavy' | 'medium' | 'light';
 
 function topicWeight(topic: string, signals: DetectedSignal[]): Weight {
   const has = (id: SignalId): boolean => signals.some((s) => s.def.id === id);
-  const bigMoney = /(?:兆|億)/.test(topic) || /(?:billion|bn\b)/i.test(topic);
+  // bn は「12bn」を拾いたいので直前の数字は許すが、英字が続く語の一部は拾わない
+  const bigMoney = /(?:兆|億)/.test(topic) || /billion|(?<![a-z])bn(?![a-z0-9])/i.test(topic);
   if (bigMoney || (has('failure') && has('scale')) || (has('scale') && has('risk'))) return 'heavy';
   if (!has('money') && !has('deadline') && !has('failure') && !has('scale') && !has('risk')) return 'light';
   return 'medium';
@@ -3829,7 +3970,7 @@ function collectActivity(engagement: Engagement, lang: Lang): ActivityItem[] {
       subject: clip(s.name, 34),
       status: `${inline('影響力', 'influence', lang)} ${one(INFLUENCE_LABEL[s.influence], lang)}`,
       days,
-      open: s.influence === 'high' && (!s.approach || s.concerns.length === 0),
+      open: s.influence === 'high' && (!isWrittenByHuman(s.approach) || s.concerns.length === 0),
       hint: { ja: '関心事と関与方針を 1 行で埋める', en: 'Fill in their concern and how you will engage them' },
       tool: 'stakeholder_matrix',
     });
@@ -4714,6 +4855,10 @@ export function registerGuideTools(server: McpServer): void {
           topical: boolean;
         }
         const outline: OutlineItem[] = profile.outline.map((o, i) => ({ at: i, text: o, topical: false }));
+        // 経営層の骨子 2 番目だけは topic 依存。無い軸(金額・期日)を勧めない
+        if (a === 'executive' && outline[1]) {
+          outline[1].text = consequenceUnit(signals, excludedSignals);
+        }
         const hasSignal = (id: SignalId): boolean => signals.some((s) => s.def.id === id);
         const insert = (at: number, text: Bilingual): void => {
           outline.push({ at, text, topical: true });
@@ -4852,7 +4997,7 @@ export function registerGuideTools(server: McpServer): void {
           out.push('| --- | --- | --- |');
           for (const h of hits) {
             out.push(
-              `| **${cell(one(h.title, l))}** | ${cell(one(h.snippet, l))} | ${code(`${KIND_TOOL[h.kind]} ${h.id}`)} |`,
+              `| **${cell(one(h.title, l))}** | ${cell(one(h.snippet, l))} | ${code(referenceCall(h.kind, h.id))} |`,
             );
           }
           out.push('');

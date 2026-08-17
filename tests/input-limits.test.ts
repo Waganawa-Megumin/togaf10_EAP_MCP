@@ -160,22 +160,27 @@ describe('配列要素の上限 / limits on list entries', () => {
 });
 
 describe('ID 引数の上限 / limits on identifier arguments', () => {
-  const CASES: { tool: string; field: string }[] = [
-    { tool: 'get_archimate_element', field: 'element' },
-    { tool: 'list_archimate_elements', field: 'layer' },
+  // 参照系は `reference` 1 本に統合済み。ID 引数は `id`(個別取得)と `within`(絞り込み)。
+  const CASES: { tool: string; field: string; extra?: Record<string, unknown> }[] = [
+    { tool: 'reference', field: 'id', extra: { of: 'archimate-element' } },
+    { tool: 'reference', field: 'within', extra: { of: 'archimate-element' } },
     { tool: 'map_security_to_adm', field: 'phase' },
   ];
 
-  for (const { tool, field } of CASES) {
+  for (const { tool, field, extra } of CASES) {
     it(`${tool}.${field}: 長い値を短いエラーで弾く`, async () => {
-      const { text, isError } = await call(tool, { [field]: jp(300_000), lang: 'ja' });
+      const { text, isError } = await call(tool, { ...extra, [field]: jp(300_000), lang: 'ja' });
       expect(isError).toBe(true);
       expect(text.length, `${tool} error is not short: ${text.length}`).toBeLessThan(1_000);
       expect(text).toContain(`\`${field}\``);
     });
 
     it(`${tool}.${field}: 見つからない値もそのまま返さない`, async () => {
-      const { text } = await call(tool, { [field]: 'x'.repeat(IDENTIFIER_LIMIT), lang: 'ja' });
+      const { text } = await call(tool, {
+        ...extra,
+        [field]: 'x'.repeat(IDENTIFIER_LIMIT),
+        lang: 'ja',
+      });
       // 「見つかりません」で 300 文字丸ごと返していた回帰を防ぐ
       expect(text).not.toContain('x'.repeat(IDENTIFIER_LIMIT));
       expect(text).toContain('…');
