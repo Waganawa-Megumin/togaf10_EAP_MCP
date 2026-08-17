@@ -1,0 +1,390 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="TOGAF 10 EAP MCP — 分厚い標準ではなく、今週やることを返す非公式のコンサルティング MCP サーバー。">
+<link rel="icon" href="./pic/web/icon-256.png">
+<title>TOGAF 10 EAP MCP</title>
+<style>
+  /* ── 配色 ───────────────────────────────────────────────
+     この製品には既にアイコンとカバーがある(濃紺の地・シアンのリング・
+     一点のアンバー)。ページはその意匠を正とし、カバー画像が地に馴染むよう
+     背景をわずかに深く冷たくしている。アンバーは 1 つの用途にだけ使う ——
+     「予算も支持も無いほう」と「このツールがやらないこと」。      */
+  :root {
+    --ground:  #EDF1F6;
+    --panel:   #FFFFFF;
+    --sunk:    #E2E9F1;
+    --ink:     #0E1826;
+    --ink-2:   #4B5E74;
+    --ink-3:   #74889E;
+    --line:    #D1DCE7;
+    --cyan:    #10707E;
+    --cyan-bg: #DCEFF2;
+    --amber:   #8F5D0C;
+    --amber-bg:#F6EBD6;
+    --blue:    #2C5BA8;
+
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    --go: "Hiragino Kaku Gothic ProN", "Hiragino Sans", "Yu Gothic", YuGothic,
+          "Noto Sans JP", "Helvetica Neue", Arial, sans-serif;
+    --col: 1140px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:  #0C1320;
+      --panel:   #131D2D;
+      --sunk:    #0A1019;
+      --ink:     #E3EBF4;
+      --ink-2:   #93A6BA;
+      --ink-3:   #64788E;
+      --line:    #23324A;
+      --cyan:    #3EC9E0;
+      --cyan-bg: #102C36;
+      --amber:   #E8A52C;
+      --amber-bg:#2E2313;
+      --blue:    #5B8FD2;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground:  #0C1320;
+    --panel:   #131D2D;
+    --sunk:    #0A1019;
+    --ink:     #E3EBF4;
+    --ink-2:   #93A6BA;
+    --ink-3:   #64788E;
+    --line:    #23324A;
+    --cyan:    #3EC9E0;
+    --cyan-bg: #102C36;
+    --amber:   #E8A52C;
+    --amber-bg:#2E2313;
+    --blue:    #5B8FD2;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--go);
+    font-size: 16px;
+    line-height: 1.85;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: var(--col); margin: 0 auto; padding: 0 1.5rem; }
+
+  /* ラテン文字と数字は等幅。これは端末で動く道具で、返すものも文字だから */
+  .mono, .eyebrow, .tool, code, kbd, .stat b, th.n, td.n {
+    font-family: var(--mono); font-variant-numeric: tabular-nums;
+  }
+  .eyebrow {
+    font-size: .7rem; letter-spacing: .16em; text-transform: uppercase;
+    color: var(--ink-3); margin: 0 0 .9rem;
+  }
+  h1, h2, h3 { font-weight: 700; letter-spacing: .01em; text-wrap: balance; }
+
+  /* ── カバー ─────────────────────────────────────────── */
+  .cover { display: block; width: 100%; height: auto; }
+  .coverwrap { background: #0B1220; }
+
+  header.top { padding: 3.2rem 0 0; }
+  h1 { font-size: clamp(1.75rem, 4vw, 2.6rem); line-height: 1.4; margin: 0 0 1rem; }
+  .lede { font-size: 1.08rem; color: var(--ink-2); max-width: 62ch; margin: 0 0 1.6rem; }
+  .badges { display: flex; flex-wrap: wrap; gap: .5rem; margin: 0 0 1rem; }
+  .badge {
+    font-family: var(--mono); font-size: .72rem; letter-spacing: .04em;
+    border: 1px solid var(--line); border-radius: 3px; padding: .22rem .55rem; color: var(--ink-2);
+  }
+  .badge.on { border-color: var(--cyan); color: var(--cyan); }
+
+  section { padding: 4.2rem 0 0; }
+  h2 {
+    font-size: 1.42rem; margin: 0 0 .5rem; padding-bottom: .6rem;
+    border-bottom: 1px solid var(--line);
+  }
+  .sub { color: var(--ink-2); margin: .9rem 0 1.8rem; max-width: 64ch; font-size: .97rem; }
+  p { margin: 0 0 1rem; }
+  a { color: var(--cyan); text-underline-offset: 3px; }
+  a:focus-visible { outline: 2px solid var(--cyan); outline-offset: 3px; }
+
+  /* ── 主張: 同じ相談、違う状況 ───────────────────────── */
+  .ab { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--line); border: 1px solid var(--line); }
+  @media (max-width: 820px) { .ab { grid-template-columns: 1fr; } }
+  .ab > div { background: var(--panel); padding: 1.4rem 1.4rem 1.6rem; }
+  .ab .head { font-family: var(--mono); font-size: .72rem; letter-spacing: .06em; margin: 0 0 .2rem; }
+  .ab .said { font-size: .93rem; line-height: 1.7; margin: 0 0 1.3rem; padding: .7rem .85rem; border-radius: 3px; }
+  .a .head { color: var(--cyan); }
+  .a .said { background: var(--cyan-bg); border-left: 3px solid var(--cyan); }
+  .b .head { color: var(--amber); }
+  .b .said { background: var(--amber-bg); border-left: 3px solid var(--amber); }
+  .row { border-top: 1px dashed var(--line); padding: 1rem 0 0; margin: 1rem 0 0; }
+  .row:first-of-type { border-top: 0; padding-top: 0; margin-top: 0; }
+  .rl {
+    font-family: var(--mono); font-size: .66rem; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--ink-3); margin: 0 0 .5rem;
+  }
+  .row p { font-size: .93rem; line-height: 1.75; margin: 0 0 .6rem; }
+  .row p:last-child { margin-bottom: 0; }
+  .q { color: var(--ink-2); }
+  .read { font-family: var(--mono); font-size: .78rem; color: var(--ink-2); line-height: 1.9; }
+  .read b { color: var(--ink); font-weight: 400; }
+
+  .verdict {
+    margin: 1.6rem 0 0; padding: 1.1rem 1.3rem; background: var(--sunk);
+    border: 1px solid var(--line); font-size: .95rem; line-height: 1.8;
+  }
+  .verdict strong { color: var(--ink); }
+
+  /* ── 機能 ───────────────────────────────────────────── */
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(255px, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); }
+  .cell { background: var(--panel); padding: 1.2rem 1.3rem 1.4rem; }
+  .cell h3 { font-size: 1rem; margin: 0 0 .5rem; }
+  .cell p { font-size: .9rem; color: var(--ink-2); line-height: 1.75; margin: 0; }
+  .tool { font-size: .74rem; color: var(--cyan); display: block; margin: .6rem 0 0; }
+
+  figure { margin: 1.8rem 0 0; }
+  figure img { display: block; width: 100%; height: auto; border: 1px solid var(--line); }
+  figcaption { font-size: .82rem; color: var(--ink-3); margin-top: .55rem; line-height: 1.7; }
+
+  /* ── コード ─────────────────────────────────────────── */
+  pre {
+    background: var(--sunk); border: 1px solid var(--line); padding: 1rem 1.1rem;
+    overflow-x: auto; font-family: var(--mono); font-size: .82rem; line-height: 1.8;
+    margin: 0 0 1rem; color: var(--ink);
+  }
+  pre .c { color: var(--ink-3); }
+  code { font-size: .88em; background: var(--sunk); padding: .1em .38em; border-radius: 2px; }
+  .say {
+    border-left: 3px solid var(--cyan); background: var(--panel);
+    padding: .8rem 1.1rem; margin: 0 0 .7rem; font-size: .96rem;
+  }
+
+  /* ── 数字 ───────────────────────────────────────────── */
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); }
+  .stat { background: var(--panel); padding: 1.1rem 1.2rem; }
+  .stat b { display: block; font-size: 1.5rem; font-weight: 400; color: var(--ink); line-height: 1.3; }
+  .stat span { font-size: .78rem; color: var(--ink-3); }
+
+  /* ── やらないこと ───────────────────────────────────── */
+  .honest { border: 1px solid var(--amber); border-left-width: 3px; padding: 1.3rem 1.5rem 1.5rem; background: var(--panel); }
+  .honest h2 { border-bottom-color: var(--line); }
+  .honest ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: .95rem; }
+  .honest li { font-size: .94rem; line-height: 1.8; padding-left: 1.3rem; position: relative; color: var(--ink-2); }
+  .honest li::before { content: "—"; position: absolute; left: 0; color: var(--amber); font-family: var(--mono); }
+  .honest li b { color: var(--ink); font-weight: 700; }
+
+  footer {
+    margin: 4.5rem 0 0; border-top: 1px solid var(--line); padding: 1.8rem 0 3.5rem;
+    font-size: .86rem; color: var(--ink-3); line-height: 1.85;
+  }
+  footer a { color: var(--ink-2); }
+  .kofi { font-size: .8rem; color: var(--ink-3); margin-top: 1.4rem; }
+
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+</head>
+<body>
+
+<div class="coverwrap"><img class="cover" src="./pic/web/cover.jpg" alt="TOGAF 10 EAP MCP — unofficial. 積まれた資料が MCP を経由してロードマップ・4 象限・レイヤ図・関連図に変わる図"></div>
+
+<div class="wrap">
+
+<header class="top">
+  <p class="eyebrow">Unofficial · MCP server · TypeScript · stdio</p>
+  <h1>分厚い標準ではなく、<br>今週やることを返す</h1>
+  <p class="lede">
+    TOGAF® Standard 10th Edition(EA Practitioner 体系)をベースにした、非公式のコンサルティング MCP サーバーです。
+    Claude Code / Claude Desktop に入れて、日本語で話しかけるだけで使えます。
+  </p>
+  <div class="badges">
+    <span class="badge on">75 tools</span>
+    <span class="badge on">556 tests</span>
+    <span class="badge">日本語 / English</span>
+    <span class="badge">Node ≥ 18</span>
+    <span class="badge">個人利用のみ</span>
+  </div>
+</header>
+
+<section>
+  <h2>同じ相談でも、状況が違えば返るものが違う</h2>
+  <p class="sub">
+    どちらも「基幹システムの刷新をやりたい」という同じ相談です。制約だけを変えて 2 回呼びました。
+    下は<strong>加工していない実出力</strong>から、各節の先頭項目を抜いたものです。
+  </p>
+
+  <div class="ab">
+    <div class="a">
+      <p class="head">SITUATION A</p>
+      <p class="said">予算は5億円、9月18日の経営会議で決裁を取りたい。専任は3名。</p>
+
+      <div class="row">
+        <p class="rl">読み取った状況</p>
+        <p class="read">
+          予算(金額) <b>5 億円</b><br>
+          期限(日付) <b>2026年9月18日(残り 32 日)</b><br>
+          体制(人数) <b>専任 3 名</b>
+        </p>
+      </div>
+
+      <div class="row">
+        <p class="rl">今日やること(先頭)</p>
+        <p>残り 32 日。逆算すると、資料の確定は 9月4日(2 週間前)、キーパーソンへの事前説明は 8月21日(4 週間前)が折り返し点。<strong>当日に初めて見せる資料を作らない。</strong></p>
+        <p>この桁は一括では管理できないので、3〜5 本の作業パッケージに割る(1 本あたり 1.3 億円 前後)。一括発注にすると、遅れていることが分かるのが最後になる。</p>
+      </div>
+
+      <div class="row">
+        <p class="rl">最初に聞く質問</p>
+        <p class="q">動かせない日付は何で、それは何によって決まっていますか(契約 / 法規制 / 経営の対外公約)?</p>
+      </div>
+    </div>
+
+    <div class="b">
+      <p class="head">SITUATION B</p>
+      <p class="said">予算はゼロ、経営は無関心、担当は自分ひとり。</p>
+
+      <div class="row">
+        <p class="rl">読み取った状況</p>
+        <p class="read">
+          予算 <b>予算が無い</b><br>
+          経営の関与 <b>経営が関与していない</b><br>
+          体制 <b>実質ひとり体制</b>
+        </p>
+      </div>
+
+      <div class="row">
+        <p class="rl">今日やること(先頭)</p>
+        <p>対象を <strong>1 業務・1 データに固定</strong>し、そこだけを「現状 / あるべき / 差分」の 3 段で 1 枚にまとめる。全社を描こうとした時点で予算も時間も足りなくなる。</p>
+        <p>その 1 枚に金額を 1 つだけ載せる。<strong>予算要求は「これから使う額」ではなく「今失っている額」から始まる。</strong></p>
+      </div>
+
+      <div class="row">
+        <p class="rl">最初に聞く質問</p>
+        <p class="q">次に予算を検討する場はいつで、そこに載せるには何がいつまでに要りますか?</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="verdict">
+    <strong>推奨技法の順位が入れ替わり、今日やることと最初に聞く質問が別物になります。</strong>
+    キーワードに反応して同じ一般論を返すのではなく、金額・日付・人数・経営の関与を読んで結論を変えます。
+    「レガシー刷新は<strong>やらないことに決まった</strong>」と書けば、その話題は見立てから外し、外したことを明示します。
+    読み取りが違っていれば、そう言えばやり直します —— <strong>どの表現からそう読んだかを毎回併記する</strong>のはそのためです。
+  </div>
+</section>
+
+<section>
+  <h2>手でやると面倒なところを引き受ける</h2>
+  <p class="sub">TOGAF の実務上の問題は「分厚い・抽象的・文書中心で、結局いま何をすればいいか分からない」ことです。そこを狙っています。</p>
+
+  <div class="grid">
+    <div class="cell">
+      <h3>関係者の利害の衝突を見つける</h3>
+      <p>営業本部長「早く見積を出したい」と生産管理部長「確定してから出したい」を、<strong>根拠にした関心事つきで</strong>対立として挙げます。争点・放置したらどうなるか・いつ誰が裁くかまで返します。見つからないときは捏造せず「検出できなかった」と言い、手で見る観点を示します。</p>
+      <span class="tool">stakeholder_matrix</span>
+    </div>
+    <div class="cell">
+      <h3>手元の資料をそのまま入力に</h3>
+      <p>報告書・台帳・指摘一覧から、リスク・関係者・要件・アクションを<strong>出典行番号つき</strong>で抽出します。2 段組の PDF で行が文の途中から切れていれば、繋いでから判定し、繋げない断片は件数を報告して外します。</p>
+      <span class="tool">ingest_document · extract_from_document</span>
+    </div>
+    <div class="cell">
+      <h3>人が手で照合していた食い違いを機械が拾う</h3>
+      <p>同じ対象に違う数値、同じ組織の別表記、揃っていない単位、出典の無い項目。実文書では「101,800 名」と「12 万人」を差 15.2% として、「670 名」と「670 名以上」を同じ数の別表現として指摘しました。<strong>断定はせず、確認してくださいの形で返します。</strong></p>
+      <span class="tool">inspect_findings</span>
+    </div>
+    <div class="cell">
+      <h3>どの記述が未確認かを、配った資料でも示す</h3>
+      <p>すべての項目に出典と確度(記載あり / 推測 / 出所不明)が付きます。印刷して配られる資料にも列として出るので、<strong>会話の外に出たあとも、どこが裏取り済みかが分かります。</strong></p>
+      <span class="tool">export_report</span>
+    </div>
+    <div class="cell">
+      <h3>図はそのまま貼れば絵になる</h3>
+      <p>能力マップ、バリューストリーム、ADM サイクル、ロードマップのガント、C4 コンテキスト図を Mermaid で返します。GitHub や Issue にそのまま貼れます。ArchiMate は Archi 取り込み用の CSV / Open Exchange XML で書き出せます。</p>
+      <span class="tool">diagram_capability_map · export_archimate_csv</span>
+    </div>
+    <div class="cell">
+      <h3>ブラウザで常時開いておける</h3>
+      <p>案件を更新するたびに <strong>SSE で画面が更新されます</strong>。四半期ロードマップ、リスクのヒートマップ、印刷用 CSS、ダークモード。PDF や画像を渡すのが面倒なときは、ブラウザに投げて Claude に読ませる入口もあります(任意)。</p>
+      <span class="tool">open_dashboard · open_start</span>
+    </div>
+  </div>
+
+  <figure>
+    <img src="./pic/site/dashboard.jpg" alt="ブラウザのダッシュボード。進捗サマリ、ADM 10 フェーズの進捗、四半期ロードマップのタイムラインが並んでいる">
+    <figcaption>ダッシュボードの実画面。headless で撮影した実データで、合成ではありません。</figcaption>
+  </figure>
+  <figure>
+    <img src="./pic/site/roadmap.jpg" alt="四半期ロードマップのタイムライン。作業パッケージのバーと移行アーキテクチャの縦線。単独稼働できない移行状態は赤で示される">
+    <figcaption>四半期ロードマップ。<strong>単独で稼働できない移行状態は赤</strong>で出ます —— 途中で止まれない計画を、図の側から指摘します。</figcaption>
+  </figure>
+</section>
+
+<section>
+  <h2>入れかた</h2>
+  <p class="sub">ツール名を覚える必要はありません。Claude に頼むところから始められます。</p>
+  <div class="say">「<strong>github.com/Waganawa-Megumin/togaf10_EAP_MCP を clone して、MCP サーバーとして登録して</strong>」</div>
+  <p class="sub" style="margin:.2rem 0 1.4rem">自分で入れる場合はこれだけです。</p>
+<pre><span class="c"># clone してビルド</span>
+git clone https://github.com/Waganawa-Megumin/togaf10_EAP_MCP.git
+cd togaf10_EAP_MCP &amp;&amp; npm install &amp;&amp; npm run build
+
+<span class="c"># Claude Code に登録</span>
+claude mcp add togaf-eap -- node "$PWD/dist/index.js"</pre>
+  <p>あとは話しかけるだけです。</p>
+  <div class="say">「うちの基幹システム、どこから手を付ければいいか相談に乗って」</div>
+  <div class="say">「この報告書を読んで、リスクと関係者を案件に登録して」</div>
+  <div class="say">「来週の経営会議で 1 枚で説明したい。何を載せる?」</div>
+</section>
+
+<section>
+  <h2>いまの状態</h2>
+  <p class="sub">13 人のペルソナが実際に使い、実在の公開文書 32 ページで評価した結果を反映しています。</p>
+  <div class="stats">
+    <div class="stat"><b>75</b><span>ツール</span></div>
+    <div class="stat"><b>556</b><span>テスト</span></div>
+    <div class="stat"><b>140</b><span>スモークチェック</span></div>
+    <div class="stat"><b>10</b><span>ADM フェーズ</span></div>
+    <div class="stat"><b>21</b><span>成果物(雛形つき)</span></div>
+    <div class="stat"><b>7</b><span>業界別の能力セット</span></div>
+  </div>
+</section>
+
+<section>
+  <div class="honest">
+    <h2>このツールがやらないこと</h2>
+    <p class="sub">推測で埋めるより、読み取れないと言うほうが役に立つ、という方針で作っています。</p>
+    <ul>
+      <li><b>書かれていないことを、書いてあるかのように出しません。</b>「投資額はこの資料からは読み取れない」と伝えれば、金額の話は組み立てません。以前は組み立ててしまい、経営層向けの説明の冒頭に存在しない桁を据えていました。</li>
+      <li><b>出所不明を「記載あり」として記録できません。</b>出典が空のまま「原文にそう書いてある」と宣言しようとすると、保存が止まります。</li>
+      <li><b>データが無いことを根拠に褒めません。</b>期限が 1 件も設定されていない案件に「期限が守られている」とは言いません。全項目が推測のままなら、褒めずに「まだ裏が取れていない」と伝えます。</li>
+      <li><b>TOGAF の原文を持っていません。</b>収録しているのは名称・レイヤ構成・マトリクスの軸といった事実情報と、完全に独自の要約だけです。正確な原文が要る場面では一次情報の当たり先を返します。</li>
+      <li><b>文書の読解は Claude に任せます。</b>このサーバーは LLM の中で動きます。会話全体を読んでいる側に読解で勝てる道理がないので、サーバーは覚える・型に入れる・描く・書き出す・機械的に検査する・止めるほうを担います。</li>
+    </ul>
+  </div>
+</section>
+
+<footer>
+  <p>
+    <a href="https://github.com/Waganawa-Megumin/togaf10_EAP_MCP">GitHub</a> ·
+    <a href="https://github.com/Waganawa-Megumin/togaf10_EAP_MCP/blob/HEAD/docs/GETTING-STARTED.md">はじめかた</a> ·
+    <a href="https://github.com/Waganawa-Megumin/togaf10_EAP_MCP/blob/HEAD/docs/EXAMPLES.md">実際の出力例</a> ·
+    <a href="https://github.com/Waganawa-Megumin/togaf10_EAP_MCP/blob/HEAD/docs/ARCHITECTURE.md">アーキテクチャ</a>
+  </p>
+  <p>
+    ライセンスは<strong>個人利用のみ・AI 学習禁止</strong>です。業務でお使いになる前に
+    <a href="https://github.com/Waganawa-Megumin/togaf10_EAP_MCP/blob/HEAD/LICENSE.md">LICENSE.md</a> をご確認ください。
+  </p>
+  <p>
+    TOGAF® および ArchiMate® は The Open Group、SABSA® は The SABSA Institute、
+    BIZBOK® は Business Architecture Guild の登録商標です。
+    本プロジェクトは非公式であり、これらの団体とは一切関係がありません。
+  </p>
+  <p class="kofi">
+    ☕ このツールでステークホルダー表を作る午後が浮いたなら、<a href="https://ko-fi.com/shonanboyeah">Ko-fi</a> で開発を応援できます(もちろん任意です)。
+  </p>
+</footer>
+
+</div>
+</body>
+</html>
